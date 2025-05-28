@@ -65,14 +65,17 @@ public:
     bool is_vlan_member(uint16_t port_id, uint16_t vlan_id) const;
     bool add_vlan_member(uint16_t port_id, uint16_t vlan_id); // Makes port member of vlan (for trunk)
     bool remove_vlan_member(uint16_t port_id, uint16_t vlan_id); // Removes vlan from port (for trunk)
-    
-    // Create/delete VLANs globally (optional, VLANs often exist implicitly if used in configs)
-    // bool create_vlan(uint16_t vlan_id);
+
+    // Create/delete VLANs globally
+    bool create_vlan(uint16_t vlan_id, const std::string& name = "");
     // bool delete_vlan(uint16_t vlan_id);
     // std::unordered_set<uint16_t> get_all_vlans() const;
 
+    // Port configuration overload
+    bool configure_port(uint16_t port_id, PortType type, uint16_t vlan_id);
 
 private:
+    // std::unordered_map<uint16_t, std::string> vlan_names_; // VLAN names storage - not added in this step
     std::unordered_map<uint16_t, PortConfig> port_configurations_;
     // std::unordered_set<uint16_t> known_vlans_; // Optional: to keep track of all configured VLANs
     mutable std::mutex vlan_mutex_; // To protect access to configurations

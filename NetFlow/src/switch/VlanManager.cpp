@@ -32,6 +32,49 @@ bool VlanManager::configure_port(uint16_t port_id, const PortConfig& config) {
     return true;
 }
 
+// New configure_port overload
+bool VlanManager::configure_port(uint16_t port_id, PortType type, uint16_t vlan_id) {
+    PortConfig config_obj; // Changed name from 'config' to 'config_obj' to avoid conflict with VlanManager::PortConfig struct
+    config_obj.type = type;
+
+    if (type == PortType::ACCESS) {
+        if (vlan_id == 0 || vlan_id > MAX_VLAN_ID) {
+            // std::cerr << "Error: Invalid VLAN ID " << vlan_id << " for ACCESS port " << port_id << std::endl;
+            return false; 
+        }
+        config_obj.access_vlan_id = vlan_id;
+        // For ACCESS type, allowed_vlans is implicitly just the access_vlan_id.
+        // The main configure_port will handle this interpretation if needed, or it's handled by logic using the config.
+    } else if (type == PortType::TRUNK) {
+        // If vlan_id is 0 for TRUNK, it implies no specific single native VLAN is being set by this simplified call.
+        // It will use the default native_vlan_id (e.g., DEFAULT_VLAN_ID) from PortConfig's constructor.
+        // All VLANs are typically allowed on a trunk by default unless specified.
+        if (vlan_id != 0) { // If a specific VLAN ID is provided
+            if (vlan_id > MAX_VLAN_ID) {
+                // std::cerr << "Error: Invalid VLAN ID " << vlan_id << " for TRUNK port " << port_id << std::endl;
+                return false;
+            }
+            // This overload can interpret a non-zero vlan_id for a TRUNK as setting it as the native VLAN.
+            config_obj.native_vlan_id = vlan_id; 
+            config_obj.allowed_vlans.insert(vlan_id); // And allow it on the trunk.
+        } else {
+            // native_vlan_id will remain default (e.g. 1) from PortConfig constructor.
+            // allowed_vlans remains empty (meaning all allowed by default).
+        }
+    } else if (type == PortType::NATIVE_VLAN) {
+        if (vlan_id == 0 || vlan_id > MAX_VLAN_ID) {
+            // std::cerr << "Error: Invalid NATIVE VLAN ID " << vlan_id << " for port " << port_id << std::endl;
+            return false;
+        }
+        config_obj.native_vlan_id = vlan_id;
+        config_obj.allowed_vlans.insert(vlan_id); // Native VLAN is implicitly allowed.
+    } else {
+        // std::cerr << "Error: Unknown port type for port " << port_id << std::endl;
+        return false; // Unknown port type
+    }
+    return configure_port(port_id, config_obj); // Call the original method with the constructed PortConfig
+}
+
 const VlanManager::PortConfig* VlanManager::get_port_config(uint16_t port_id) const {
     std::lock_guard<std::mutex> lock(vlan_mutex_);
     auto it = port_configurations_.find(port_id);
@@ -72,10 +115,11 @@ uint16_t VlanManager::process_ingress(Packet& pkt, uint16_t port_id) {
                 }
             } else {
                 // Untagged frame on access port, tag it with the access VLAN ID.
-                // The Packet::push_vlan is simplified, assumes TPID 0x8100
+                // The Packet::push_vlan takes tci_val_host_order.
+                // TPID (0x8100) is handled internally by Packet::push_vlan.
                 // TCI: Priority can be 0, DEI 0, VID is access_vlan_id
                 uint16_t tci = config.access_vlan_id; // PCP=0, DEI=0
-                if (!pkt.push_vlan(0x8100, tci)) {
+                if (!pkt.push_vlan(tci)) {
                     // std::cerr << "Ingress Error: Failed to push VLAN tag on port " << port_id << std::endl;
                     return VLAN_DROP; // Failed to add tag
                 }
@@ -120,7 +164,7 @@ uint16_t VlanManager::process_ingress(Packet& pkt, uint16_t port_id) {
             } else { // Untagged frame
                 // Tag with native VLAN ID.
                 uint16_t tci = config.native_vlan_id; // PCP=0, DEI=0
-                if (!pkt.push_vlan(0x8100, tci)) {
+                if (!pkt.push_vlan(tci)) {
                     // std::cerr << "Ingress Error: Failed to push native VLAN tag on port " << port_id << std::endl;
                     return VLAN_DROP;
                 }
@@ -182,7 +226,7 @@ bool VlanManager::process_egress(Packet& pkt, uint16_t port_id, uint16_t pkt_vla
                  // Assuming ingress ensures packets are tagged if they belong to a VLAN.
                  // Let's try to tag it if it's not, using pkt_vlan_id.
                 uint16_t tci = pkt_vlan_id; // PCP=0, DEI=0
-                if (!pkt.push_vlan(0x8100, tci)) {
+                if (!pkt.push_vlan(tci)) {
                     // std::cerr << "Egress Error: Failed to push VLAN tag on trunk port " << port_id << std::endl;
                     return false;
                 }
@@ -209,7 +253,7 @@ bool VlanManager::process_egress(Packet& pkt, uint16_t port_id, uint16_t pkt_vla
             } else { // For other VLANs
                  if (!packet_is_currently_tagged && pkt_vlan_id != 0) { // Should be tagged
                     uint16_t tci = pkt_vlan_id; // PCP=0, DEI=0
-                    if (!pkt.push_vlan(0x8100, tci)) {
+                    if (!pkt.push_vlan(tci)) {
                         // std::cerr << "Egress Error: Failed to push VLAN tag on trunk port " << port_id << " for VLAN " << pkt_vlan_id << std::endl;
                         return false;
                     }
@@ -273,6 +317,22 @@ bool VlanManager::add_vlan_member(uint16_t port_id, uint16_t vlan_id) {
     // std::cerr << "VlanManager Warning: Cannot add VLAN member to port " << port_id 
     //           << " as it's not a TRUNK or NATIVE_VLAN type." << std::endl;
     return false; // Not a trunk port
+}
+
+// New create_vlan implementation (stub)
+bool VlanManager::create_vlan(uint16_t vlan_id, const std::string& name) {
+    if (vlan_id == 0 || vlan_id > MAX_VLAN_ID) {
+        // std::cerr << "Error: Invalid VLAN ID " << vlan_id << " for creation." << std::endl;
+        return false;
+    }
+    // Name parameter is ignored in this stub implementation as vlan_names_ is not used.
+    // std::cout << "VLAN " << vlan_id << (name.empty() ? "" : " (Name: " + name + ")") 
+    //           << " acknowledged/created (stub)." << std::endl;
+    
+    // Since VLANs are often implicitly "known" when used in port configs,
+    // and we are not using known_vlans_ or vlan_names_ in this step,
+    // we just validate the ID and return true.
+    return true; 
 }
 
 bool VlanManager::remove_vlan_member(uint16_t port_id, uint16_t vlan_id) {

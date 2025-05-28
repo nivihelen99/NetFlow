@@ -2,69 +2,59 @@
 #define NETFLOW_PACKET_PACKET_H
 
 #include "netflow/core/PacketBuffer.h"
-#include <cstdint> // For fixed-width integers
-#include <type_traits> // For std::is_base_of, std::enable_if
-#include <array> // For std::array (MACAddress)
+#include "netflow/packet/ethernet.h" // For netflow::packet::EthernetHeader and ethertypes
+#include "netflow/packet/ip.h"       // For netflow::packet::IpHeader and IP protocol numbers
+#include <cstdint>
+#include <array>
+#include <vector> // For methods that might return data as vector
+#include <arpa/inet.h> // For ntohs, htons (used in VlanTag helpers)
 
-// Placeholder for protocol header structures (to be defined in netflow/protocols/)
-// For now, we can define simplified versions here or just forward declare.
+// Define VlanTag, TCPHeader, UDPHeader within netflow::packet namespace
 namespace netflow {
-namespace protocols {
+namespace packet {
 
-// Simplified Ethernet Header structure
-struct EthernetHeader {
-    std::array<uint8_t, 6> dst_mac;
-    std::array<uint8_t, 6> src_mac;
-    uint16_t ethertype;
-    // Not including CRC/FCS here as it's often handled by hardware
-};
-
-// Simplified VLAN Tag structure (802.1Q)
-struct VlanTag {
-    uint16_t tci; // Tag Control Information (PCP:3, DEI:1, VID:12)
-    uint16_t ethertype; // Ethertype of the encapsulated frame
-};
-
-// Simplified IPv4 Header structure
-struct IPv4Header {
-    uint8_t version_ihl; // Version (4 bits) + Internet Header Length (4 bits)
-    uint8_t dscp_ecn;    // Differentiated Services Code Point (6 bits) + Explicit Congestion Notification (2 bits)
-    uint16_t total_length;
-    uint16_t identification;
-    uint16_t flags_fragment_offset; // Flags (3 bits) + Fragment Offset (13 bits)
-    uint8_t ttl;
-    uint8_t protocol;
-    uint16_t header_checksum;
-    uint32_t src_ip;
-    uint32_t dst_ip;
-    // Options would follow if IHL > 5
-};
+// EthernetHeader and IpHeader are now included from their respective files
+// ETHERTYPE_IP, ETHERTYPE_ARP, IPPROTO_ICMP etc are also from those files.
 
 // Simplified TCP Header structure
-struct TCPHeader {
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint32_t seq_number;
-    uint32_t ack_number;
-    uint8_t data_offset_reserved_flags; // Data Offset (4 bits) + Reserved (3 bits) + Flags (NS,CWR,ECE,URG,ACK,PSH,RST,SYN,FIN - 9 bits total, but usually split)
-    uint8_t flags; // Just the flags (FIN, SYN, RST, PSH, ACK, URG, ECE, CWR)
-    uint16_t window_size;
-    uint16_t checksum;
-    uint16_t urgent_pointer;
+struct TcpHeader {
+    uint16_t src_port; // Network byte order
+    uint16_t dst_port; // Network byte order
+    uint32_t seq_number; // Network byte order
+    uint32_t ack_number; // Network byte order
+    uint8_t  data_offset_reserved_flags; // Data Offset (4 bits) + Reserved (3 bits) + NS flag (1 bit)
+    uint8_t  flags; // CWR, ECE, URG, ACK, PSH, RST, SYN, FIN
+    uint16_t window_size; // Network byte order
+    uint16_t checksum;    // Network byte order
+    uint16_t urgent_pointer; // Network byte order
     // Options would follow
-};
+
+    // Helper to get data offset in bytes
+    uint8_t get_data_offset_bytes() const { return (data_offset_reserved_flags >> 4) * 4; }
+} __attribute__((packed));
 
 // Simplified UDP Header structure
-struct UDPHeader {
-    uint16_t src_port;
-    uint16_t dst_port;
-    uint16_t length;
-    uint16_t checksum;
-};
+struct UdpHeader {
+    uint16_t src_port; // Network byte order
+    uint16_t dst_port; // Network byte order
+    uint16_t length;   // Length of UDP header and data, network byte order
+    uint16_t checksum; // Network byte order
+} __attribute__((packed));
 
-// Add IPv6Header later if needed
+// VlanTag structure (802.1Q)
+struct VlanTag {
+    uint16_t tci;      // Tag Control Information (PCP:3, DEI:1, VID:12), network byte order
+    uint16_t ethertype; // Ethertype of the encapsulated frame, network byte order
 
-} // namespace protocols
+    uint16_t get_vlan_id() const { return ntohs(tci) & 0x0FFF; }
+    uint8_t get_priority_code_point() const { return (ntohs(tci) >> 13) & 0x07; }
+    bool get_dei() const { return (ntohs(tci) >> 12) & 0x01; }
+} __attribute__((packed));
+
+// Common TPID for VLAN
+constexpr uint16_t VLAN_TPID = 0x8100;
+
+} // namespace packet
 } // namespace netflow
 
 
@@ -73,7 +63,6 @@ public:
     // Constructor: Takes ownership of a PacketBuffer
     explicit Packet(PacketBuffer* buf);
     // Constructor: From raw data (copies data into a new internal PacketBuffer)
-    // This might be used for testing or creating packets from scratch.
     Packet(const void* data, size_t len, size_t buffer_size_to_alloc = 2048);
 
     // Destructor
@@ -89,60 +78,68 @@ public:
     // Set packet length (e.g., after encapsulation/decapsulation)
     void set_length(size_t len);
 
-    // Template-based header access
+    // Generic header access (use with caution, prefer specific accessors)
     template <typename HeaderType>
     HeaderType* get_header(size_t offset = 0) const {
-        // Basic check, could be more robust (e.g. checking if offset + sizeof(HeaderType) <= length())
-        if (offset + sizeof(HeaderType) > length()) {
+        if (!head_data_ptr_ || offset + sizeof(HeaderType) > current_length_) {
             return nullptr; 
         }
-        return reinterpret_cast<HeaderType*>(head() + offset);
+        return reinterpret_cast<HeaderType*>(head_data_ptr_ + offset);
     }
 
-    // Direct accessors for common headers (assuming fixed offsets for simplicity here)
-    // A more robust implementation would parse and store offsets.
-    netflow::protocols::EthernetHeader* ethernet(size_t offset = 0) const;
-    netflow::protocols::VlanTag* vlan(size_t offset = 12) const; // Offset after MACs, before ethertype if no VLAN
-    netflow::protocols::IPv4Header* ipv4(size_t offset = 14) const; // Default offset after Ethernet
-    // netflow::protocols::IPv6Header* ipv6(size_t offset = 14) const; // Placeholder
-    netflow::protocols::TCPHeader* tcp(size_t offset = 34) const;   // Default offset after Eth+IPv4 (20B)
-    netflow::protocols::UDPHeader* udp(size_t offset = 34) const;   // Default offset after Eth+IPv4 (20B)
+    // Specific header accessors
+    netflow::packet::EthernetHeader* ethernet() const;
+    netflow::packet::VlanTag* vlan_tag_header() const; // Returns pointer to VLAN tag if present
+    netflow::packet::IpHeader* ipv4() const;
+    // netflow::packet::ArpHeader* arp() const; // Would require including arp.h
+    netflow::packet::TcpHeader* tcp() const;
+    netflow::packet::UdpHeader* udp() const;
+    // netflow::protocols::icmp::IcmpHeader* icmp() const; // Would require including icmp.h
 
-    // Layer 2 specific methods
-    bool has_vlan() const; // This would require parsing to be accurate
-    uint16_t vlan_id() const;
-    uint8_t vlan_priority() const;
+    // L2 information
+    bool has_vlan() const;
+    uint16_t vlan_id() const; // Returns 0 if no VLAN
+    uint8_t vlan_priority() const; // Returns 0 if no VLAN
     std::array<uint8_t, 6> src_mac() const;
     std::array<uint8_t, 6> dst_mac() const;
+    uint16_t get_actual_ethertype() const; // Ethertype after VLAN tag (if any)
+
+    // L3 information (IPv4 specific for now)
+    uint32_t get_src_ip() const; // Returns 0 if not IPv4
+    uint32_t get_dst_ip() const; // Returns 0 if not IPv4
+    uint8_t get_ip_protocol() const; // Returns 0 if not IPv4
+
+    // L4 information
+    uint16_t get_src_port() const; // Returns 0 if not TCP/UDP or no L4 info
+    uint16_t get_dst_port() const; // Returns 0 if not TCP/UDP or no L4 info
+
 
     // Packet manipulation methods
     bool set_dst_mac(const std::array<uint8_t, 6>& new_dst_mac);
-    // push_vlan and pop_vlan are complex as they modify packet structure and length
-    // These would require careful buffer management (checking space, moving data)
-    bool push_vlan(uint16_t tpid, uint16_t tci); // TPID (e.g. 0x8100), TCI (PCP, DEI, VID)
+    bool set_src_mac(const std::array<uint8_t, 6>& new_src_mac);
+    
+    // push_vlan and pop_vlan are complex: they modify packet structure and length.
+    // These require careful buffer management (checking space, moving data).
+    bool push_vlan(uint16_t tci_val_host_order); // TPID is standard 0x8100
     bool pop_vlan();
-    void update_checksums(); // Placeholder for checksum recalculation
-
-    // Methods to adjust packet data pointers (e.g., after adding/removing headers)
-    // void* push(size_t len); // Add data to the beginning, returns pointer to new start
-    // void* pull(size_t len); // Remove data from the beginning, returns pointer to old start (now invalid)
-    // void* put(size_t len);  // Add data to the end, returns pointer to where new data was added
-    // void* trim(size_t len); // Remove data from the end
+    
+    void update_checksums(); // Placeholder for general checksum recalculation
+    void update_ip_checksum(); // Specifically for IPv4 header checksum
 
 private:
     PacketBuffer* buffer_;      // Packet holds a reference to a PacketBuffer
     unsigned char* head_data_ptr_; // Pointer to the start of packet data within the buffer_
     size_t current_length_;   // Current length of the packet data
-
-    // Helper to manage buffer ownership. If true, this Packet object created and owns the buffer.
     bool owns_buffer_; 
 
-    // Internal offsets for known headers (would be populated during parsing)
-    // For simplicity, we are using fixed offsets in direct accessors for now.
-    // intptr_t l2_offset_ = 0;
-    // intptr_t l3_offset_ = -1;
-    // intptr_t l4_offset_ = -1;
-    // void parse_packet(); // A method to parse and identify header offsets
+    // Parsed offsets and information
+    // intptr_t l2_offset_ = 0; // Ethernet header is assumed at offset 0 from head_data_ptr_
+    intptr_t l3_offset_ = -1; // Offset to L3 header (IP or ARP) from start of head_data_ptr_
+    intptr_t l4_offset_ = -1; // Offset to L4 header (TCP, UDP, ICMP) from start of head_data_ptr_
+    uint16_t actual_ethertype_ = 0; // Ethertype after potentially stripping VLAN tag(s), host byte order
+    bool has_vlan_tag_ = false;
+
+    void parse_packet(); // Internal method to parse headers and set offsets
 };
 
 #endif // NETFLOW_PACKET_PACKET_H

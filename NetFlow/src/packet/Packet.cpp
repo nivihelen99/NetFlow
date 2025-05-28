@@ -1,317 +1,480 @@
-#include "netflow/packet/Packet.h"
-#include <cstring> // For memcpy
-#include <stdexcept> // For std::runtime_error
-#include <iostream>  // For debug/error messages
-#include <arpa/inet.h> // For ntohs, htons (if doing checksums or multi-byte fields)
+#include "netflow/packet/Packet.h" // Already includes PacketBuffer, ethernet.h, ip.h, VlanTag, TcpHeader, UdpHeader
+#include "netflow/protocols/arp.h" // For ArpHeader, needed for parsing, specifically its size
+#include <cstring>                 // For memcpy, memmove
+#include <arpa/inet.h>             // For ntohs, htons, ntohl, htonl
+#include <iostream>                // For debugging (optional, can be removed for production)
+#include <algorithm>               // For std::max
 
-// --- Packet Implementation ---
+// Packet class is in global namespace as per Packet.h
 
 Packet::Packet(PacketBuffer* buf)
-    : buffer_(buf), owns_buffer_(false) {
-    if (!buffer_) {
-        throw std::runtime_error("PacketBuffer cannot be null for Packet construction.");
-    }
-    // This packet uses the provided buffer. Increment its ref count.
-    buffer_->ref(); 
-    head_data_ptr_ = static_cast<unsigned char*>(buffer_->data());
-    current_length_ = buffer_->data_len(); 
-    // In a real scenario, head_data_ptr_ might be offset if buffer has headroom.
-    // And current_length would be the actual packet data length, not necessarily buffer's full data_len.
+    : buffer_(buf),
+      head_data_ptr_(nullptr),
+      current_length_(0),
+      owns_buffer_(false),
+      l3_offset_(-1),
+      l4_offset_(-1),
+      actual_ethertype_(0),
+      has_vlan_tag_(false) {
+  if (buffer_ && buffer_->data()) { // Ensure buffer and its data are valid
+    head_data_ptr_ = reinterpret_cast<unsigned char*>(buffer_->data());
+    current_length_ = buffer_->data_len();
+    parse_packet();
+  } else {
+    // Handle null or invalid buffer case: Packet remains in a "null" or "empty" state.
+    buffer_ = nullptr; // Ensure buffer_ is null if it was invalid.
+    // All other members are already initialized to a safe state.
+    // std::cerr << "Packet Warning: Constructed with null or invalid PacketBuffer." << std::endl;
+  }
 }
 
 Packet::Packet(const void* data, size_t len, size_t buffer_size_to_alloc)
-    : buffer_(nullptr), owns_buffer_(true) {
-    if (!data || len == 0) {
-        throw std::runtime_error("Invalid data or length for Packet construction from raw data.");
+    : buffer_(nullptr), 
+      head_data_ptr_(nullptr),
+      current_length_(len),
+      owns_buffer_(true), // This constructor owns the buffer
+      l3_offset_(-1),
+      l4_offset_(-1),
+      actual_ethertype_(0),
+      has_vlan_tag_(false) {
+  if (!data && len > 0) {
+      // std::cerr << "Packet Error: Constructed with non-zero length but null data pointer." << std::endl;
+      current_length_ = 0; // Correct the state to be consistent.
+      // Buffer will be allocated below, but it will be empty.
+  }
+  
+  size_t alloc_size = std::max(len, buffer_size_to_alloc);
+  // Ensure a minimum allocation size if len and buffer_size_to_alloc are both 0, to avoid zero-size new.
+  if (alloc_size == 0) alloc_size = 1; 
+
+  buffer_ = new PacketBuffer(alloc_size);
+  if (buffer_ && buffer_->data()) { // Check if buffer allocation was successful
+    head_data_ptr_ = reinterpret_cast<unsigned char*>(buffer_->data());
+    if (data && current_length_ > 0) { // current_length_ might have been set to 0 if data was null
+        std::memcpy(head_data_ptr_, data, current_length_);
     }
-    size_t alloc_size = (buffer_size_to_alloc < len) ? len : buffer_size_to_alloc;
-    if (alloc_size < 64) alloc_size = 64; // Minimum typical buffer size
-
-    // Create and manage its own PacketBuffer
-    // The PacketBuffer created here is assumed to be single-use for this packet,
-    // so its ref_count will be 1 (held by this Packet object implicitly).
-    // If this PacketBuffer were to be shared, its ref() would need to be called.
-    buffer_ = new PacketBuffer(alloc_size); // No NUMA node specified for this simple case
-    // buffer_->ref(); // Not strictly needed if only this Packet uses it and deletes it.
-
-    if (len > buffer_->size()) {
-        delete buffer_; // Clean up allocated buffer
-        throw std::runtime_error("Data length exceeds allocated buffer size in Packet constructor.");
-    }
-    
-    std::memcpy(buffer_->data(), data, len);
-    buffer_->set_data_len(len);
-
-    head_data_ptr_ = static_cast<unsigned char*>(buffer_->data());
-    current_length_ = len;
+    buffer_->set_data_len(current_length_);
+    parse_packet();
+  } else {
+      // std::cerr << "Packet Error: Buffer allocation failed in constructor." << std::endl;
+      if(buffer_) {
+          delete buffer_;
+          buffer_ = nullptr;
+      }
+      owns_buffer_ = false; 
+      current_length_ = 0; 
+      head_data_ptr_ = nullptr;
+  }
 }
-
 
 Packet::~Packet() {
-    if (buffer_) {
-        if (owns_buffer_) {
-            delete buffer_; // This Packet created and owns the buffer
-        } else {
-            buffer_->unref(); // Release the reference to the shared buffer
-        }
-        buffer_ = nullptr;
+  if (owns_buffer_ && buffer_) {
+    delete buffer_;
+    buffer_ = nullptr;
+  }
+}
+
+void Packet::parse_packet() {
+  // Reset parsed state
+  l3_offset_ = -1;
+  l4_offset_ = -1;
+  actual_ethertype_ = 0;
+  has_vlan_tag_ = false;
+
+  if (!head_data_ptr_ || current_length_ < sizeof(netflow::packet::EthernetHeader)) {
+    return; // Not enough data for even an Ethernet header
+  }
+
+  netflow::packet::EthernetHeader* eth_h = 
+      reinterpret_cast<netflow::packet::EthernetHeader*>(head_data_ptr_);
+  
+  uint16_t current_ethertype_net = eth_h->type; // Network byte order
+  size_t current_offset = sizeof(netflow::packet::EthernetHeader);
+
+  if (ntohs(current_ethertype_net) == netflow::packet::VLAN_TPID) {
+    if (current_length_ < current_offset + sizeof(netflow::packet::VlanTag)) {
+      return; // Not enough data for VLAN tag
     }
+    has_vlan_tag_ = true;
+    netflow::packet::VlanTag* vlan_h = 
+        reinterpret_cast<netflow::packet::VlanTag*>(head_data_ptr_ + current_offset);
+    current_ethertype_net = vlan_h->ethertype; 
+    current_offset += sizeof(netflow::packet::VlanTag);
+  }
+  
+  actual_ethertype_ = ntohs(current_ethertype_net); 
+  l3_offset_ = current_offset; 
+
+  if (actual_ethertype_ == netflow::packet::ETHERTYPE_IP) {
+    if (current_length_ < static_cast<size_t>(l3_offset_) + sizeof(netflow::packet::IpHeader)) { // Min IP header size
+      l3_offset_ = -1; 
+      return;
+    }
+    netflow::packet::IpHeader* ip_h = 
+        reinterpret_cast<netflow::packet::IpHeader*>(head_data_ptr_ + l3_offset_);
+
+    if (ip_h->version != 4) { 
+        l3_offset_ = -1; 
+        return;
+    }
+    
+    uint8_t ip_header_len_bytes = ip_h->ihl * 4; 
+    if (ip_header_len_bytes < sizeof(netflow::packet::IpHeader)) { 
+        l3_offset_ = -1; 
+        return;
+    }
+
+    if (current_length_ < static_cast<size_t>(l3_offset_) + ip_header_len_bytes) {
+      l3_offset_ = -1; 
+      return;
+    }
+    
+    l4_offset_ = l3_offset_ + ip_header_len_bytes;
+    
+    // Check against total length field in IP header
+    uint16_t ip_total_len_host = ntohs(ip_h->tot_len);
+    if (current_length_ < static_cast<size_t>(l3_offset_) + ip_total_len_host) {
+        // Packet is truncated compared to what IP header says.
+        // We parsed what we have, but l4_offset might point outside current_length_ 
+        // or to incomplete L4 data if ip_total_len_host was used to determine L4 boundary.
+        // For now, continue parsing based on current_length_ for safety.
+        // If L4 offset is beyond current_length, accessors will fail.
+        if (static_cast<size_t>(l4_offset_) > current_length_) {
+            l4_offset_ = -1; // L4 header cannot start beyond current packet data
+        }
+    }
+
+  } else if (actual_ethertype_ == netflow::packet::ETHERTYPE_ARP) {
+    if (current_length_ < static_cast<size_t>(l3_offset_) + sizeof(netflow::protocols::arp::ArpHeader)) {
+      l3_offset_ = -1; 
+      return;
+    }
+    // ARP does not have an L4, so l4_offset_ remains -1
+  } else {
+    l3_offset_ = -1; // Unknown L3 protocol, cannot proceed further.
+  }
 }
 
-PacketBuffer* Packet::get_buffer() const {
-    return buffer_;
-}
 
-unsigned char* Packet::head() const {
-    // Assuming head_data_ptr_ is always pointing to the start of packet data
-    // in the buffer_.
-    return head_data_ptr_;
-}
-
-size_t Packet::length() const {
-    return current_length_;
-}
+PacketBuffer* Packet::get_buffer() const { return buffer_; }
+unsigned char* Packet::head() const { return head_data_ptr_; }
+size_t Packet::length() const { return current_length_; }
 
 void Packet::set_length(size_t len) {
-    if (buffer_ && len > buffer_->size()) {
-        // Or handle error: throw std::length_error("New packet length exceeds buffer capacity.");
-        // std::cerr << "Error: New packet length " << len << " exceeds buffer capacity " << buffer_->size() << std::endl;
-        current_length_ = buffer_->size(); // Truncate to buffer capacity
-        buffer_->set_data_len(current_length_);
-    } else {
-        current_length_ = len;
-        if (buffer_) {
-            buffer_->set_data_len(current_length_);
-        }
-    }
+  if (buffer_ && len <= buffer_->capacity()) { // Ensure new length is within buffer capacity
+    current_length_ = len;
+    buffer_->set_data_len(len);
+    parse_packet(); // Re-parse with the new length
+  } else if (buffer_ && len > buffer_->capacity()) {
+    // std::cerr << "Packet Error: New length " << len << " exceeds buffer capacity " << buffer_->capacity() << std::endl;
+    // Option: reallocate buffer if owned, or simply fail. For now, fail.
+  } else if (!buffer_) {
+    // std::cerr << "Packet Error: Cannot set length, buffer is null." << std::endl;
+  }
 }
 
-
-// Direct accessors - these are highly simplified and assume fixed offsets
-// A proper implementation would parse the packet to find these offsets.
-netflow::protocols::EthernetHeader* Packet::ethernet(size_t offset) const {
-    return get_header<netflow::protocols::EthernetHeader>(offset);
+netflow::packet::EthernetHeader* Packet::ethernet() const {
+    if (!head_data_ptr_ || current_length_ < sizeof(netflow::packet::EthernetHeader)) return nullptr;
+    // The problem description for Packet.h specified ethernet(size_t offset = 0).
+    // This is unusual for a specific header accessor. Assuming offset is always 0 for the primary eth header.
+    return reinterpret_cast<netflow::packet::EthernetHeader*>(head_data_ptr_);
 }
 
-netflow::protocols::VlanTag* Packet::vlan(size_t offset) const {
-    // Basic check for ethertype indicating VLAN (0x8100)
-    // This is still simplified as there could be QinQ.
-    // A full parser would be needed.
-    auto eth_hdr = ethernet();
-    if (eth_hdr && ntohs(eth_hdr->ethertype) == 0x8100) {
-         // The 'offset' parameter here is relative to packet start.
-         // If ethertype is 0x8100, the VLAN tag starts right after src_mac/dst_mac/ethertype_field_for_vlan
-         // So, offset should be where the TPID (0x8100) is found.
-        return get_header<netflow::protocols::VlanTag>(offset);
+netflow::packet::VlanTag* Packet::vlan_tag_header() const {
+    if (!has_vlan_tag_ || !head_data_ptr_ || 
+        current_length_ < (sizeof(netflow::packet::EthernetHeader) + sizeof(netflow::packet::VlanTag))) {
+        return nullptr;
     }
-    return nullptr;
+    return reinterpret_cast<netflow::packet::VlanTag*>(head_data_ptr_ + sizeof(netflow::packet::EthernetHeader));
 }
 
-netflow::protocols::IPv4Header* Packet::ipv4(size_t offset) const {
-    // This needs to check ethertype to be robust
-    auto eth_hdr = ethernet();
-    if (!eth_hdr) return nullptr;
-
-    uint16_t ethertype = ntohs(eth_hdr->ethertype);
-    size_t current_offset = sizeof(netflow::protocols::EthernetHeader);
-
-    if (ethertype == 0x8100) { // VLAN
-        // If default offset is used for vlan(), it assumes vlan tag is at offset 12.
-        // We should use the current_offset to locate the VLAN tag.
-        auto vlan_hdr = get_header<netflow::protocols::VlanTag>(current_offset);
-        if (!vlan_hdr) return nullptr;
-        ethertype = ntohs(vlan_hdr->ethertype);
-        current_offset += sizeof(netflow::protocols::VlanTag);
+netflow::packet::IpHeader* Packet::ipv4() const {
+    if (l3_offset_ == -1 || actual_ethertype_ != netflow::packet::ETHERTYPE_IP || !head_data_ptr_) {
+        return nullptr;
     }
-
-    if (ethertype == 0x0800) { // IPv4
-        return get_header<netflow::protocols::IPv4Header>(current_offset);
+    // Check if minimal IpHeader is present
+    if (current_length_ < static_cast<size_t>(l3_offset_) + sizeof(netflow::packet::IpHeader)) { 
+        return nullptr;
     }
-    return nullptr;
+    netflow::packet::IpHeader* ip_h = reinterpret_cast<netflow::packet::IpHeader*>(head_data_ptr_ + l3_offset_);
+    // Check against IHL
+    uint8_t ip_header_len_bytes = ip_h->ihl * 4;
+    if (current_length_ < static_cast<size_t>(l3_offset_) + ip_header_len_bytes) {
+        return nullptr; 
+    }
+    return ip_h;
 }
 
-netflow::protocols::TCPHeader* Packet::tcp(size_t offset) const {
-    auto ip_hdr = ipv4(); // This uses the smart ipv4() which finds its own offset
-    if (ip_hdr && ip_hdr->protocol == 6) { // 6 for TCP
-        // Calculate offset based on IPv4 header length (IHL)
-        size_t ip_header_len = (ip_hdr->version_ihl & 0x0F) * 4;
-        // Find IPv4 header start:
-        unsigned char* ptr = reinterpret_cast<unsigned char*>(ip_hdr);
-        size_t ipv4_start_offset = ptr - head();
-        return get_header<netflow::protocols::TCPHeader>(ipv4_start_offset + ip_header_len);
+netflow::packet::TcpHeader* Packet::tcp() const {
+    auto ip_h = ipv4(); // This already checks l3_offset, ethertype, and basic IP header validity
+    if (!ip_h || ip_h->protocol != netflow::packet::IPPROTO_TCP || l4_offset_ == -1 || !head_data_ptr_) {
+        return nullptr;
     }
-    return nullptr;
+    // Check if minimal TcpHeader is present
+    if (current_length_ < static_cast<size_t>(l4_offset_) + sizeof(netflow::packet::TcpHeader)) { 
+        return nullptr;
+    }
+    netflow::packet::TcpHeader* tcp_h = reinterpret_cast<netflow::packet::TcpHeader*>(head_data_ptr_ + l4_offset_);
+    // Check against data offset
+    uint8_t tcp_header_len_bytes = tcp_h->get_data_offset_bytes();
+    if (current_length_ < static_cast<size_t>(l4_offset_) + tcp_header_len_bytes) {
+        return nullptr; 
+    }
+    return tcp_h;
 }
 
-netflow::protocols::UDPHeader* Packet::udp(size_t offset) const {
-    auto ip_hdr = ipv4(); // This uses the smart ipv4() which finds its own offset
-    if (ip_hdr && ip_hdr->protocol == 17) { // 17 for UDP
-        size_t ip_header_len = (ip_hdr->version_ihl & 0x0F) * 4;
-        unsigned char* ptr = reinterpret_cast<unsigned char*>(ip_hdr);
-        size_t ipv4_start_offset = ptr - head();
-        return get_header<netflow::protocols::UDPHeader>(ipv4_start_offset + ip_header_len);
+netflow::packet::UdpHeader* Packet::udp() const {
+    auto ip_h = ipv4();
+    if (!ip_h || ip_h->protocol != netflow::packet::IPPROTO_UDP || l4_offset_ == -1 || !head_data_ptr_) {
+        return nullptr;
     }
-    return nullptr;
+    if (current_length_ < static_cast<size_t>(l4_offset_) + sizeof(netflow::packet::UdpHeader)) {
+        return nullptr;
+    }
+    return reinterpret_cast<netflow::packet::UdpHeader*>(head_data_ptr_ + l4_offset_);
 }
 
-
-// Layer 2 specific methods
-bool Packet::has_vlan() const {
-    auto eth_hdr = ethernet();
-    if (eth_hdr) {
-        return ntohs(eth_hdr->ethertype) == 0x8100;
-    }
-    return false;
-}
+bool Packet::has_vlan() const { return has_vlan_tag_; }
 
 uint16_t Packet::vlan_id() const {
-    if (has_vlan()) {
-        // Assumes VLAN tag is directly after Ethernet header if ethertype is 0x8100
-        // The VlanTag itself starts *after* the TPID field, which is eth_hdr->ethertype
-        auto vlan_hdr = get_header<netflow::protocols::VlanTag>(sizeof(netflow::protocols::EthernetHeader) - sizeof(uint16_t)); // Offset to start of TCI
-        if (vlan_hdr) { // vlan_hdr now points to where TCI is.
-            return ntohs(vlan_hdr->tci) & 0x0FFF; // Lower 12 bits for VID
-        }
-    }
-    return 0; // Or some indicator of no VLAN ID
+    if (!has_vlan_tag_) return 0;
+    auto vth = vlan_tag_header(); // This already checks length and has_vlan_tag_ implicitly
+    return vth ? vth->get_vlan_id() : 0; 
 }
 
 uint8_t Packet::vlan_priority() const {
-    if (has_vlan()) {
-        auto vlan_hdr = get_header<netflow::protocols::VlanTag>(sizeof(netflow::protocols::EthernetHeader) - sizeof(uint16_t)); // Offset to start of TCI
-        if (vlan_hdr) {
-            return (ntohs(vlan_hdr->tci) >> 13) & 0x07; // Upper 3 bits for PCP
-        }
-    }
-    return 0; // Default priority
+    if (!has_vlan_tag_) return 0;
+    auto vth = vlan_tag_header();
+    return vth ? vth->get_priority_code_point() : 0;
 }
 
 std::array<uint8_t, 6> Packet::src_mac() const {
-    auto eth_hdr = ethernet();
-    if (eth_hdr) {
-        return eth_hdr->src_mac;
-    }
-    return {}; // Return empty or error
+    auto eth_h = ethernet();
+    return eth_h ? eth_h->src_mac : std::array<uint8_t, 6>{};
 }
 
 std::array<uint8_t, 6> Packet::dst_mac() const {
-    auto eth_hdr = ethernet();
-    if (eth_hdr) {
-        return eth_hdr->dst_mac;
-    }
-    return {}; // Return empty or error
+    auto eth_h = ethernet();
+    return eth_h ? eth_h->dest_mac : std::array<uint8_t, 6>{};
 }
 
-// Packet manipulation methods
+uint16_t Packet::get_actual_ethertype() const {
+    return actual_ethertype_; // Already in host byte order from parse_packet()
+}
+
+uint32_t Packet::get_src_ip() const {
+    auto ip_h = ipv4();
+    return ip_h ? ntohl(ip_h->saddr) : 0;
+}
+
+uint32_t Packet::get_dst_ip() const {
+    auto ip_h = ipv4();
+    return ip_h ? ntohl(ip_h->daddr) : 0;
+}
+
+uint8_t Packet::get_ip_protocol() const {
+    auto ip_h = ipv4();
+    return ip_h ? ip_h->protocol : 0;
+}
+
+uint16_t Packet::get_src_port() const {
+    if (auto ip_h = ipv4()) { // Ensure it's an IP packet first
+        if (ip_h->protocol == netflow::packet::IPPROTO_TCP) {
+            if (auto tcp_h = tcp()) return ntohs(tcp_h->src_port);
+        } else if (ip_h->protocol == netflow::packet::IPPROTO_UDP) {
+            if (auto udp_h = udp()) return ntohs(udp_h->src_port);
+        }
+    }
+    return 0;
+}
+
+uint16_t Packet::get_dst_port() const {
+     if (auto ip_h = ipv4()) {
+        if (ip_h->protocol == netflow::packet::IPPROTO_TCP) {
+            if (auto tcp_h = tcp()) return ntohs(tcp_h->dst_port);
+        } else if (ip_h->protocol == netflow::packet::IPPROTO_UDP) {
+            if (auto udp_h = udp()) return ntohs(udp_h->dst_port);
+        }
+    }
+    return 0;
+}
+
 bool Packet::set_dst_mac(const std::array<uint8_t, 6>& new_dst_mac) {
-    auto eth_hdr = ethernet();
-    if (eth_hdr) {
-        eth_hdr->dst_mac = new_dst_mac;
+    auto eth_h = ethernet();
+    if (eth_h) {
+        eth_h->dest_mac = new_dst_mac;
         return true;
     }
     return false;
 }
 
-bool Packet::push_vlan(uint16_t tpid, uint16_t tci) {
-    if (!buffer_ || !head_data_ptr_) return false;
+bool Packet::set_src_mac(const std::array<uint8_t, 6>& new_src_mac) {
+    auto eth_h = ethernet();
+    if (eth_h) {
+        eth_h->src_mac = new_src_mac;
+        return true;
+    }
+    return false;
+}
 
-    auto eth_hdr = ethernet();
-    if (!eth_hdr) return false; 
+void Packet::update_checksums() {
+    // Placeholder: Actual checksum calculation is complex and depends on what changed.
+    // For example, IP checksum needs recalculation if any IP header field changes.
+    // TCP/UDP checksums involve pseudo-header and payload.
+    // std::cout << "Packet::update_checksums() called - NOT IMPLEMENTED" << std::endl;
+}
 
-    size_t vlan_tag_size = sizeof(netflow::protocols::VlanTag);
-    if (current_length_ + vlan_tag_size > buffer_->size() - (head_data_ptr_ - static_cast<unsigned char*>(buffer_->data())) ) {
-        // std::cerr << "Error: Not enough space in buffer to push VLAN tag." << std::endl;
-        return false; 
+void Packet::update_ip_checksum() {
+    netflow::packet::IpHeader* ip_h = ipv4(); // ipv4() gets the IpHeader pointer
+    if (ip_h) {
+        ip_h->check = 0; // Zero out checksum field before calculation
+        // calculate_ip_header_checksum expects a const IpHeader*.
+        // It's okay to cast from non-const to const for this call.
+        ip_h->check = netflow::packet::calculate_ip_header_checksum(static_cast<const netflow::packet::IpHeader*>(ip_h));
+    }
+}
+
+bool Packet::push_vlan(uint16_t tci_val_host_order) {
+    // Pre-conditions:
+    if (has_vlan_tag_) { // No double tagging for now
+        // std::cerr << "Packet Error: push_vlan - Packet already has a VLAN tag." << std::endl;
+        return false;
+    }
+    if (buffer_ == nullptr || head_data_ptr_ == nullptr) {
+        // std::cerr << "Packet Error: push_vlan - Buffer or head_data_ptr is null." << std::endl;
+        return false;
+    }
+    if (current_length_ < sizeof(netflow::packet::EthernetHeader)) {
+        // std::cerr << "Packet Error: push_vlan - Packet too short for Ethernet header." << std::endl;
+        return false;
+    }
+    // Check if there's enough space in the buffer to add a VLAN tag.
+    // buffer_->size() is the total capacity of the underlying PacketBuffer's memory block.
+    if (current_length_ + sizeof(netflow::packet::VlanTag) > buffer_->size()) {
+        // std::cerr << "Packet Error: push_vlan - Not enough space in buffer to add VLAN tag." << std::endl;
+        return false;
     }
 
-    unsigned char* ethertype_field_ptr = reinterpret_cast<unsigned char*>(&eth_hdr->ethertype);
-    uint16_t original_ethertype_value = eth_hdr->ethertype; // Already in network byte order
+    // Logic:
+    netflow::packet::EthernetHeader* eth_hdr = ethernet(); // Should be valid due to checks above
+    if (!eth_hdr) return false; // Should not happen if above checks pass
 
-    // Make space for VLAN tag (TCI + new Ethertype) by shifting data starting from original ethertype
-    // The new VLAN tag (4 bytes) will replace the original ethertype (2 bytes) and add 2 more bytes.
-    // So, we need to shift data by (vlan_tag_size - sizeof(uint16_t)) = 2 bytes.
-    // Actually, we shift the payload that was *after* the original ethertype.
-    // The VLAN TCI and VLAN Ethertype will be inserted. The original eth_hdr->ethertype field becomes the TPID.
+    uint16_t original_ethertype_net = eth_hdr->type; // Already in network byte order
+
+    // Position where VLAN tag starts (this is where the original EtherType was).
+    // offsetof(netflow::packet::EthernetHeader, type) is 12 bytes.
+    unsigned char* vlan_tag_insertion_point = head_data_ptr_ + (2 * 6); // Offset of eth_hdr->type
+
+    // Start of L3 data (payload after original EtherType field in EthernetHeader)
+    unsigned char* l3_data_start = head_data_ptr_ + sizeof(netflow::packet::EthernetHeader);
     
-    unsigned char* payload_start_ptr = ethertype_field_ptr + sizeof(uint16_t);
-    size_t payload_len = current_length_ - (payload_start_ptr - head_data_ptr_);
+    // Length of data to be shifted (everything after the original Ethernet header's src/dst MACs and type field)
+    size_t data_to_shift_len = current_length_ - sizeof(netflow::packet::EthernetHeader);
 
-    // Shift payload to make space for the TCI and the new Ethertype field of the VLAN tag
-    std::memmove(payload_start_ptr + sizeof(netflow::protocols::VlanTag) - sizeof(uint16_t), 
-                   payload_start_ptr, 
-                   payload_len);
+    // Shift L3 data and everything after it to the right by sizeof(VlanTag)
+    // Target: l3_data_start + sizeof(netflow::packet::VlanTag)
+    // Source: l3_data_start
+    // Length: data_to_shift_len
+    // Note: The operation is effectively making space for the VlanTag right after the MAC addresses.
+    // The original eth_hdr->type field will be overwritten by the start of the VlanTag.
+    // So, we shift the content starting from eth_hdr->type.
+    unsigned char* original_ethertype_location = head_data_ptr_ + offsetof(netflow::packet::EthernetHeader, type);
+    size_t actual_data_to_shift_len = current_length_ - offsetof(netflow::packet::EthernetHeader, type);
 
-    // Set TPID
-    eth_hdr->ethertype = htons(tpid);
 
-    // Insert TCI and original Ethertype (which becomes the Ethertype field of the VLAN tag)
-    netflow::protocols::VlanTag* new_vlan_tag_ptr = reinterpret_cast<netflow::protocols::VlanTag*>(ethertype_field_ptr + sizeof(uint16_t));
-    new_vlan_tag_ptr->tci = htons(tci);
-    new_vlan_tag_ptr->ethertype = original_ethertype_value; // original_ethertype_value is already network order
+    if (actual_data_to_shift_len > 0) { // only move if there's something to move
+        memmove(original_ethertype_location + sizeof(netflow::packet::VlanTag), 
+                original_ethertype_location, 
+                actual_data_to_shift_len);
+    }
 
-    current_length_ += (sizeof(netflow::protocols::VlanTag) - sizeof(uint16_t)); // Net addition of 2 bytes
+
+    // Update Ethernet header's EtherType to VLAN TPID
+    eth_hdr->type = htons(netflow::packet::VLAN_TPID);
+
+    // Construct the VLAN tag at vlan_tag_insertion_point (which is now where eth_hdr->type was)
+    // No, vlan_tag_insertion_point should be where the new VlanTag itself starts,
+    // which is right after the MAC addresses. The original eth_hdr->type field is *part* of this.
+    netflow::packet::VlanTag* new_tag = reinterpret_cast<netflow::packet::VlanTag*>(original_ethertype_location);
+    new_tag->tci = htons(tci_val_host_order);
+    new_tag->ethertype = original_ethertype_net; // original_ethertype_net is already network byte order
+
+    // Update packet length
+    current_length_ += sizeof(netflow::packet::VlanTag);
     buffer_->set_data_len(current_length_);
-    // update_checksums(); 
+
+    // Call parse_packet() to update internal offsets and state
+    parse_packet();
+
     return true;
 }
 
 bool Packet::pop_vlan() {
-    if (!has_vlan()) return false;
+    // Pre-conditions:
+    if (!has_vlan_tag_) { // Check internal state from parse_packet
+        // std::cerr << "Packet Error: pop_vlan - Packet does not have a VLAN tag." << std::endl;
+        return false;
+    }
+    if (buffer_ == nullptr || head_data_ptr_ == nullptr) {
+        // std::cerr << "Packet Error: pop_vlan - Buffer or head_data_ptr is null." << std::endl;
+        return false;
+    }
+    // This check also ensures EthernetHeader is present.
+    if (current_length_ < sizeof(netflow::packet::EthernetHeader) + sizeof(netflow::packet::VlanTag)) {
+        // std::cerr << "Packet Error: pop_vlan - Packet too short to contain Ethernet and VLAN header." << std::endl;
+        return false;
+    }
 
-    auto eth_hdr = ethernet();
+    // Logic:
+    netflow::packet::EthernetHeader* eth_hdr = ethernet(); // Should be valid
     if (!eth_hdr) return false;
 
-    // VLAN tag starts right after MACs. eth_hdr->ethertype is the TPID (e.g. 0x8100)
-    // The VlanTag struct (TCI + encapsulated Ethertype) follows the TPID.
-    unsigned char* tpid_ptr = reinterpret_cast<unsigned char*>(&eth_hdr->ethertype);
-    netflow::protocols::VlanTag* vlan_tag_ptr = reinterpret_cast<netflow::protocols::VlanTag*>(tpid_ptr + sizeof(uint16_t));
-    
-    uint16_t encapsulated_ethertype = vlan_tag_ptr->ethertype; // Already network byte order
-
-    // Data to move starts after the full VLAN tag (TPID + TCI + VlanEthertype)
-    unsigned char* data_after_vlan_ptr = reinterpret_cast<unsigned char*>(vlan_tag_ptr) + sizeof(netflow::protocols::VlanTag) - sizeof(uint16_t); // Points after TCI + Vlan Eth
-    data_after_vlan_ptr = tpid_ptr + sizeof(uint16_t) + (sizeof(netflow::protocols::VlanTag) - sizeof(uint16_t)); // Start of payload
-    
-    size_t vlan_header_total_size = sizeof(netflow::protocols::VlanTag); // TPID(2) + TCI(2) = 4 bytes for the actual tag
-                                                                    // but our struct VlanTag is TCI + Ethertype.
-                                                                    // The actual on-wire VLAN tag is 4 bytes.
-                                                                    // Ethertype (TPID) + TCI + Encapsulated Ethertype.
-                                                                    // No, the struct VlanTag is TCI + ethertype. Size 4 bytes.
-                                                                    // The eth_hdr->ethertype is the TPID. This is followed by TCI and then the encapsulated ethertype.
-    
-    unsigned char* start_of_vlan_tag_proper = tpid_ptr + sizeof(uint16_t); // Start of TCI
-    unsigned char* start_of_payload = start_of_vlan_tag_proper + (sizeof(netflow::protocols::VlanTag)); // This is where payload starts, after TCI and encapsulated ethertype
-
-    size_t payload_len = current_length_ - (start_of_payload - head_data_ptr_);
-
-    // Overwrite TPID field with encapsulated ethertype
-    eth_hdr->ethertype = encapsulated_ethertype; // encapsulated_ethertype is already network order
-
-    // Shift payload
-    // Destination: where TCI started (right after the new eth_hdr->ethertype)
-    // Source: start_of_payload
-    std::memmove(tpid_ptr + sizeof(uint16_t), start_of_payload, payload_len);
-
-    current_length_ -= (sizeof(netflow::protocols::VlanTag)); // We remove TCI + encapsulated ethertype (4 bytes)
-    buffer_->set_data_len(current_length_);
-    // update_checksums();
-    return true;
-}
-
-void Packet::update_checksums() {
-    // std::cout << "Packet::update_checksums() called - actual checksum logic not implemented." << std::endl;
-    auto ipv4_hdr = ipv4();
-    if (ipv4_hdr) {
-        ipv4_hdr->header_checksum = 0;
-        uint32_t sum = 0;
-        uint16_t* words = reinterpret_cast<uint16_t*>(ipv4_hdr);
-        size_t header_len_bytes = (ipv4_hdr->version_ihl & 0x0F) * 4;
-        for (size_t i = 0; i < header_len_bytes / 2; ++i) {
-            sum += ntohs(words[i]); 
-        }
-        while (sum >> 16) {
-            sum = (sum & 0xFFFF) + (sum >> 16);
-        }
-        ipv4_hdr->header_checksum = htons(~static_cast<uint16_t>(sum));
+    // vlan_tag_header() relies on parse_packet having run and has_vlan_tag_ being true.
+    // It returns a pointer to the VlanTag struct.
+    netflow::packet::VlanTag* vlan_hdr = vlan_tag_header(); 
+    if (vlan_hdr == nullptr) { // Should not happen if has_vlan_tag_ is true and length checks pass
+        // std::cerr << "Packet Error: pop_vlan - vlan_tag_header returned null despite has_vlan_tag_ being true." << std::endl;
+        // This might indicate an inconsistency or a bug in parse_packet or vlan_tag_header accessor.
+        // For robustness, explicitly re-run parse_packet and try again or just fail.
+        parse_packet(); // Attempt re-parse
+        vlan_hdr = vlan_tag_header();
+        if (vlan_hdr == nullptr) return false;
     }
+
+    uint16_t inner_ethertype_net = vlan_hdr->ethertype; // Already network byte order
+
+    // Start of the VLAN tag (which is where the new EtherType will be written)
+    unsigned char* vlan_tag_start_ptr = reinterpret_cast<unsigned char*>(vlan_hdr);
+    // This is effectively head_data_ptr_ + offsetof(netflow::packet::EthernetHeader, type)
+    // or head_data_ptr_ + 12
+
+    // Start of L3 data (payload after VLAN tag)
+    unsigned char* l3_data_start_ptr = vlan_tag_start_ptr + sizeof(netflow::packet::VlanTag);
+
+    // Length of data to be shifted (everything after the VLAN tag)
+    // (head_data_ptr_ + current_length_) is one byte beyond the end of the packet data.
+    // l3_data_start_ptr points to the first byte of data to be moved.
+    size_t data_to_shift_len = (head_data_ptr_ + current_length_) - l3_data_start_ptr;
+
+    // Shift L3 data to the left by sizeof(VlanTag), overwriting the VLAN tag.
+    // Destination: vlan_tag_start_ptr
+    // Source: l3_data_start_ptr
+    if (data_to_shift_len > 0) { // only move if there's something to move
+         memmove(vlan_tag_start_ptr, l3_data_start_ptr, data_to_shift_len);
+    }
+   
+
+    // Update Ethernet header's EtherType
+    // The vlan_tag_start_ptr is where the old vlan_hdr->tci was.
+    // The eth_hdr->type is at this same location.
+    eth_hdr->type = inner_ethertype_net; // inner_ethertype_net is already network byte order
+
+    // Update packet length
+    current_length_ -= sizeof(netflow::packet::VlanTag);
+    buffer_->set_data_len(current_length_);
+
+    // Call parse_packet() to update internal offsets and state
+    parse_packet();
+
+    return true;
 }
