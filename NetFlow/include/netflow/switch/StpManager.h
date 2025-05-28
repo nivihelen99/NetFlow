@@ -3,10 +3,14 @@
 
 #include "netflow/packet/Packet.h" // For Packet, if BPDUs are parsed/generated as Packet objects
 #include <cstdint>
+#include <array>  // For std::array
 #include <vector>
 #include <unordered_map>
 #include <mutex>
 #include <chrono> // For timers (hello timer, forward delay, max age)
+
+// Define MACAddress type
+using MACAddress = std::array<uint8_t, 6>;
 
 // Define Bridge and Port Identifiers (simplified)
 using BridgeId = uint64_t; // Typically 8 bytes: 2B priority + 6B MAC address
@@ -132,9 +136,12 @@ private:
     bool is_superior_bpdu(const SimpleBpdu& current_bpdu, const SimpleBpdu& new_bpdu, PortId rcv_port) const;
     SimpleBpdu create_bpdu_from_port_info(PortId port_id) const;
 
+public: // Making these public for broader utility, e.g. serialize_simple_bpdu
     // Helper to convert seconds to 1/256th for BPDU fields
     static uint16_t seconds_to_bpdu_time(uint16_t seconds) { return htons(seconds * 256); }
     static uint16_t bpdu_time_to_seconds(uint16_t bpdu_time) { return ntohs(bpdu_time) / 256; }
 };
 
 #endif // NETFLOW_SWITCH_STPMANAGER_H
+
+
