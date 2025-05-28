@@ -102,9 +102,13 @@ int main() {
 
     auto eth_hdr = test_pkt1.ethernet();
     if (eth_hdr) {
-        std::cout << "  Dst MAC: "; print_mac(eth_hdr->dst_mac); std::cout << std::endl;
-        std::cout << "  Src MAC: "; print_mac(eth_hdr->src_mac); std::cout << std::endl;
-        std::cout << "  EtherType: 0x" << std::hex << ntohs(eth_hdr->ethertype) << std::dec << std::endl;
+        MACAddress dst_mac_addr;
+        std::copy(std::begin(eth_hdr->dest_mac), std::end(eth_hdr->dest_mac), dst_mac_addr.begin());
+        std::cout << "  Dst MAC: "; print_mac(dst_mac_addr); std::cout << std::endl;
+        MACAddress src_mac_addr;
+        std::copy(std::begin(eth_hdr->src_mac), std::end(eth_hdr->src_mac), src_mac_addr.begin());
+        std::cout << "  Src MAC: "; print_mac(src_mac_addr); std::cout << std::endl;
+        std::cout << "  EtherType: 0x" << std::hex << ntohs(eth_hdr->type) << std::dec << std::endl;
     }
 
     // 3. Forwarding Database (FDB) Example
@@ -171,7 +175,7 @@ int main() {
     // 5. STP Manager (Minimal Example - Initialization)
     std::cout << "\n[5. STP Manager]" << std::endl;
     StpManager stp_mgr;
-    StpManager::BridgeConfig bridge_stp_cfg;
+    BridgeConfig bridge_stp_cfg;
     // Use a unique MAC for STP Bridge ID for this example if possible
     MACAddress stp_bridge_mac = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
     bridge_stp_cfg.bridge_mac = stp_bridge_mac;
