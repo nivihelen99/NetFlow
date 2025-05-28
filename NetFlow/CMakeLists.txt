@@ -1,25 +1,23 @@
 cmake_minimum_required(VERSION 3.10)
-project(NetFlow LANGUAGES CXX)
+project(NetFlow LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
-# Define include directories
-include_directories(include)
+# Find all source files in the src directory
+file(GLOB_RECURSE NETFLOW_SOURCES src/*.cpp src/*.c)
 
-# Add more build instructions here as the project grows
-# For example, adding executables or libraries:
-# add_executable(netflow_example examples/main.cpp)
-# target_link_libraries(netflow_example PRIVATE NetFlow::core) # Assuming you create a library target
+# Add the NetFlow library
+add_library(NetFlowLib STATIC ${NETFLOW_SOURCES})
 
-# Placeholder for future library targets
-# add_library(NetFlowCore INTERFACE) # Or STATIC/SHARED
-# target_include_directories(NetFlowCore INTERFACE include)
-# if(TARGET NetFlow::core)
-#   target_sources(NetFlow::core INTERFACE
-#       # List header files if it's an INTERFACE library or source files for STATIC/SHARED
-#   )
-# endif()
+# Ensure the include directory is available for header files
+target_include_directories(NetFlowLib PUBLIC include)
+
+# Add executable target for the main example
+add_executable(netflow_example examples/main.cpp)
+
+# Link NetFlowLib to the netflow_example executable
+target_link_libraries(netflow_example PRIVATE NetFlowLib)
 
 # Enable testing with CTest
 enable_testing()
@@ -28,18 +26,18 @@ enable_testing()
 # add_test(NAME UnitTests COMMAND YourTestExecutable) # Replace YourTestExecutable with actual test command
 
 # Option for DPDK integration (example)
-option(WITH_DPDK "Enable DPDK support" OFF)
-if(WITH_DPDK)
+# option(WITH_DPDK "Enable DPDK support" OFF)
+# if(WITH_DPDK)
     # Add DPDK finding and linking logic here
     # find_package(DPDK REQUIRED)
     # target_link_libraries(YourTarget PRIVATE DPDK::dpdk)
-endif()
+# endif()
 
 # Option for kernel bypass (UIO/VFIO)
-option(WITH_KERNEL_BYPASS "Enable kernel bypass support (UIO/VFIO)" OFF)
-if(WITH_KERNEL_BYPASS)
+# option(WITH_KERNEL_BYPASS "Enable kernel bypass support (UIO/VFIO)" OFF)
+# if(WITH_KERNEL_BYPASS)
     # Add kernel bypass related configurations
-endif()
+# endif()
 
 # Add subdirectories for tests if they have their own CMakeLists.txt
 # add_subdirectory(tests) # If tests/CMakeLists.txt exists
