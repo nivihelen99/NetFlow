@@ -88,9 +88,9 @@ public:
     }
 
     // Specific header accessors
-    netflow::packet::EthernetHeader* ethernet() const;
+    EthernetHeader* ethernet() const;
     netflow::packet::VlanTag* vlan_tag_header() const; // Returns pointer to VLAN tag if present
-    netflow::packet::IpHeader* ipv4() const;
+    IpHeader* ipv4() const;
     // netflow::packet::ArpHeader* arp() const; // Would require including arp.h
     netflow::packet::TcpHeader* tcp() const;
     netflow::packet::UdpHeader* udp() const;
@@ -140,6 +140,12 @@ private:
     bool has_vlan_tag_ = false;
 
     void parse_packet(); // Internal method to parse headers and set offsets
+
+public: // Getter methods for private offsets
+    intptr_t get_l3_offset() const { return l3_offset_; }
+    intptr_t get_l4_offset() const { return l4_offset_; }
 };
 
 #endif // NETFLOW_PACKET_PACKET_H
+
+
