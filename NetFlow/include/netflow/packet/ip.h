@@ -3,9 +3,7 @@
 
 #include <cstdint>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+
 
 // C-compatible IP Header structure
 typedef struct {
@@ -27,9 +25,7 @@ typedef struct {
 // The checksum field in the header should be set to 0 before calling this.
 uint16_t calculate_ip_header_checksum(const IpHeader* ip_header_ptr);
 
-#ifdef __cplusplus
-} // extern "C"
-#endif
+
 
 // C++ specific parts (if any) can remain here, outside extern "C"
 namespace netflow {

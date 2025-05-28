@@ -123,6 +123,7 @@ public:
     bool push_vlan(uint16_t tci_val_host_order); // TPID is standard 0x8100
     bool pop_vlan();
     
+    uint16_t Packet::calculate_ip_header_checksum(const IpHeader* ip_header_ptr);
     void update_checksums(); // Placeholder for general checksum recalculation
     void update_ip_checksum(); // Specifically for IPv4 header checksum
 
