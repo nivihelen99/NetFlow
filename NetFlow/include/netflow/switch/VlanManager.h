@@ -3,6 +3,7 @@
 
 #include "netflow/packet/Packet.h" // For Packet object
 #include <cstdint>
+#include <string> // For std::string
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -67,7 +68,7 @@ public:
     bool remove_vlan_member(uint16_t port_id, uint16_t vlan_id); // Removes vlan from port (for trunk)
 
     // Create/delete VLANs globally
-    bool create_vlan(uint16_t vlan_id, const std::string& name = "");
+    bool create_vlan(uint16_t vlan_id, const std::string& name = std::string{});
     // bool delete_vlan(uint16_t vlan_id);
     // std::unordered_set<uint16_t> get_all_vlans() const;
 
@@ -82,3 +83,4 @@ private:
 };
 
 #endif // NETFLOW_SWITCH_VLANMANAGER_H
+
