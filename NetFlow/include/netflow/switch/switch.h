@@ -56,15 +56,15 @@ class Switch {
       std::function<void(int interface_id, const std::vector<uint8_t>& packet_data)> cb);
 
   void set_packet_handler(
-      std::function<void(const netflow::packet::Packet& pkt, uint32_t ingress_port)> handler);
+      std::function<void(const Packet& pkt, uint32_t ingress_port)> handler);
 
   // Operations
   // Renamed original receive_packet to handle_raw_frame and made it public for external call
   // It's the entry point for raw frames into the switch.
   void handle_raw_frame(int interface_id, const uint8_t* data, size_t length);
 
-  void forward_packet(const netflow::packet::Packet& pkt, uint32_t egress_port);
-  void flood_packet(const netflow::packet::Packet& pkt, uint32_t ingress_port); 
+  void forward_packet(const Packet& pkt, uint32_t egress_port);
+  void flood_packet(const Packet& pkt, uint32_t ingress_port); 
   
   void start(); // Placeholder for switch operation start (e.g., STP timers)
 
@@ -84,7 +84,7 @@ class Switch {
   std::function<void(int interface_id, const std::vector<uint8_t>& packet_data)> send_packet_callback_;
   
   // Callback for higher-level packet processing (L2 forwarding, L3 routing, etc.)
-  std::function<void(const netflow::packet::Packet& pkt, uint32_t ingress_port)> packet_processing_handler_;
+  std::function<void(const Packet& pkt, uint32_t ingress_port)> packet_processing_handler_;
 
   // Retained for potential direct L3/L4 processing if not fully handled by packet_processing_handler_
   // Or if packet_processing_handler_ itself needs to interact with these.
@@ -92,13 +92,13 @@ class Switch {
   netflow::protocols::arp::ArpCache arp_cache_; 
 
   // Default packet processing logic
-  void default_packet_processor(const netflow::packet::Packet& pkt, uint32_t ingress_port);
+  void default_packet_processor(const Packet& pkt, uint32_t ingress_port);
 
   // Helper methods for default_packet_processor
   InterfaceInfo* get_interface_info(uint32_t port_id); // Returns non-const to allow potential modification if needed by other logic later
-  void handle_arp_packet(netflow::packet::Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info);
-  void handle_ip_packet_for_us(netflow::packet::Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info);
-  void route_ip_packet(netflow::packet::Packet& pkt, uint32_t ingress_port, uint16_t vlan_id);
+  void handle_arp_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info);
+  void handle_ip_packet_for_us(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info);
+  void route_ip_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id);
 
 public: // Test-specific helpers - public for access from test suite
     // Define MACAddress here if not globally accessible through includes, or ensure ForwardingDatabase.h is included.
