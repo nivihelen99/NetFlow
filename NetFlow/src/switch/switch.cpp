@@ -68,7 +68,7 @@ Switch::Switch(int num_ports)
 {
     // Set the default packet processor
     this->packet_processing_handler_ = 
-        [this](const Packet& p, uint32_t ip) { // Changed netflow::packet::Packet to Packet
+        [this](const Packet& p, uint32_t ip) { 
             this->default_packet_processor(p, ip);
         };
 
@@ -126,7 +126,7 @@ void Switch::set_send_packet_callback(
 }
 
 void Switch::set_packet_handler(
-    std::function<void(const Packet& pkt, uint32_t ingress_port)> handler) { // Changed netflow::packet::Packet to Packet
+    std::function<void(const Packet& pkt, uint32_t ingress_port)> handler) { 
     packet_processing_handler_ = handler;
     std::cout << "Switch: Packet processing handler " << (handler ? "set." : "cleared.") << std::endl;
 }
@@ -143,7 +143,7 @@ void Switch::handle_raw_frame(int interface_id_int, const uint8_t* data, size_t 
         return;
     }
 
-    Packet packet_obj(data, length); // Changed netflow::packet::Packet to Packet
+    Packet packet_obj(data, length); 
 
     if (packet_obj.head() == nullptr) { 
         std::cerr << "Switch Error: Failed to construct or parse Packet object from raw data on interface " << interface_id << ". Dropping." << std::endl;
@@ -158,7 +158,7 @@ void Switch::handle_raw_frame(int interface_id_int, const uint8_t* data, size_t 
     }
 }
 
-void Switch::forward_packet(const Packet& pkt, uint32_t egress_port_id) { // Changed netflow::packet::Packet to Packet
+void Switch::forward_packet(const Packet& pkt, uint32_t egress_port_id) { 
     if (egress_port_id >= static_cast<uint32_t>(num_ports_)) {
         std::cerr << "Switch Error: Cannot forward packet, egress port ID " << egress_port_id << " is out of range." << std::endl;
         return;
@@ -176,7 +176,7 @@ void Switch::forward_packet(const Packet& pkt, uint32_t egress_port_id) { // Cha
     }
 }
 
-void Switch::flood_packet(const Packet& pkt_const, uint32_t ingress_port_id) { // Changed netflow::packet::Packet to Packet
+void Switch::flood_packet(const Packet& pkt_const, uint32_t ingress_port_id) { 
     // Determine effective_vlan_id based on packet's state (already processed by ingress vlan_manager)
     uint16_t effective_vlan_id = pkt_const.vlan_id(); // This should be the internal, effective VLAN.
     if (effective_vlan_id == 0 && !pkt_const.has_vlan()) { // If truly untagged and ingress didn't assign one
@@ -195,7 +195,7 @@ void Switch::flood_packet(const Packet& pkt_const, uint32_t ingress_port_id) { /
         if (!vlan_manager_.should_forward(i, effective_vlan_id)) continue;
         if (!stp_manager_.should_forward(i)) continue;
         
-        Packet mutable_pkt_for_egress(pkt_const.head(), pkt_const.length()); // Changed netflow::packet::Packet to Packet
+        Packet mutable_pkt_for_egress(pkt_const.head(), pkt_const.length()); 
         if (mutable_pkt_for_egress.head() == nullptr) continue;
 
         if (vlan_manager_.process_egress(mutable_pkt_for_egress, i, effective_vlan_id)) {
@@ -217,8 +217,8 @@ InterfaceInfo* Switch::get_interface_info(uint32_t port_id) {
     return nullptr;
 }
 
-void Switch::default_packet_processor(const Packet& const_pkt, uint32_t ingress_port) { // Changed netflow::packet::Packet to Packet
-    Packet pkt = const_pkt; // Mutable copy // Changed netflow::packet::Packet to Packet
+void Switch::default_packet_processor(const Packet& const_pkt, uint32_t ingress_port) { 
+    Packet pkt = const_pkt; // Mutable copy 
 
     const InterfaceInfo* ingress_if_info = get_interface_info(ingress_port);
     // Note: ingress_if_info can be null if the port is not an L3 interface for the switch.
@@ -297,7 +297,7 @@ void Switch::default_packet_processor(const Packet& const_pkt, uint32_t ingress_
         if (egress_port != ForwardingDatabase::FDB_PORT_NOT_FOUND && egress_port != ingress_port) {
             if (stp_manager_.should_forward(egress_port)) {
                 // Make a new mutable copy for egress processing
-                Packet egress_pkt(pkt.head(), pkt.length()); // Changed netflow::packet::Packet to Packet
+                Packet egress_pkt(pkt.head(), pkt.length()); 
                 if (egress_pkt.head() && vlan_manager_.process_egress(egress_pkt, egress_port, effective_vlan_id)) {
                     forward_packet(egress_pkt, egress_port);
                 }
@@ -318,7 +318,7 @@ void Switch::default_packet_processor(const Packet& const_pkt, uint32_t ingress_
 
 // --- Helper Method Implementations ---
 
-void Switch::handle_arp_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info) { // Changed netflow::packet::Packet to Packet
+void Switch::handle_arp_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info) { 
     if (!ingress_if_info || ingress_if_info->ip_address == 0) { // Need an IP configured on the ingress L3 interface
         // std::cout << "DPP: ARP received on port " << ingress_port << " which has no L3 config or IP. Dropping ARP." << std::endl;
         return;
@@ -356,7 +356,7 @@ void Switch::handle_arp_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan
         const netflow::protocols::arp::ArpHeader* original_arp_request = 
             reinterpret_cast<const netflow::protocols::arp::ArpHeader*>(arp_data_ptr);
 
-        Packet reply_pkt = create_reply_ethernet_frame( // Changed netflow::packet::Packet to Packet
+        Packet reply_pkt = create_reply_ethernet_frame( 
             original_arp_request->sender_mac, // Dst MAC for Ethernet frame
             ingress_if_info->mac_address,     // Src MAC for Ethernet frame
             netflow::packet::ETHERTYPE_ARP,   // EtherType
@@ -370,7 +370,7 @@ void Switch::handle_arp_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan
     }
 }
 
-void Switch::handle_ip_packet_for_us(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info) { // Changed netflow::packet::Packet to Packet
+void Switch::handle_ip_packet_for_us(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id, const InterfaceInfo* ingress_if_info) { 
     IpHeader* ip_hdr = pkt.ipv4(); // Changed netflow::packet::IpHeader to IpHeader
     if (!ip_hdr) return;
 
@@ -448,7 +448,7 @@ void Switch::handle_ip_packet_for_us(Packet& pkt, uint32_t ingress_port, uint16_
             bool found_mac = arp_cache_.lookup(ntohl(ip_hdr->saddr), next_hop_mac);
 
             if (found_mac) {
-                Packet reply_pkt = create_reply_ethernet_frame( // Changed netflow::packet::Packet to Packet
+                Packet reply_pkt = create_reply_ethernet_frame( 
                     next_hop_mac,
                     ingress_if_info->mac_address,
                     netflow::packet::ETHERTYPE_IP,
@@ -470,7 +470,7 @@ void Switch::handle_ip_packet_for_us(Packet& pkt, uint32_t ingress_port, uint16_
     }
 }
 
-void Switch::route_ip_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id) { // Changed netflow::packet::Packet to Packet
+void Switch::route_ip_packet(Packet& pkt, uint32_t ingress_port, uint16_t vlan_id) { 
     IpHeader* ip_hdr = pkt.ipv4(); // Changed netflow::packet::IpHeader to IpHeader
     if (!ip_hdr) return;
 
