@@ -1,0 +1,5 @@
+ExampleTest1 1 0.00479142
+ExampleTest2 1 0.00437813
+ExampleTest3 1 0.00347575
+ExampleTest4 1 0.00356441
+---
