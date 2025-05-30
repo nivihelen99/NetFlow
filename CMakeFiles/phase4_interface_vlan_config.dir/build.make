@@ -92,7 +92,6 @@ phase4_interface_vlan_config_EXTERNAL_OBJECTS =
 
 phase4_interface_vlan_config: CMakeFiles/phase4_interface_vlan_config.dir/examples/phase4_interface_vlan_config.cpp.o
 phase4_interface_vlan_config: CMakeFiles/phase4_interface_vlan_config.dir/build.make
-phase4_interface_vlan_config: src/libnetflow_port_lib.a
 phase4_interface_vlan_config: src/libnetflow_switching_lib.a
 phase4_interface_vlan_config: CMakeFiles/phase4_interface_vlan_config.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable phase4_interface_vlan_config"

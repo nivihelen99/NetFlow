@@ -53,7 +53,7 @@ endif()
 
 
 # --- Optional: Installation for main library headers (always install these) ---
-install(DIRECTORY include/netflow_plus_plus DESTINATION include)
+install(DIRECTORY include/netflow++ DESTINATION include)
 
 # --- Optional: Testing (using CTest) ---
 # CTest should only be enabled and tests added if BUILD_EXAMPLES is ON,

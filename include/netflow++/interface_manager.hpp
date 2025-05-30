@@ -7,6 +7,7 @@
 #include <functional> // For std::function
 #include <string>     // Potentially for port names in the future
 #include <algorithm>  // For std::fill (if needed, though direct initialization is used)
+#include <optional>   // For std::optional
 
 namespace netflow {
 

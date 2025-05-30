@@ -69,38 +69,10 @@ include src/CMakeFiles/netflow_switching_lib.dir/progress.make
 # Include the compile flags for this target's objects.
 include src/CMakeFiles/netflow_switching_lib.dir/flags.make
 
-src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o: src/CMakeFiles/netflow_switching_lib.dir/flags.make
-src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o: src/switching/fdb.cpp
-src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o: src/CMakeFiles/netflow_switching_lib.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o"
-	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o -MF CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o.d -o CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o -c /app/src/switching/fdb.cpp
-
-src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.i"
-	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /app/src/switching/fdb.cpp > CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.i
-
-src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.s"
-	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /app/src/switching/fdb.cpp -o CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.s
-
-src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o: src/CMakeFiles/netflow_switching_lib.dir/flags.make
-src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o: src/switching/vlan_manager.cpp
-src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o: src/CMakeFiles/netflow_switching_lib.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building CXX object src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o"
-	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o -MF CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o.d -o CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o -c /app/src/switching/vlan_manager.cpp
-
-src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.i: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.i"
-	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /app/src/switching/vlan_manager.cpp > CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.i
-
-src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.s: cmake_force
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.s"
-	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /app/src/switching/vlan_manager.cpp -o CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.s
-
 src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o: src/CMakeFiles/netflow_switching_lib.dir/flags.make
 src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o: src/netflow++/config_manager.cpp
 src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o: src/CMakeFiles/netflow_switching_lib.dir/compiler_depend.ts
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building CXX object src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Building CXX object src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o"
 	cd /app/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o -MF CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o.d -o CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o -c /app/src/netflow++/config_manager.cpp
 
 src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.i: cmake_force
@@ -113,19 +85,15 @@ src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.s: cmake_f
 
 # Object files for target netflow_switching_lib
 netflow_switching_lib_OBJECTS = \
-"CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o" \
-"CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o" \
 "CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o"
 
 # External object files for target netflow_switching_lib
 netflow_switching_lib_EXTERNAL_OBJECTS =
 
-src/libnetflow_switching_lib.a: src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o
-src/libnetflow_switching_lib.a: src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o
 src/libnetflow_switching_lib.a: src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o
 src/libnetflow_switching_lib.a: src/CMakeFiles/netflow_switching_lib.dir/build.make
 src/libnetflow_switching_lib.a: src/CMakeFiles/netflow_switching_lib.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Linking CXX static library libnetflow_switching_lib.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/app/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX static library libnetflow_switching_lib.a"
 	cd /app/src && $(CMAKE_COMMAND) -P CMakeFiles/netflow_switching_lib.dir/cmake_clean_target.cmake
 	cd /app/src && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/netflow_switching_lib.dir/link.txt --verbose=$(VERBOSE)
 

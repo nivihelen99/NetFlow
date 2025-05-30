@@ -1,2 +1,0 @@
-/usr/bin/ar qc libnetflow_port_lib.a CMakeFiles/netflow_port_lib.dir/port/interface_manager.cpp.o
-/usr/bin/ranlib libnetflow_port_lib.a

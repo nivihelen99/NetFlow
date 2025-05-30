@@ -237,19 +237,6 @@ netflow_app/fast:
 .PHONY : netflow_app/fast
 
 #=============================================================================
-# Target rules for targets named netflow_port_lib
-
-# Build rule for target.
-netflow_port_lib: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 netflow_port_lib
-.PHONY : netflow_port_lib
-
-# fast build rule for target.
-netflow_port_lib/fast:
-	$(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_port_lib.dir/build.make src/CMakeFiles/netflow_port_lib.dir/build
-.PHONY : netflow_port_lib/fast
-
-#=============================================================================
 # Target rules for targets named netflow_switching_lib
 
 # Build rule for target.
@@ -396,7 +383,6 @@ help:
 	@echo "... rebuild_cache"
 	@echo "... test"
 	@echo "... netflow_app"
-	@echo "... netflow_port_lib"
 	@echo "... netflow_switching_lib"
 	@echo "... phase1_packet_usage"
 	@echo "... phase2_l2_parsing"

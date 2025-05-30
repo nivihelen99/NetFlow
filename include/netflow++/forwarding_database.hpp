@@ -40,7 +40,8 @@ public:
     }
 
     // Adds or updates a dynamic MAC entry. If the MAC+VLAN already exists, its port and timestamp are updated.
-    void learn_mac(const MacAddress& mac, uint32_t port, uint16_t vlan_id) {
+    // Returns true if a new entry was created, false otherwise.
+    bool learn_mac(const MacAddress& mac, uint32_t port, uint16_t vlan_id) {
         auto it = std::find_if(entries_.begin(), entries_.end(),
                                [&](const FdbEntry& entry) {
                                    return entry.mac == mac && entry.vlan_id == vlan_id;
@@ -81,6 +82,7 @@ public:
                 logger_->debug("FDB", "MAC " + logger_->mac_to_string(mac) + " moved from port " + std::to_string(old_port) + " to " + std::to_string(port) + " on VLAN " + std::to_string(vlan_id));
             }
         }
+        return new_learn;
     }
 
     void set_logger(SwitchLogger* logger) {
@@ -106,7 +108,7 @@ public:
 
 
     // Looks up the port for a given MAC address and VLAN ID.
-    std::optional<uint32_t> lookup_port(const MacAddress& mac, uint16_t vlan_id) {
+    std::optional<uint32_t> lookup_port(const MacAddress& mac, uint16_t vlan_id) const { // Added const
         auto it = std::find_if(entries_.begin(), entries_.end(),
                                [&](const FdbEntry& entry) {
                                    return entry.mac == mac && entry.vlan_id == vlan_id;

@@ -2,16 +2,20 @@
 cmake_policy(VERSION 3.10) # Or your project's minimum version
 
 # --- NetFlow Port Library ---
-add_library(netflow_port_lib STATIC
-    port/interface_manager.cpp
-)
+# InterfaceManager is now header-only. This library might become an INTERFACE library
+# or be removed if no other .cpp files are part of it.
+# Changing to INTERFACE library as InterfaceManager is now header-only.
+add_library(netflow_port_lib INTERFACE)
+# No sources needed for an INTERFACE library. Its properties (like include directories) are still used by linkers.
+target_include_directories(netflow_port_lib INTERFACE ${CMAKE_SOURCE_DIR}/include) # Changed PUBLIC to INTERFACE
 
 # --- NetFlow Switching Library ---
-# This library will contain compiled components related to switching, like the FDB and VLAN Manager.
+# This library will contain compiled components related to switching.
+# FDB and VlanManager are now header-only. ConfigManager has a .cpp part.
 add_library(netflow_switching_lib STATIC
-    switching/fdb.cpp
-    switching/vlan_manager.cpp
-    netflow++/config_manager.cpp # Added ConfigManager source
+    # switching/fdb.cpp             # Removed as ForwardingDatabase is header-only
+    # switching/vlan_manager.cpp    # Removed as VlanManager is header-only
+    netflow++/config_manager.cpp
 )
 
 # Make sure the libraries can find their own headers if they were in src,
@@ -22,9 +26,9 @@ add_library(netflow_switching_lib STATIC
 # can be set here or ensure they are inherited from the parent scope (root CMakeLists.txt 'include_directories(include)').
 # By specifying PUBLIC, any target that links against these libraries will also get these include directories.
 
-target_include_directories(netflow_port_lib PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
+# target_include_directories(netflow_port_lib PUBLIC # This was moved up and changed to INTERFACE
+#    ${CMAKE_SOURCE_DIR}/include
+# )
 
 target_include_directories(netflow_switching_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/include

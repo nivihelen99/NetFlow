@@ -10,7 +10,6 @@
 /app/CMakeFiles/install.dir
 /app/CMakeFiles/install/local.dir
 /app/CMakeFiles/install/strip.dir
-/app/src/CMakeFiles/netflow_port_lib.dir
 /app/src/CMakeFiles/netflow_switching_lib.dir
 /app/src/CMakeFiles/test.dir
 /app/src/CMakeFiles/edit_cache.dir

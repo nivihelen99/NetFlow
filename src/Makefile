@@ -172,20 +172,6 @@ depend:
 .PHONY : depend
 
 # Convenience name for target.
-src/CMakeFiles/netflow_port_lib.dir/rule:
-	cd /app && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 src/CMakeFiles/netflow_port_lib.dir/rule
-.PHONY : src/CMakeFiles/netflow_port_lib.dir/rule
-
-# Convenience name for target.
-netflow_port_lib: src/CMakeFiles/netflow_port_lib.dir/rule
-.PHONY : netflow_port_lib
-
-# fast build rule for target.
-netflow_port_lib/fast:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_port_lib.dir/build.make src/CMakeFiles/netflow_port_lib.dir/build
-.PHONY : netflow_port_lib/fast
-
-# Convenience name for target.
 src/CMakeFiles/netflow_switching_lib.dir/rule:
 	cd /app && $(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 src/CMakeFiles/netflow_switching_lib.dir/rule
 .PHONY : src/CMakeFiles/netflow_switching_lib.dir/rule
@@ -223,78 +209,6 @@ netflow++/config_manager.cpp.s:
 	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.s
 .PHONY : netflow++/config_manager.cpp.s
 
-port/interface_manager.o: port/interface_manager.cpp.o
-.PHONY : port/interface_manager.o
-
-# target to build an object file
-port/interface_manager.cpp.o:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_port_lib.dir/build.make src/CMakeFiles/netflow_port_lib.dir/port/interface_manager.cpp.o
-.PHONY : port/interface_manager.cpp.o
-
-port/interface_manager.i: port/interface_manager.cpp.i
-.PHONY : port/interface_manager.i
-
-# target to preprocess a source file
-port/interface_manager.cpp.i:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_port_lib.dir/build.make src/CMakeFiles/netflow_port_lib.dir/port/interface_manager.cpp.i
-.PHONY : port/interface_manager.cpp.i
-
-port/interface_manager.s: port/interface_manager.cpp.s
-.PHONY : port/interface_manager.s
-
-# target to generate assembly for a file
-port/interface_manager.cpp.s:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_port_lib.dir/build.make src/CMakeFiles/netflow_port_lib.dir/port/interface_manager.cpp.s
-.PHONY : port/interface_manager.cpp.s
-
-switching/fdb.o: switching/fdb.cpp.o
-.PHONY : switching/fdb.o
-
-# target to build an object file
-switching/fdb.cpp.o:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o
-.PHONY : switching/fdb.cpp.o
-
-switching/fdb.i: switching/fdb.cpp.i
-.PHONY : switching/fdb.i
-
-# target to preprocess a source file
-switching/fdb.cpp.i:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.i
-.PHONY : switching/fdb.cpp.i
-
-switching/fdb.s: switching/fdb.cpp.s
-.PHONY : switching/fdb.s
-
-# target to generate assembly for a file
-switching/fdb.cpp.s:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.s
-.PHONY : switching/fdb.cpp.s
-
-switching/vlan_manager.o: switching/vlan_manager.cpp.o
-.PHONY : switching/vlan_manager.o
-
-# target to build an object file
-switching/vlan_manager.cpp.o:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o
-.PHONY : switching/vlan_manager.cpp.o
-
-switching/vlan_manager.i: switching/vlan_manager.cpp.i
-.PHONY : switching/vlan_manager.i
-
-# target to preprocess a source file
-switching/vlan_manager.cpp.i:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.i
-.PHONY : switching/vlan_manager.cpp.i
-
-switching/vlan_manager.s: switching/vlan_manager.cpp.s
-.PHONY : switching/vlan_manager.s
-
-# target to generate assembly for a file
-switching/vlan_manager.cpp.s:
-	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.s
-.PHONY : switching/vlan_manager.cpp.s
-
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -308,20 +222,10 @@ help:
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... test"
-	@echo "... netflow_port_lib"
 	@echo "... netflow_switching_lib"
 	@echo "... netflow++/config_manager.o"
 	@echo "... netflow++/config_manager.i"
 	@echo "... netflow++/config_manager.s"
-	@echo "... port/interface_manager.o"
-	@echo "... port/interface_manager.i"
-	@echo "... port/interface_manager.s"
-	@echo "... switching/fdb.o"
-	@echo "... switching/fdb.i"
-	@echo "... switching/fdb.s"
-	@echo "... switching/vlan_manager.o"
-	@echo "... switching/vlan_manager.i"
-	@echo "... switching/vlan_manager.s"
 .PHONY : help
 
 
