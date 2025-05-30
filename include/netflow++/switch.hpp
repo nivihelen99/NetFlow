@@ -30,7 +30,7 @@ public:
     BufferPool buffer_pool;
     ForwardingDatabase fdb;
     VlanManager vlan_manager;
-    StpManager stp_manager;
+    // StpManager stp_manager; // Will be initialized in constructor with MAC
     InterfaceManager interface_manager_;
     PacketClassifier packet_classifier_;
 
@@ -40,34 +40,46 @@ public:
 
     QosManager qos_manager_;
     AclManager acl_manager_;
-    LacpManager lacp_manager_;
+    // LacpManager lacp_manager_; // Will be initialized in constructor with MAC
     SwitchLogger logger_;
     ConfigManager config_manager_;             // Added member
     ManagementInterface management_interface_; // Added member
 
-    Switch(uint32_t num_ports) :
+    StpManager stp_manager;
+    LacpManager lacp_manager_; // Moved here, will be initialized in member initializer list
+
+    Switch(uint32_t num_ports, uint64_t switch_mac_address = 0x0000DEADBEEF0001ULL,
+           uint16_t stp_priority = 0x8000, uint16_t lacp_system_priority = 32768) :
         num_ports_(num_ports),
+        stp_manager(num_ports, switch_mac_address, stp_priority),
+        lacp_manager_(switch_mac_address, lacp_system_priority), // Initialize LacpManager
         flow_table_(1024),
-        logger_(LogLevel::INFO) { // Default log level INFO, can be changed by config or main.cpp
+        logger_(LogLevel::INFO) {
 
         logger_.info("SWITCH_LIFECYCLE", "Switch class constructing for " + std::to_string(num_ports_) + " ports.");
+        logger_.info("SWITCH_LIFECYCLE", "Switch MAC: " + logger_.mac_to_string(switch_mac_address) +
+                                     ", STP Priority: " + std::to_string(stp_priority) +
+                                     ", LACP System Priority: " + std::to_string(lacp_system_priority));
+
         fdb.set_logger(&logger_);
-        // config_manager_.set_logger(&logger_); // If ConfigManager had a set_logger method
+        // config_manager_.set_logger(&logger_);
 
         logger_.info("CONFIG", "Loading default configuration (default_switch_config.json)...");
         if (config_manager_.load_config("default_switch_config.json")) {
             logger_.info("CONFIG", "Default configuration loaded. Applying now...");
-            config_manager_.apply_config(config_manager_.get_current_config_data(), *this);
+            // config_manager_.apply_config(config_manager_.get_current_config_data(), *this); // Old signature
+            config_manager_.apply_config(*this); // New signature
         } else {
             logger_.warning("CONFIG", "Failed to load default_switch_config.json. Using empty/hardcoded defaults.");
         }
 
         logger_.info("SWITCH_INIT", "Initializing per-port defaults (may be overridden by loaded config)...");
         for (uint32_t i = 0; i < num_ports_; ++i) {
-             if(stp_manager.get_port_state(i) == StpManager::PortState::UNKNOWN) {
-                 stp_manager.set_port_state(i, StpManager::PortState::BLOCKING);
-                 logger_.debug("STP_INIT", "Port " + std::to_string(i) + " STP state set to BLOCKING (default).");
-            }
+            // STP ports are initialized to BLOCKING by StpManager constructor and recalculate_stp_roles_and_states
+            // No need to set stp_manager.set_port_state(i, StpManager::PortState::BLOCKING); here anymore.
+            // Initial roles/states are handled by StpManager's own initialization.
+            // logger_.debug("STP_INIT", "Port " + std::to_string(i) + " STP initial role: " + stp_manager.port_role_to_string(stp_manager.get_port_stp_role(i)) + " state: " + stp_manager.port_state_to_string(stp_manager.get_port_stp_state(i)));
+
             if (!interface_manager_.get_port_config(i).has_value()) {
                 InterfaceManager::PortConfig default_if_config;
                 default_if_config.admin_up = false;

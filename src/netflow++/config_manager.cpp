@@ -1,82 +1,103 @@
 #include "netflow++/config_manager.hpp"
-#include "netflow++/switch.hpp" // Required for the full definition of Switch and its managers
-#include "netflow++/interface_manager.hpp" // Specifically for InterfaceManager::PortConfig
-// Other manager headers might be needed if apply_config handles them directly.
-
-#include <iostream> // For std::cerr/cout placeholders
-#include <charconv> // For std::from_chars
+#include "netflow++/switch.hpp" // Required for Switch class definition
+#include <iostream> // For std::cout, remove in production
 
 namespace netflow {
 
-// Definition of apply_config moved here
-void ConfigManager::apply_config(const ConfigurationData& config_data_to_apply, netflow::Switch& target_switch) {
-    // if (logger_) logger_->info("CONFIG_APPLY", "Starting to apply configuration.");
+void ConfigManager::apply_config(Switch& switch_obj) {
+    for (const auto& pair : config_data_) {
+        const std::string& key = pair.first;
+        const ConfigValue& value_variant = pair.second;
 
-    for (const auto& pair : config_data_to_apply) {
-        const std::string& path = pair.first;
-        const ConfigValue& value = pair.second;
-        // if (logger_) logger_->debug("CONFIG_APPLY", "Applying: " + path);
-
-        std::string component, id_str, param;
-        size_t pos1 = path.find('.');
-        size_t pos2 = (pos1 == std::string::npos) ? std::string::npos : path.find('.', pos1 + 1);
-
-        if (pos1 != std::string::npos && pos2 != std::string::npos) {
-            component = path.substr(0, pos1);
-            id_str = path.substr(pos1 + 1, pos2 - (pos1 + 1));
-            param = path.substr(pos2 + 1);
-        } else {
-            if (path == "global.hostname") {
-                if (auto* str_val = std::get_if<std::string>(&value)) {
-                    // target_switch.set_hostname(*str_val); // Switch would need this method
-                    std::cout << "[ConfigApply] Set global.hostname to " << *str_val << std::endl;
+        try {
+            if (key == "fdb.aging_time_seconds") {
+                if (std::holds_alternative<int>(value_variant)) {
+                    int aging_time = std::get<int>(value_variant);
+                    // Assuming Switch has a method to set FDB aging time
+                    // switch_obj.get_fdb_manager().set_aging_time(aging_time);
+                    std::cout << "Applied FDB aging time: " << aging_time << std::endl;
                 } else {
-                    std::cerr << "[ConfigApply] Error: Invalid type for global.hostname" << std::endl;
+                    std::cerr << "Error: Invalid type for " << key << std::endl;
                 }
-            } else {
-                 std::cerr << "[ConfigApply] Warning: Unrecognized path " << path << std::endl;
+            } else if (key == "stp.bridge_priority") {
+                if (std::holds_alternative<int>(value_variant)) {
+                    int bridge_priority = std::get<int>(value_variant);
+                    // Assuming Switch has a method to set STP bridge priority
+                    // switch_obj.get_stp_manager().set_bridge_priority(bridge_priority);
+                    std::cout << "Applied STP bridge priority: " << bridge_priority << std::endl;
+                } else {
+                    std::cerr << "Error: Invalid type for " << key << std::endl;
+                }
             }
-            continue;
-        }
-
-        if (component == "port") {
-            uint32_t port_id;
-            auto conv_result = std::from_chars(id_str.data(), id_str.data() + id_str.size(), port_id);
-            if (conv_result.ec == std::errc() && conv_result.ptr == id_str.data() + id_str.size()) {
-                InterfaceManager::PortConfig port_cfg = target_switch.interface_manager_.get_port_config(port_id).value_or(InterfaceManager::PortConfig());
-                bool config_changed = false;
-
-                if (param == "speed_mbps") {
-                    if (auto* val_ptr = std::get_if<uint32_t>(&value)) { port_cfg.speed_mbps = *val_ptr; config_changed = true; }
-                    else if (auto* val_ptr_int = std::get_if<int>(&value)) { port_cfg.speed_mbps = static_cast<uint32_t>(*val_ptr_int); config_changed = true; }
-                    else { std::cerr << "[ConfigApply] Error: Invalid type for port." << port_id << ".speed_mbps" << std::endl; }
-                } else if (param == "admin_up") {
-                    if (auto* val_ptr = std::get_if<bool>(&value)) { port_cfg.admin_up = *val_ptr; config_changed = true; }
-                    else { std::cerr << "[ConfigApply] Error: Invalid type for port." << port_id << ".admin_up" << std::endl; }
-                } else if (param == "mtu") {
-                    if (auto* val_ptr = std::get_if<uint32_t>(&value)) { port_cfg.mtu = *val_ptr; config_changed = true; }
-                     else if (auto* val_ptr_int = std::get_if<int>(&value)) { port_cfg.mtu = static_cast<uint32_t>(*val_ptr_int); config_changed = true; }
-                    else { std::cerr << "[ConfigApply] Error: Invalid type for port." << port_id << ".mtu" << std::endl; }
-                }
-                else {
-                    std::cerr << "[ConfigApply] Warning: Unrecognized param " << param << " for port " << id_str << std::endl;
-                }
-
-                if (config_changed) {
-                    target_switch.interface_manager_.configure_port(port_id, port_cfg);
-                    std::cout << "[ConfigApply] Applied port." << id_str << "." << param << std::endl;
-                }
-            } else {
-                 std::cerr << "[ConfigApply] Error: Invalid port ID " << id_str << std::endl;
-            }
-        } else if (component == "vlan") {
-            std::cout << "[ConfigApply] VLAN config for " << id_str << " (placeholder)." << std::endl;
-        }
-        else {
-            std::cerr << "[ConfigApply] Warning: Unrecognized component " << component << std::endl;
+            // Add more configuration parameters as needed
+        } catch (const std::bad_variant_access& e) {
+            std::cerr << "Error accessing variant for key " << key << ": " << e.what() << std::endl;
         }
     }
-    // if (logger_) logger_->info("CONFIG_APPLY", "Configuration application finished."); // This line should be within the method
+}
+
+#include <fstream> // For std::ifstream
+#include <nlohmann/json.hpp> // For nlohmann::json
+
+// Helper function to recursively parse JSON and populate config_data_
+void parse_json_to_config(const nlohmann::json& j, const std::string& prefix, ConfigurationData& config_data) {
+    for (auto it = j.begin(); it != j.end(); ++it) {
+        std::string current_key = prefix.empty() ? it.key() : prefix + "." + it.key();
+        if (it.value().is_structured()) {
+            parse_json_to_config(it.value(), current_key, config_data);
+        } else {
+            if (it.value().is_boolean()) {
+                config_data[current_key] = it.value().get<bool>();
+            } else if (it.value().is_number_integer()) {
+                config_data[current_key] = it.value().get<int>();
+            } else if (it.value().is_number_unsigned()) {
+                config_data[current_key] = it.value().get<uint32_t>(); // Or uint64_t if needed, adjust ConfigValue
+            } else if (it.value().is_number_float()) {
+                config_data[current_key] = it.value().get<double>();
+            } else if (it.value().is_string()) {
+                config_data[current_key] = it.value().get<std::string>();
+            } else if (it.value().is_array()) {
+                // Example: store arrays of numbers (uint32_t) or strings
+                // This needs to be more robust based on expected array types
+                if (!it.value().empty()) {
+                    if (it.value()[0].is_number_unsigned()) {
+                        config_data[current_key] = it.value().get<std::vector<uint32_t>>();
+                    } else if (it.value()[0].is_string()) {
+                        config_data[current_key] = it.value().get<std::vector<std::string>>();
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool ConfigManager::load_config(const std::string& file_path) {
+    std::ifstream file(file_path);
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open configuration file: " << file_path << std::endl;
+        return false;
+    }
+
+    nlohmann::json json_config;
+    try {
+        file >> json_config;
+    } catch (const nlohmann::json::parse_error& e) {
+        std::cerr << "Error: Could not parse JSON configuration file: " << file_path << "\n"
+                  << "Parse error: " << e.what() << std::endl;
+        return false;
+    }
+
+    config_data_.clear();
+    try {
+        parse_json_to_config(json_config, "", config_data_);
+    } catch (const std::exception& e) {
+        std::cerr << "Error processing JSON structure: " << e.what() << std::endl;
+        return false;
+    }
+
+    loaded_config_filename_ = file_path; // Store the path of the loaded file
+    std::cout << "Configuration loaded successfully from: " << file_path << std::endl;
+    return true;
 }
 
 } // namespace netflow
