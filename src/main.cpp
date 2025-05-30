@@ -122,12 +122,79 @@ int main(int argc, char* argv[]) {
     // --- Simulate Packet Processing (Example) ---
     std::cout << "\n--- Simulating Packet Processing ---" << std::endl;
     // Ensure port 0 (ingress for first test packet) is also link up for packet to pass
-    netflow::InterfaceManager::PortConfig port0_config;
-    port0_config.admin_up = true;
-    sw.interface_manager_.configure_port(0, port0_config);
+    netflow::InterfaceManager::PortConfig main_port0_config; // Renamed to avoid conflict
+    main_port0_config.admin_up = true;
+    sw.interface_manager_.configure_port(0, main_port0_config);
     sw.interface_manager_.simulate_port_link_up(0);
     std::cout << "Port 0 link status (simulated): " << std::boolalpha
               << sw.interface_manager_.is_port_link_up(0) << std::endl;
+
+    // Ensure port 2 is up for ACL redirect test
+    netflow::InterfaceManager::PortConfig main_port2_config;
+    main_port2_config.admin_up = true;
+    sw.interface_manager_.configure_port(2, main_port2_config);
+    sw.interface_manager_.simulate_port_link_up(2);
+    std::cout << "Port 2 link status (simulated): " << std::boolalpha
+              << sw.interface_manager_.is_port_link_up(2) << std::endl;
+
+
+    // --- QoS Example Configuration ---
+    std::cout << "\n--- QoS Configuration Example ---" << std::endl;
+    netflow::QosConfig qos_cfg_p1;
+    qos_cfg_p1.num_queues = 2;
+    qos_cfg_p1.scheduler = netflow::SchedulerType::STRICT_PRIORITY;
+    // queue_weights and rate_limits_kbps will be default sized by validate_and_prepare
+    sw.qos_manager_.configure_port_qos(1, qos_cfg_p1); // Configure QoS for port 1
+
+    netflow::QosConfig qos_cfg_p2; // For ACL redirect port
+    qos_cfg_p2.num_queues = 4;
+    sw.qos_manager_.configure_port_qos(2, qos_cfg_p2);
+
+
+    // --- ACL Example Configuration ---
+    std::cout << "\n--- ACL Configuration Example ---" << std::endl;
+    netflow::AclRule acl_deny_rule;
+    acl_deny_rule.rule_id = 1;
+    acl_deny_rule.priority = 200; // High priority
+    // Deny traffic from 192.168.1.1 to any, if it's TCP
+    acl_deny_rule.src_ip = ntohl(0xC0A80101); // 192.168.1.1
+    acl_deny_rule.protocol = 6; // TCP
+    acl_deny_rule.action = netflow::AclActionType::DENY;
+    sw.acl_manager_.add_rule(acl_deny_rule);
+    std::cout << "Added ACL DENY rule for TCP from 192.168.1.1 (ID:1, Prio:200)." << std::endl;
+
+    netflow::AclRule acl_redirect_rule;
+    acl_redirect_rule.rule_id = 2;
+    acl_redirect_rule.priority = 150;
+    // Redirect UDP traffic from 192.168.1.2 to port 2
+    acl_redirect_rule.src_ip = ntohl(0xC0A80102); // 192.168.1.2
+    acl_redirect_rule.protocol = 17; // UDP
+    acl_redirect_rule.action = netflow::AclActionType::REDIRECT;
+    acl_redirect_rule.redirect_port_id = 2;
+    sw.acl_manager_.add_rule(acl_redirect_rule);
+    std::cout << "Added ACL REDIRECT rule for UDP from 192.168.1.2 to port 2 (ID:2, Prio:150)." << std::endl;
+
+
+    // --- LACP Example Configuration ---
+    std::cout << "\n--- LACP Configuration Example ---" << std::endl;
+    netflow::LagConfig lag1_config;
+    lag1_config.lag_id = 101; // LAG ID must not be a physical port ID if physical ports are 0-indexed
+    lag1_config.member_ports = {3, 4}; // Assuming ports 3 and 4 exist
+    lag1_config.active_mode = true;
+    lag1_config.hash_mode = netflow::LacpHashMode::SRC_DST_IP;
+    if (sw.lacp_manager_.create_lag(lag1_config)) {
+        std::cout << "LAG " << lag1_config.lag_id << " created with member ports 3, 4." << std::endl;
+        // Ensure member ports are up for LACP selection to be meaningful
+        netflow::InterfaceManager::PortConfig lag_member_cfg;
+        lag_member_cfg.admin_up = true;
+        sw.interface_manager_.configure_port(3, lag_member_cfg);
+        sw.interface_manager_.simulate_port_link_up(3);
+        sw.interface_manager_.configure_port(4, lag_member_cfg);
+        sw.interface_manager_.simulate_port_link_up(4);
+    } else {
+        std::cout << "Failed to create LAG " << lag1_config.lag_id << "." << std::endl;
+    }
+    // To test LACP, we would need an FDB entry pointing to lag_id 101.
 
 
     // Create a dummy packet buffer (normally from NIC driver or another source)

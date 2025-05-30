@@ -208,8 +208,9 @@ CMakeFiles/netflow_app.dir/src/main.cpp.o: /app/src/main.cpp \
  /usr/include/c++/13/compare \
  /app/include/netflow++/lock_free_hash_table.hpp \
  /app/include/netflow++/interface_manager.hpp \
- /usr/include/c++/13/iostream /usr/include/c++/13/ostream \
- /usr/include/c++/13/ios /usr/include/c++/13/bits/ios_base.h \
+ /app/include/netflow++/qos_manager.hpp /usr/include/c++/13/iostream \
+ /usr/include/c++/13/ostream /usr/include/c++/13/ios \
+ /usr/include/c++/13/bits/ios_base.h \
  /usr/include/c++/13/bits/locale_classes.h \
  /usr/include/c++/13/bits/locale_classes.tcc \
  /usr/include/c++/13/system_error /usr/include/c++/13/streambuf \
@@ -223,4 +224,7 @@ CMakeFiles/netflow_app.dir/src/main.cpp.o: /app/src/main.cpp \
  /usr/include/c++/13/bits/locale_facets.tcc \
  /usr/include/c++/13/bits/basic_ios.tcc \
  /usr/include/c++/13/bits/ostream.tcc /usr/include/c++/13/istream \
- /usr/include/c++/13/bits/istream.tcc
+ /usr/include/c++/13/bits/istream.tcc /usr/include/c++/13/deque \
+ /usr/include/c++/13/bits/stl_deque.h /usr/include/c++/13/bits/deque.tcc \
+ /app/include/netflow++/acl_manager.hpp \
+ /app/include/netflow++/lacp_manager.hpp

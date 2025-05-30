@@ -10,6 +10,9 @@
 #include "packet_classifier.hpp"
 #include "lock_free_hash_table.hpp"
 #include "interface_manager.hpp"
+#include "qos_manager.hpp"
+#include "acl_manager.hpp"
+#include "lacp_manager.hpp"
 
 #include <cstdint>
 #include <functional> // For std::function
@@ -32,9 +35,14 @@ public:
     using FlowTable = LockFreeHashTable<FlowKey, uint32_t /* Action ID or Flow Data ID */>;
     FlowTable flow_table_; // New
 
+    QosManager qos_manager_;         // New
+    AclManager acl_manager_;         // New
+    LacpManager lacp_manager_;       // New
+
     Switch(uint32_t num_ports) :
         num_ports_(num_ports),
         flow_table_(1024) /* Default capacity for FlowTable */ {
+        // Default constructors for qos_manager_, acl_manager_, lacp_manager_ are sufficient.
         std::cout << "Switch created with " << num_ports_ << " ports." << std::endl;
         // Initialize port states for STP and InterfaceManager, e.g., to BLOCKING or DISABLED initially
         for (uint32_t i = 0; i < num_ports_; ++i) {
@@ -209,25 +217,47 @@ public:
 
         Packet pkt(raw_buffer); // Packet takes ownership (increments ref count)
 
-        // X. Packet Classification (early stage)
+        // X. ACL Evaluation (early stage)
+        uint32_t redirect_port_id_acl = 0; // Will be set by evaluate if REDIRECT
+        AclActionType acl_action = acl_manager_.evaluate(pkt, redirect_port_id_acl);
+
+        if (acl_action == AclActionType::DENY) {
+            std::cout << "Packet dropped by ACL DENY rule on ingress port " << ingress_port_id << std::endl;
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true); // is_drop = true
+            return; // pkt destructor handles buffer ref_count
+        }
+        if (acl_action == AclActionType::REDIRECT) {
+            std::cout << "Packet redirected by ACL to port " << redirect_port_id_acl
+                      << " from ingress port " << ingress_port_id << std::endl;
+            // For REDIRECT, we might bypass further L2/L3 processing and send directly to the redirect_port.
+            // This simplified REDIRECT assumes the redirect_port_id is a physical port.
+            // QoS could still be applied on the new egress port.
+            uint8_t queue_id_redirect = qos_manager_.classify_packet_to_queue(pkt, redirect_port_id_acl);
+            qos_manager_.enqueue_packet(pkt, redirect_port_id_acl, queue_id_redirect);
+            interface_manager_._increment_tx_stats(redirect_port_id_acl, pkt.get_buffer()->size); // Assuming it will be sent
+            // TODO: A separate scheduler would dequeue and call the actual physical forward_packet.
+            return; // pkt destructor handles buffer ref_count
+        }
+        // If PERMIT, continue normal processing.
+
+        // Y. Packet Classification (can happen before or after L2/L3 logic depending on use case)
         uint32_t classification_action_id = packet_classifier_.classify(pkt);
         if (classification_action_id != 0) { // 0 might mean "no specific rule, continue normal L2/L3"
             std::cout << "Packet on port " << ingress_port_id
-                      << " classified with action ID: " << classification_action_id
-                      << ". (Placeholder: Action not taken yet)" << std::endl;
-            // Depending on action, might bypass normal switching (e.g., ACL drop, send to CPU, specific queue)
-            // For now, just log it.
-            // We could also use this to populate/check the flow_table_ here.
+                      << " classified by PacketClassifier with action ID: " << classification_action_id
+                      << ". (Placeholder: Action not explicitly taken beyond logging/flow table)" << std::endl;
+
             FlowKey current_flow_key = packet_classifier_.extract_flow_key(pkt);
             auto flow_entry = flow_table_.lookup(current_flow_key);
             if(flow_entry.has_value()){
-                 std::cout << "  Flow entry found in table. Action ID: " << flow_entry.value() << std::endl;
+                 std::cout << "  Flow entry found in FlowTable. Action ID: " << flow_entry.value() << std::endl;
+                 // Action could be to use this action_id to override normal forwarding, e.g., if it's a specific egress port or policer.
             } else {
-                 std::cout << "  No specific flow entry in table for this packet." << std::endl;
-                 // Potentially add to flow table after L2/L3 processing if it's a new valid flow.
+                 std::cout << "  No specific flow entry in FlowTable for this packet." << std::endl;
+                 // Potentially add to flow table after L2/L3 processing if it's a new valid flow that should be fast-pathed.
+                 // Example: flow_table_.insert(current_flow_key, some_derived_action_or_port_id);
             }
         }
-
 
         // 1. Ingress VLAN Processing
         PacketAction vlan_action = vlan_manager.process_ingress(pkt, ingress_port_id);
@@ -313,12 +343,29 @@ public:
                 // This is tricky: process_egress might modify the packet.
                 // If forward_packet sends the original buffer, this needs careful handling.
                 // For now, assume process_egress modifies pkt, and forward_packet sends it.
-                vlan_manager.process_egress(pkt, egress_port);
-                forward_packet(pkt, egress_port); // This should also update egress stats
-                interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->size);
+
+                // LACP: Determine actual physical port if egress_port is a LAG
+                uint32_t final_egress_port = egress_port;
+                if (lacp_manager_.get_lag_config(egress_port).has_value()) { // egress_port is a LAG ID
+                    final_egress_port = lacp_manager_.select_egress_port(egress_port, pkt);
+                    std::cout << "LAG " << egress_port << " resolved to physical port " << final_egress_port << std::endl;
+                }
+
+                // Apply egress VLAN processing for the final physical port
+                vlan_manager.process_egress(pkt, final_egress_port);
+
+                // QoS: Classify and Enqueue for the final physical port
+                uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, final_egress_port);
+                qos_manager_.enqueue_packet(pkt, final_egress_port, queue_id);
+                std::cout << "Packet enqueued to port " << final_egress_port << " queue " << static_cast<int>(queue_id) << std::endl;
+
+                // Original direct forwarding commented out - now handled by enqueue + separate scheduler (conceptual)
+                // forward_packet(pkt, final_egress_port);
+                interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->size); // Assume sent by scheduler
             } else {
                 // Destination MAC unknown, flood the packet.
-                // flood_packet itself should handle stats for multiple egress ports.
+                // Flood logic needs to be updated to consider LACP and QoS for each member port.
+                // For now, high-level flood_packet call remains; its internals would need LACP/QoS.
                 flood_packet(pkt, ingress_port_id);
             }
         } else {
