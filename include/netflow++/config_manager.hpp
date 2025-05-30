@@ -10,7 +10,6 @@
 #include <stdexcept> // For std::bad_variant_access
 #include <iostream>  // For placeholder error reporting
 #include <charconv>  // For std::from_chars (C++17 for string to number)
-#include "netflow++/third_party/nlohmann/json.hpp" // For JSON parsing
 
 // Forward declaration for logger if it's to be used
 // Forward declare Switch to break include cycle
@@ -140,10 +139,7 @@ public: // Forward declare to allow Switch to be an argument to apply_config
     // Instead, include "switch.hpp" above. // No, forward declare Switch, define apply_config in .cpp
 
     // Declaration only. Definition moved to config_manager.cpp
-    // void apply_config(const ConfigurationData& config_data_to_apply, netflow::Switch& target_switch);
-    // The apply_config definition was moved to .cpp and its signature changed.
-    // It should take Switch& directly.
-    void apply_config(Switch& switch_obj); // Updated signature
+    void apply_config(const ConfigurationData& config_data_to_apply, netflow::Switch& target_switch);
 
     std::vector<std::string> validate_config(const ConfigurationData& config_to_validate) const {
         std::vector<std::string> errors;

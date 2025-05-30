@@ -1,151 +1,387 @@
 #include "netflow++/stp_manager.hpp"
-#include "netflow++/packet.hpp" // For Packet, EthernetHeader, LLCHeader
+#include "netflow++/packet.hpp"      // For Packet, EthernetHeader, LLCHeader, MacAddress
 #include "netflow++/buffer_pool.hpp" // Required for generate_bpdus access to BufferPool
-#include <iostream> // For temporary logging
-#include <cstring>  // For memcpy in generate_bpdus
+#include "netflow++/logger.hpp"      // For SwitchLogger
+#include <iostream> // For temporary logging during development (replace with logger)
+#include <vector>
+#include <algorithm> // For std::min, std::find_if etc.
+#include <cstring>   // For memcpy
+
+// Ensure network byte order utilities are available.
+// These might be system-dependent or part of a utility header.
+// For simplicity, providing basic versions if not found, similar to packet.hpp.
+#if !defined(htonll) && !defined(ntohll) // Check if already defined (e.g. by ConfigBpdu in header)
+    #if __has_include(<arpa/inet.h>)
+        // System provides them (usually only for 16/32 bit)
+        // 64-bit might need custom implementation if not available via system headers implicitly
+    #elif __has_include(<winsock2.h>)
+        // Windows
+    #else
+        // Basic fallbacks if no system headers known for these specifically for 64-bit
+        // These are often defined as static methods in ConfigBpdu now.
+    #endif
+
+// Define static helpers if they are not part of ConfigBpdu in the header
+// These were defined in ConfigBpdu struct in the header as per latest stp_manager.hpp modification.
+// If they are needed here independently, they could be defined in an anonymous namespace or as static.
+// For now, assume they are accessible via ConfigBpdu::htonll / ConfigBpdu::ntohll from the header.
+#endif
+
 
 namespace netflow {
 
+// --- ConfigBpdu Method Definitions ---
+ConfigBpdu::ConfigBpdu() :
+    protocol_id(StpDefaults::PROTOCOL_ID), version_id(StpDefaults::VERSION_ID_STP),
+    bpdu_type(StpDefaults::BPDU_TYPE_CONFIG), flags(0),
+    root_id(0), root_path_cost(0), bridge_id(0), port_id(0),
+    message_age(0), max_age(0), hello_time(0), forward_delay(0) {
+    // All members initialized via member initializer list or are fundamental types zero-initialized.
+}
+
+uint64_t ConfigBpdu::htonll(uint64_t val) {
+    if (__BYTE_ORDER == __LITTLE_ENDIAN) {
+        return (((uint64_t)htonl(static_cast<uint32_t>(val & 0xFFFFFFFF))) << 32) | htonl(static_cast<uint32_t>(val >> 32));
+    }
+    return val;
+}
+
+uint64_t ConfigBpdu::ntohll(uint64_t val) {
+    if (__BYTE_ORDER == __LITTLE_ENDIAN) {
+        return (((uint64_t)ntohl(static_cast<uint32_t>(val & 0xFFFFFFFF))) << 32) | ntohl(static_cast<uint32_t>(val >> 32));
+    }
+    return val;
+}
+
+void ConfigBpdu::from_bpdu_info_for_sending(const ReceivedBpduInfo& source_info,
+                                            uint64_t my_bridge_id_val, uint16_t my_port_id_val,
+                                            uint16_t effective_message_age_val, uint16_t root_max_age_val,
+                                            uint16_t root_hello_time_val, uint16_t root_forward_delay_val) {
+    protocol_id = StpDefaults::PROTOCOL_ID;
+    version_id = StpDefaults::VERSION_ID_STP;
+    bpdu_type = StpDefaults::BPDU_TYPE_CONFIG;
+    root_id = htonll(source_info.root_id);
+    root_path_cost = htonl(source_info.root_path_cost);
+    bridge_id = htonll(my_bridge_id_val);
+    port_id = htons(my_port_id_val);
+    message_age = htons(effective_message_age_val);
+    max_age = htons(root_max_age_val);
+    hello_time = htons(root_hello_time_val);
+    forward_delay = htons(root_forward_delay_val);
+    flags = (source_info.tc_flag ? 0x01 : 0x00) | (source_info.tca_flag ? 0x80 : 0x00);
+}
+
+ReceivedBpduInfo ConfigBpdu::to_received_bpdu_info() const {
+    ReceivedBpduInfo info;
+    // Basic validation already done by caller in StpManager::process_bpdu for type, version, proto
+    // if (protocol_id != StpDefaults::PROTOCOL_ID || version_id != StpDefaults::VERSION_ID_STP || bpdu_type != StpDefaults::BPDU_TYPE_CONFIG) {
+    //     info.root_id = 0xFFFFFFFFFFFFFFFFULL;
+    //     return info;
+    // }
+    info.root_id = ntohll(root_id);
+    info.root_path_cost = ntohl(root_path_cost);
+    info.sender_bridge_id = ntohll(bridge_id);
+    info.sender_port_id = ntohs(port_id);
+    info.message_age = ntohs(message_age);
+    info.max_age = ntohs(max_age);
+    info.hello_time = ntohs(hello_time);
+    info.forward_delay = ntohs(forward_delay);
+    info.tc_flag = (flags & 0x01);
+    info.tca_flag = (flags & 0x80);
+    return info;
+}
+
+// --- ReceivedBpduInfo Method Definitions ---
+bool ReceivedBpduInfo::is_superior_to(const ReceivedBpduInfo& other, uint64_t self_bridge_id) const {
+    // Lower Root ID is better
+    if (this->root_id < other.root_id) return true;
+    if (this->root_id > other.root_id) return false;
+
+    // Same Root ID, lower Root Path Cost is better
+    if (this->root_path_cost < other.root_path_cost) return true;
+    if (this->root_path_cost > other.root_path_cost) return false;
+
+    // Same Root ID and RPC, lower Sender Bridge ID is better
+    if (this->sender_bridge_id < other.sender_bridge_id) return true;
+    if (this->sender_bridge_id > other.sender_bridge_id) return false;
+
+    // Same Root ID, RPC, Sender BID, lower Sender Port ID is better
+    if (this->sender_port_id < other.sender_port_id) return true;
+    if (this->sender_port_id > other.sender_port_id) return false;
+
+    // IEEE 802.1D-2004 specifies one more tie-breaker: the BPDU received on the port with the lower Port Identifier
+    // This is handled by the port selection logic itself when comparing BPDUs from different ports.
+    // If 'this' BPDU and 'other' BPDU are for the same port or being compared globally, this final tie-breaker isn't applicable here directly.
+
+    return false; // Otherwise, not strictly superior (could be equal or inferior)
+}
+
+
+// --- StpPortInfo Method Definitions ---
+StpManager::StpPortInfo::StpPortInfo(uint32_t id)
+    : port_id_internal(id),
+      role(PortRole::DISABLED), // Initial role as per latest header
+      state(PortState::DISABLED), // Initial state as per latest header
+      path_cost_to_segment(19), // Default, should be configurable by speed
+      designated_bridge_id_for_segment(0),
+      designated_port_id_for_segment(0),
+      path_cost_from_designated_bridge_to_root(0xFFFFFFFF),
+      message_age_timer_seconds(0),
+      forward_delay_timer_seconds(0),
+      hello_timer_seconds(0),
+      new_bpdu_received_flag(false),
+      port_priority(128) {
+    update_stp_port_id_field();
+    // received_bpdu uses default constructor (worst values)
+}
+
+void StpManager::StpPortInfo::update_stp_port_id_field() {
+    // STP Port ID: 4 bits priority (MSB of port_priority) + 12 bits port index (port_id_internal)
+    // Standard combines 4-bit priority (0-240, steps of 16) and 12-bit port number.
+    // Here, port_priority is 8-bit. We take its upper 4 bits.
+    stp_port_id_field = static_cast<uint16_t>(((port_priority >> 4) & 0x0F) << 12) | (port_id_internal & 0x0FFF);
+}
+
+bool StpManager::StpPortInfo::has_valid_bpdu_info(uint16_t max_age_limit_seconds) const {
+    // Compares this port's BPDU info age against the max_age limit from the *received BPDU's* max_age value.
+    // The message_age_timer_seconds counts how long *we* have held this BPDU info without refresh.
+    // The received_bpdu.message_age is the age accumulated up to the sender.
+    // Total age = received_bpdu.message_age/256 + message_age_timer_seconds.
+    // This should be compared against received_bpdu.max_age/256.
+    // The run_stp_timers logic handles aging out based on message_age_timer_seconds vs received_bpdu.max_age/256.
+    // So this function can just check if the sender is valid.
+    return received_bpdu.sender_bridge_id != 0xFFFFFFFFFFFFFFFFULL &&
+           message_age_timer_seconds < (received_bpdu.max_age / 256); // Ensure it hasn't locally timed out
+}
+
+uint32_t StpManager::StpPortInfo::get_total_path_cost_to_root_via_port() const {
+    // This would be the cost recorded in a BPDU received on this port + this port's own path_cost_to_segment
+    // However, the StpPortInfo stores path_cost_from_designated_bridge_to_root, which is from the BPDU.
+    // So, it should be path_cost_from_designated_bridge_to_root + path_cost_to_segment.
+    if (path_cost_from_designated_bridge_to_root == 0xFFFFFFFF) {
+        return 0xFFFFFFFF;
+    }
+    return path_cost_from_designated_bridge_to_root + path_cost_to_segment;
+}
+
+// --- BridgeConfig Method Definitions ---
+StpManager::BridgeConfig::BridgeConfig(uint64_t mac, uint16_t priority,
+                                       uint32_t hello, uint32_t fwd_delay, uint32_t age)
+    : bridge_mac_address(mac), bridge_priority(priority),
+      hello_time_seconds(hello), forward_delay_seconds(fwd_delay), max_age_seconds(age) {
+    update_bridge_id_value();
+    // Initially, assume self is root for 'our_bpdu_info'
+    our_bpdu_info.root_id = bridge_id_value;
+    our_bpdu_info.root_path_cost = 0;
+    our_bpdu_info.sender_bridge_id = bridge_id_value;
+    our_bpdu_info.sender_port_id = 0; // Port 0 indicates from bridge itself
+    our_bpdu_info.message_age = 0;
+    our_bpdu_info.max_age = max_age_seconds * 256;
+    our_bpdu_info.hello_time = hello_time_seconds * 256;
+    our_bpdu_info.forward_delay = forward_delay_seconds * 256;
+    our_bpdu_info.tc_flag = false;
+    our_bpdu_info.tca_flag = false;
+    root_port_internal_id.reset();
+}
+
+void StpManager::BridgeConfig::update_bridge_id_value() {
+    // Bridge ID: 16 bits priority + 48 bits MAC address
+    bridge_id_value = (static_cast<uint64_t>(bridge_priority) << 48) | (bridge_mac_address & 0x0000FFFFFFFFFFFFULL);
+}
+
+bool StpManager::BridgeConfig::is_root_bridge() const {
+    return our_bpdu_info.root_id == bridge_id_value;
+}
+
+
+// --- StpManager Constructor ---
+StpManager::StpManager(uint32_t num_ports, uint64_t switch_mac_address, uint16_t switch_priority)
+    : bridge_config_(switch_mac_address, switch_priority) { // BridgeConfig constructor handles MAC and priority
+    // Logger might be passed here if needed for init logging.
+    // For now, assume logger is passed to methods that need it.
+    initialize_ports(num_ports);
+    // Initial calculation of roles and states.
+    // SwitchLogger dummy_logger; // Placeholder if no logger passed to constructor
+    // recalculate_stp_roles_and_states(dummy_logger);
+    // Postponing initial recalculation to be called explicitly by Switch class after full setup.
+}
+
+// --- StpManager::initialize_ports ---
+void StpManager::initialize_ports(uint32_t num_ports) {
+    port_stp_info_.clear();
+    for (uint32_t i = 0; i < num_ports; ++i) {
+        port_stp_info_[i] = StpPortInfo(i); // StpPortInfo constructor sets defaults
+
+        // Specific initializations based on bridge_config_
+        StpPortInfo& p_info = port_stp_info_[i];
+        p_info.state = PortState::BLOCKING; // Start all ports in BLOCKING
+        p_info.role = PortRole::DISABLED;   // Or UNKNOWN, to be determined by first recalculate
+                                            // Setting to DISABLED until explicitly enabled by admin or STP logic.
+                                            // However, the subtask implies starting as designated for self.
+                                            // Let's align with the previous implementation's spirit for initialization.
+
+        // Each port initially considers itself as the designated port on its segment,
+        // with the current bridge as the designated bridge and root.
+        p_info.designated_bridge_id_for_segment = bridge_config_.bridge_id_value;
+        p_info.designated_port_id_for_segment = p_info.stp_port_id_field; // Its own STP port ID
+        p_info.path_cost_from_designated_bridge_to_root = 0; // Cost to root is 0 as we are the root for this segment initially
+
+        // Initialize received_bpdu to reflect no valid BPDU received yet, or self as root.
+        // This aligns with the idea that a port starts by advertising itself as root for its segment.
+        p_info.received_bpdu.root_id = bridge_config_.bridge_id_value;
+        p_info.received_bpdu.root_path_cost = 0;
+        p_info.received_bpdu.sender_bridge_id = bridge_config_.bridge_id_value;
+        p_info.received_bpdu.sender_port_id = p_info.stp_port_id_field;
+        p_info.received_bpdu.message_age = 0;
+        p_info.received_bpdu.max_age = bridge_config_.our_bpdu_info.max_age; // Use our configured timers
+        p_info.received_bpdu.hello_time = bridge_config_.our_bpdu_info.hello_time;
+        p_info.received_bpdu.forward_delay = bridge_config_.our_bpdu_info.forward_delay;
+
+        // Default path_cost_to_segment (e.g. for 100Mbps). Should be updated based on actual port speed.
+        // This was in StpPortInfo constructor in prior versions of header.
+        // p_info.path_cost_to_segment = 19;
+    }
+}
+
 // --- StpManager::process_bpdu ---
-void StpManager::process_bpdu(const Packet& bpdu_packet, uint32_t ingress_port_id) {
+void StpManager::process_bpdu(const Packet& bpdu_packet, uint32_t ingress_port_id, SwitchLogger& logger) {
     auto port_it = port_stp_info_.find(ingress_port_id);
     if (port_it == port_stp_info_.end()) {
-        // std::cerr << "STP: Received BPDU on unknown port: " << ingress_port_id << std::endl;
+        logger.warn("STP_BPDU", "BPDU received on unknown port: " + std::to_string(ingress_port_id));
         return;
     }
 
     StpPortInfo& p_info = port_it->second;
     if (p_info.state == PortState::DISABLED) {
-        // std::cout << "STP: BPDU received on disabled port " << ingress_port_id << ", ignoring." << std::endl;
+        logger.debug("STP_BPDU", "BPDU on disabled port " + std::to_string(ingress_port_id) + ", ignoring.");
         return;
     }
 
     const PacketBuffer* pb = bpdu_packet.get_buffer();
-    if (!pb || pb->size < sizeof(EthernetHeader) + sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE) {
-        // std::cerr << "STP: Received packet too small to be a valid BPDU on port " << ingress_port_id << std::endl;
+    // Check for minimum LACPDU size here, assuming Ethernet header is already parsed by Switch.
+    // The packet passed to process_bpdu might be just the L2 payload.
+    // For now, assume it's a full Ethernet frame.
+    if (!pb || pb->size < (sizeof(EthernetHeader) + sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE)) {
+        logger.warn("STP_BPDU", "Packet too small for BPDU on port " + std::to_string(ingress_port_id));
         return;
     }
 
-    // Assuming BPDU is encapsulated in Ethernet + LLC
-    // Skip Ethernet header, then LLC header to get to BPDU payload
     const uint8_t* bpdu_payload_start = pb->data + sizeof(EthernetHeader) + sizeof(LLCHeader);
     size_t bpdu_payload_length = pb->size - (sizeof(EthernetHeader) + sizeof(LLCHeader));
 
     if (bpdu_payload_length < CONFIG_BPDU_PAYLOAD_SIZE) {
-        // std::cerr << "STP: BPDU payload too short on port " << ingress_port_id << std::endl;
+        logger.warn("STP_BPDU", "BPDU payload too short on port " + std::to_string(ingress_port_id));
         return;
     }
 
-    ConfigBpdu received_config_bpdu;
-    memcpy(&received_config_bpdu, bpdu_payload_start, CONFIG_BPDU_PAYLOAD_SIZE);
+    ConfigBpdu received_config_bpdu_raw; // Temporary raw storage
+    memcpy(&received_config_bpdu_raw, bpdu_payload_start, CONFIG_BPDU_PAYLOAD_SIZE);
 
-    // Validate BPDU (basic checks)
-    if (received_config_bpdu.protocol_id != StpDefaults::PROTOCOL_ID ||
-        received_config_bpdu.version_id != StpDefaults::VERSION_ID_STP || // Classic STP/RSTP BPDUs
-        received_config_bpdu.bpdu_type != StpDefaults::BPDU_TYPE_CONFIG) {
-        // std::cout << "STP: Received non-Config BPDU or invalid version/protocol on port " << ingress_port_id << ", ignoring." << std::endl;
+    if (received_config_bpdu_raw.protocol_id != StpDefaults::PROTOCOL_ID ||
+        received_config_bpdu_raw.version_id != StpDefaults::VERSION_ID_STP ||
+        received_config_bpdu_raw.bpdu_type != StpDefaults::BPDU_TYPE_CONFIG) {
+        logger.debug("STP_BPDU", "Non-Config/Invalid BPDU on port " + std::to_string(ingress_port_id));
         return;
     }
 
-    // std::cout << "STP: Valid Config BPDU received on port " << ingress_port_id << std::endl;
+    ReceivedBpduInfo new_bpdu_info = received_config_bpdu_raw.to_received_bpdu_info();
+    logger.info("STP_BPDU", "Config BPDU received on port " + std::to_string(ingress_port_id) +
+                              ": RootID=" + logger.uint64_to_hex_string(new_bpdu_info.root_id) +
+                              ", SenderBID=" + logger.uint64_to_hex_string(new_bpdu_info.sender_bridge_id) +
+                              ", Cost=" + std::to_string(new_bpdu_info.root_path_cost));
 
-    ReceivedBpduInfo new_bpdu = received_config_bpdu.to_received_bpdu_info();
-
-    // Update port's received BPDU info
-    // The comparison logic (is_superior_to) is in ReceivedBpduInfo, but actual STP standard
-    // dictates specific comparison steps. For now, we'll just store the latest.
-    // A real implementation would compare new_bpdu with p_info.received_bpdu
-    // and only update if new_bpdu is superior or has pertinent changes.
-    p_info.received_bpdu = new_bpdu;
-    p_info.message_age_timer_seconds = 0; // Reset message age timer for this port's BPDU info
+    p_info.received_bpdu = new_bpdu_info;
+    p_info.message_age_timer_seconds = 0; // Reset timer because we got a new BPDU
     p_info.new_bpdu_received_flag = true;
 
-    // TODO: Log received BPDU details if necessary using a logger object
-
-    recalculate_stp_roles_and_states();
+    recalculate_stp_roles_and_states(logger);
 }
 
 // --- StpManager::generate_bpdus ---
-std::vector<Packet> StpManager::generate_bpdus(BufferPool& buffer_pool) {
+std::vector<Packet> StpManager::generate_bpdus(BufferPool& buffer_pool, SwitchLogger& logger) {
     std::vector<Packet> bpdus_to_send;
-    // This method should be called approximately once per hello_time_seconds for the root bridge,
-    // or when a port becomes designated and needs to send BPDUs.
 
-    for (auto& pair : port_stp_info_) {
-        uint32_t port_id = pair.first;
-        StpPortInfo& p_info = pair.second;
+    for (auto& pair_port_info : port_stp_info_) {
+        uint32_t port_id = pair_port_info.first;
+        StpPortInfo& p_info = pair_port_info.second;
 
-        if (p_info.role == PortRole::DESIGNATED && p_info.state != PortState::DISABLED && p_info.state != PortState::BLOCKING) {
+        if (p_info.role == PortRole::DESIGNATED &&
+            p_info.state != PortState::DISABLED &&
+            p_info.state != PortState::BLOCKING) {
+
             if (p_info.hello_timer_seconds >= bridge_config_.hello_time_seconds) {
-                p_info.hello_timer_seconds = 0; // Reset hello timer
+                p_info.hello_timer_seconds = 0;
 
-                // Construct BPDU payload using our bridge's current STP information
                 ConfigBpdu bpdu_to_send_struct;
-                ReceivedBpduInfo source_bpdu_params = bridge_config_.our_bpdu_info;
+                ReceivedBpduInfo params_for_bpdu = bridge_config_.our_bpdu_info; // Base parameters
 
-                // If we are not the root bridge, the BPDUs we send on designated ports are based on
-                // our root port's received BPDU, with costs and bridge ID updated.
-                // The message_age also needs to be incremented.
-                uint16_t effective_message_age = source_bpdu_params.message_age;
+                uint16_t msg_age_for_bpdu = params_for_bpdu.message_age;
                 if (!bridge_config_.is_root_bridge()) {
-                    // Increment message age by 1 second (256/256ths) when relaying BPDU info
-                    // This is a simplification; precise increment depends on actual time passed.
-                     effective_message_age += 256;
+                    // Per IEEE 802.1D-2004, page 108: Message Age on BPDUs transmitted through a Designated Port
+                    // is incremented by one second for each second of the transit time through the Bridge.
+                    // Simplified: add 1 second (256 units) to the received Message Age.
+                    // This should be based on the *actual* message age from the root BPDU + transit.
+                    // For a simple model, if our_bpdu_info.message_age is what we *received* from upstream,
+                    // we add a small increment. If it's what *we calculated as root*, it's 0.
+                     msg_age_for_bpdu += (1 * 256); // Increment by 1 second
                 }
 
-                // Ensure message age does not exceed max_age from the root's perspective
-                if (effective_message_age >= source_bpdu_params.max_age) {
-                    // std::cout << "STP: BPDU for port " << port_id << " message age would exceed max age. Not sending." << std::endl;
+                if (msg_age_for_bpdu >= params_for_bpdu.max_age) {
+                    logger.warn("STP_BPDU_GEN", "Msg age would exceed Max age for BPDU on port " + std::to_string(port_id));
                     continue;
                 }
 
                 bpdu_to_send_struct.from_bpdu_info_for_sending(
-                    source_bpdu_params,
-                    bridge_config_.bridge_id_value,
-                    p_info.stp_port_id_field,
-                    effective_message_age,
-                    source_bpdu_params.max_age,    // Max Age from root's BPDU
-                    source_bpdu_params.hello_time, // Hello Time from root's BPDU
-                    source_bpdu_params.forward_delay // Forward Delay from root's BPDU
+                    params_for_bpdu,                 // Contains Root ID, Root Path Cost from our perspective
+                    bridge_config_.bridge_id_value,  // Our Bridge ID as Sender BID
+                    p_info.stp_port_id_field,        // Our Port ID as Sender PID
+                    msg_age_for_bpdu,                // Effective Message Age
+                    params_for_bpdu.max_age,         // Max Age from (our view of) Root
+                    params_for_bpdu.hello_time,      // Hello Time from (our view of) Root
+                    params_for_bpdu.forward_delay    // Forward Delay from (our view of) Root
                 );
 
-                // TODO: Set TC/TCA flags correctly based on STP state machine events.
-                // bpdu_to_send_struct.set_flags(bridge_config_.our_bpdu_info.tc_flag, bridge_config_.our_bpdu_info.tca_flag);
+                // TC/TCA flags are typically set based on topology change state machines, not directly from our_bpdu_info all the time.
+                // For now, use flags from our_bpdu_info.
+                bpdu_to_send_struct.flags = (params_for_bpdu.tc_flag ? 0x01 : 0x00) | (params_for_bpdu.tca_flag ? 0x80 : 0x00);
 
 
-                // Allocate PacketBuffer
                 size_t total_bpdu_size = sizeof(EthernetHeader) + sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE;
                 PacketBuffer* pb = buffer_pool.allocate_buffer(total_bpdu_size);
                 if (!pb) {
-                    // std::cerr << "STP: Failed to allocate buffer for BPDU on port " << port_id << std::endl;
-                    continue; // Or handle error appropriately
+                    logger.error("STP_BPDU_GEN", "Buffer allocation failed for BPDU on port " + std::to_string(port_id));
+                    continue;
                 }
                 pb->size = total_bpdu_size;
+                memset(pb->data, 0, total_bpdu_size);
 
-                // Construct Ethernet Header
+
                 EthernetHeader* eth_hdr = reinterpret_cast<EthernetHeader*>(pb->data);
-                eth_hdr->dst_mac = htonll(0x0180C2000000ULL); // STP Multicast MAC
-                // Source MAC should be the MAC of this specific port, or bridge MAC if per-port MACs not used.
-                // For now, use bridge_config's MAC.
-                eth_hdr->src_mac = htonll(bridge_config_.bridge_mac_address);
-                eth_hdr->ethertype = htons(sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE); // Length field for LLC
+                // Correctly create MacAddress objects for assignment
+                uint8_t stp_dst_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00};
+                eth_hdr->dst_mac = MacAddress(stp_dst_mac_bytes);
 
-                // Construct LLC Header (for STP BPDUs)
+                // Convert uint64_t bridge_mac_address to uint8_t[6] for MacAddress constructor
+                uint8_t bridge_mac_bytes[6];
+                uint64_t temp_mac = bridge_config_.bridge_mac_address;
+                for(int i=0; i<6; ++i) bridge_mac_bytes[5-i] = (temp_mac >> (i*8)) & 0xFF;
+                eth_hdr->src_mac = MacAddress(bridge_mac_bytes);
+
+                eth_hdr->ethertype = htons(sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE);
+
                 LLCHeader* llc_hdr = reinterpret_cast<LLCHeader*>(pb->data + sizeof(EthernetHeader));
-                llc_hdr->dsap = 0x42; // Bridge Spanning Tree Protocol Group DSAP
-                llc_hdr->ssap = 0x42; // Bridge Spanning Tree Protocol Group SSAP
-                llc_hdr->control = 0x03; // Unnumbered Information (UI frame)
+                llc_hdr->dsap = 0x42;
+                llc_hdr->ssap = 0x42;
+                llc_hdr->control = 0x03;
 
-                // Copy BPDU payload
                 memcpy(pb->data + sizeof(EthernetHeader) + sizeof(LLCHeader), &bpdu_to_send_struct, CONFIG_BPDU_PAYLOAD_SIZE);
 
                 Packet new_bpdu_packet(pb);
-                // The packet might need a reference to the originating port for some switch architectures,
-                // but for now, the vector of packets is enough. The caller (Switch) would handle sending.
                 bpdus_to_send.push_back(new_bpdu_packet);
-                buffer_pool.release_buffer(pb); // Release our reference, Packet owns one now.
+                // Packet dtor will call release_buffer on pb
+                // buffer_pool.release_buffer(pb); // This would be a double release if Packet owns it.
 
-                // std::cout << "STP: Generated BPDU for port " << port_id << std::endl;
+                logger.info("STP_BPDU_GEN", "Generated BPDU on port " + std::to_string(port_id));
             }
         }
     }
@@ -153,128 +389,106 @@ std::vector<Packet> StpManager::generate_bpdus(BufferPool& buffer_pool) {
 }
 
 // --- StpManager::recalculate_stp_roles_and_states ---
-void StpManager::recalculate_stp_roles_and_states() {
-    // This is a placeholder for the complex STP logic.
-    // A full implementation involves:
-    // 1. Update Root Bridge Election:
-    //    - Compare our bridge's current root_bridge_info with BPDUs received on all ports.
-    //    - If a superior BPDU is found (better root_id, or same root_id with lower path cost, or tie-breaking rules),
-    //      update our_bpdu_info to reflect the new root and identify the new root_port_internal_id.
-    //    - If our own bridge_id_value is the best, we become/remain the root.
+void StpManager::recalculate_stp_roles_and_states(SwitchLogger& logger) {
+    // Implementation based on previous detailed logic.
+    // This will involve root bridge election, root port selection, designated port election,
+    // and updating port roles and states.
 
-    // 2. Determine Port Roles for each active port:
-    //    - Root Port (RP): One port that offers the best path to the elected Root Bridge. Blocked if no path.
-    //    - Designated Port (DP): For each LAN segment, one port is elected as DP. This bridge's port becomes DP if it offers
-    //      the best path from that segment towards the Root Bridge, or if this bridge is the Root Bridge.
-    //    - Alternate Port (AP): Ports that offer a backup path to the Root Bridge (alternative to RP). Blocking state.
-    //    - Backup Port (BP): Ports connected to a segment where another port on the same bridge is already DP (rare). Blocking state.
-    //    - Disabled Port: Administratively down or failed.
+    // 1. Assume self as root initially for this cycle's calculation
+    ReceivedBpduInfo best_bpdu_for_root_election = bridge_config_.our_bpdu_info; // Start with current state
+    // Ensure it reflects this bridge if it were root
+    best_bpdu_for_root_election.root_id = bridge_config_.bridge_id_value;
+    best_bpdu_for_root_election.root_path_cost = 0;
+    best_bpdu_for_root_election.sender_bridge_id = bridge_config_.bridge_id_value;
+    best_bpdu_for_root_election.sender_port_id = 0;
+    best_bpdu_for_root_election.message_age = 0;
+    best_bpdu_for_root_election.max_age = bridge_config_.max_age_seconds * 256;
+    best_bpdu_for_root_election.hello_time = bridge_config_.hello_time_seconds * 256;
+    best_bpdu_for_root_election.forward_delay = bridge_config_.forward_delay_seconds * 256;
 
-    // 3. Transition Port States based on roles and timers:
-    //    - Root and Designated ports transition: BLOCKING -> LISTENING -> LEARNING -> FORWARDING.
-    //      Each transition (LISTENING, LEARNING) lasts for forward_delay_seconds.
-    //    - Alternate and Backup ports remain in BLOCKING state.
-    //    - If a port loses its Root/Designated role, it typically reverts to BLOCKING.
 
-    // --- Simplified Placeholder Logic ---
-    bool i_am_root = true; // Assume we are root initially for this recalculation cycle
-    ReceivedBpduInfo best_root_bpdu_overall = bridge_config_.our_bpdu_info; // Start with our own info as best
+    std::optional<uint32_t> new_root_port_id;
 
-    // Re-evaluate our knowledge of the root bridge based on received BPDUs
-    for (auto& pair : port_stp_info_) {
-        StpPortInfo& p_info = pair.second;
+    // Iterate over all ports to find the best BPDU received, which determines the root
+    for (auto& pair_port_info : port_stp_info_) {
+        StpPortInfo& p_info = pair_port_info.second;
         if (p_info.state == PortState::DISABLED) continue;
 
-        // Check if BPDU received on this port offers a better root or path to current root
         if (p_info.has_valid_bpdu_info(bridge_config_.max_age_seconds)) {
-            // Compare p_info.received_bpdu with best_root_bpdu_overall
-            if (p_info.received_bpdu.is_superior_to(best_root_bpdu_overall)) {
-                best_root_bpdu_overall = p_info.received_bpdu;
-                i_am_root = false; // We found a better root via a received BPDU
+            if (p_info.received_bpdu.is_superior_to(best_bpdu_for_root_election, bridge_config_.bridge_id_value)) {
+                best_bpdu_for_root_election = p_info.received_bpdu;
             }
         }
     }
 
-    // Update our bridge's view of the root
-    if (i_am_root) { // We are still the root bridge
-        bridge_config_.our_bpdu_info.root_id = bridge_config_.bridge_id_value;
+    bridge_config_.our_bpdu_info.root_id = best_bpdu_for_root_election.root_id;
+    bridge_config_.our_bpdu_info.max_age = best_bpdu_for_root_election.max_age;
+    bridge_config_.our_bpdu_info.hello_time = best_bpdu_for_root_election.hello_time;
+    bridge_config_.our_bpdu_info.forward_delay = best_bpdu_for_root_election.forward_delay;
+
+    if (bridge_config_.is_root_bridge()) {
         bridge_config_.our_bpdu_info.root_path_cost = 0;
-        bridge_config_.our_bpdu_info.sender_bridge_id = bridge_config_.bridge_id_value; // We are the sender of root info
-        bridge_config_.our_bpdu_info.sender_port_id = 0; // Port ID 0 indicates from bridge itself
+        bridge_config_.our_bpdu_info.sender_bridge_id = bridge_config_.bridge_id_value;
+        bridge_config_.our_bpdu_info.sender_port_id = 0;
+        bridge_config_.our_bpdu_info.message_age = 0;
         bridge_config_.root_port_internal_id.reset();
-        // Timers (max_age, hello, fwd_delay) in our_bpdu_info are our configured values.
-        bridge_config_.our_bpdu_info.message_age = 0; // Message age is 0 when originated by root
-    } else { // We are not the root, best_root_bpdu_overall holds the superior root info
-        bridge_config_.our_bpdu_info.root_id = best_root_bpdu_overall.root_id;
-        // Our root path cost will be the received BPDU's root_path_cost + cost of the port it came in on.
-        // This needs to find the actual root port first.
-        // For now, just copy, but this is NOT correct for our_bpdu_info if we are not root.
-        // bridge_config_.our_bpdu_info.root_path_cost = best_root_bpdu_overall.root_path_cost; // This will be updated after RP selection
-        bridge_config_.our_bpdu_info.sender_bridge_id = bridge_config_.bridge_id_value; // We are the sender
-        // Timers should be taken from the root's BPDU
-        bridge_config_.our_bpdu_info.max_age = best_root_bpdu_overall.max_age;
-        bridge_config_.our_bpdu_info.hello_time = best_root_bpdu_overall.hello_time;
-        bridge_config_.our_bpdu_info.forward_delay = best_root_bpdu_overall.forward_delay;
-        bridge_config_.our_bpdu_info.message_age = best_root_bpdu_overall.message_age; // Will be incremented when sent
-    }
+        logger.info("STP_RECALC", "This bridge (" + logger.uint64_to_hex_string(bridge_config_.bridge_id_value) + ") is ROOT.");
+    } else {
+        uint32_t calculated_rpc_for_bridge = 0xFFFFFFFF;
 
-    // Determine Root Port (if not root)
-    bridge_config_.root_port_internal_id.reset();
-    uint32_t best_rpc_to_root_via_port = 0xFFFFFFFF;
+        for (auto& pair_port_info : port_stp_info_) {
+             StpPortInfo& p_info = pair_port_info.second;
+             if (p_info.state == PortState::DISABLED) continue;
 
-    if (!i_am_root) {
-        uint32_t current_best_port_id = 0; // Placeholder
-        bool root_port_found = false;
+            if (p_info.has_valid_bpdu_info(bridge_config_.max_age_seconds) &&
+                p_info.received_bpdu.root_id == bridge_config_.our_bpdu_info.root_id) {
 
-        for (auto& pair : port_stp_info_) {
-            StpPortInfo& p_info = pair.second;
-            if (p_info.state == PortState::DISABLED) continue;
-
-            if (p_info.has_valid_bpdu_info(bridge_config_.max_age_seconds) && p_info.received_bpdu.root_id == bridge_config_.our_bpdu_info.root_id) {
                 uint32_t cost_via_this_port = p_info.received_bpdu.root_path_cost + p_info.path_cost_to_segment;
-                if (cost_via_this_port < best_rpc_to_root_via_port) {
-                    best_rpc_to_root_via_port = cost_via_this_port;
-                    current_best_port_id = p_info.port_id_internal;
-                    root_port_found = true;
-                } else if (cost_via_this_port == best_rpc_to_root_via_port) {
-                    // Tie-breaking: lower sender bridge ID, then lower sender port ID
-                    StpPortInfo& current_best_p_info = port_stp_info_.at(current_best_port_id);
-                    if (p_info.received_bpdu.sender_bridge_id < current_best_p_info.received_bpdu.sender_bridge_id) {
-                         current_best_port_id = p_info.port_id_internal;
-                    } else if (p_info.received_bpdu.sender_bridge_id == current_best_p_info.received_bpdu.sender_bridge_id &&
-                               p_info.received_bpdu.sender_port_id < current_best_p_info.received_bpdu.sender_port_id) {
-                         current_best_port_id = p_info.port_id_internal;
+
+                if (!new_root_port_id.has_value() || cost_via_this_port < calculated_rpc_for_bridge) {
+                    calculated_rpc_for_bridge = cost_via_this_port;
+                    new_root_port_id = p_info.port_id_internal;
+                } else if (cost_via_this_port == calculated_rpc_for_bridge) {
+                    StpPortInfo& current_best_rp_info = port_stp_info_.at(new_root_port_id.value());
+                    if (p_info.received_bpdu.sender_bridge_id < current_best_rp_info.received_bpdu.sender_bridge_id) {
+                         new_root_port_id = p_info.port_id_internal;
+                    } else if (p_info.received_bpdu.sender_bridge_id == current_best_rp_info.received_bpdu.sender_bridge_id &&
+                               p_info.received_bpdu.sender_port_id < current_best_rp_info.received_bpdu.sender_port_id) {
+                         new_root_port_id = p_info.port_id_internal;
                     }
                 }
             }
         }
-        if (root_port_found) {
-            bridge_config_.root_port_internal_id = current_best_port_id;
-            bridge_config_.our_bpdu_info.root_path_cost = best_rpc_to_root_via_port;
-            // The sender_port_id for our BPDUs should be our root port's stp_port_id_field
-             bridge_config_.our_bpdu_info.sender_port_id = port_stp_info_.at(current_best_port_id).stp_port_id_field;
+        bridge_config_.root_port_internal_id = new_root_port_id;
+        if (new_root_port_id.has_value()) {
+            bridge_config_.our_bpdu_info.root_path_cost = calculated_rpc_for_bridge;
+            bridge_config_.our_bpdu_info.sender_bridge_id = bridge_config_.bridge_id_value;
+            bridge_config_.our_bpdu_info.sender_port_id = port_stp_info_.at(new_root_port_id.value()).stp_port_id_field;
+            bridge_config_.our_bpdu_info.message_age = port_stp_info_.at(new_root_port_id.value()).received_bpdu.message_age;
+            logger.info("STP_RECALC", "This bridge is NOT ROOT. Root Port: " + std::to_string(new_root_port_id.value()) +
+                                     ", New Root Path Cost: " + std::to_string(calculated_rpc_for_bridge));
         } else {
-            // No path to the elected root, this is problematic. Maybe stay as root or block all.
-            // For now, if we thought there was a better root but have no path, revert to being root.
-            // This part of logic needs careful handling for convergence.
-            i_am_root = true; // Fallback: declare self as root if no path to the better one.
+            logger.warn("STP_RECALC", "No path to known root " + logger.uint64_to_hex_string(bridge_config_.our_bpdu_info.root_id) + ". Reverting to self as root.");
             bridge_config_.our_bpdu_info.root_id = bridge_config_.bridge_id_value;
             bridge_config_.our_bpdu_info.root_path_cost = 0;
             bridge_config_.our_bpdu_info.sender_bridge_id = bridge_config_.bridge_id_value;
             bridge_config_.our_bpdu_info.sender_port_id = 0;
+            bridge_config_.our_bpdu_info.message_age = 0;
+            bridge_config_.our_bpdu_info.max_age = bridge_config_.max_age_seconds * 256;
+            bridge_config_.our_bpdu_info.hello_time = bridge_config_.hello_time_seconds * 256;
+            bridge_config_.our_bpdu_info.forward_delay = bridge_config_.forward_delay_seconds * 256;
         }
     }
 
-
-    // Determine Port Roles and States
-    for (auto& pair : port_stp_info_) {
-        StpPortInfo& p_info = pair.second;
+    // Determine port roles and states
+    for (auto& pair_port_info : port_stp_info_) {
+        StpPortInfo& p_info = pair_port_info.second;
         if (p_info.state == PortState::DISABLED) {
             p_info.role = PortRole::DISABLED;
             continue;
         }
 
-        if (i_am_root) {
+        if (bridge_config_.is_root_bridge()) {
             p_info.role = PortRole::DESIGNATED;
             p_info.designated_bridge_id_for_segment = bridge_config_.bridge_id_value;
             p_info.designated_port_id_for_segment = p_info.stp_port_id_field;
@@ -282,31 +496,20 @@ void StpManager::recalculate_stp_roles_and_states() {
         } else {
             if (bridge_config_.root_port_internal_id.has_value() && p_info.port_id_internal == bridge_config_.root_port_internal_id.value()) {
                 p_info.role = PortRole::ROOT;
+                p_info.designated_bridge_id_for_segment = p_info.received_bpdu.sender_bridge_id;
+                p_info.designated_port_id_for_segment = p_info.received_bpdu.sender_port_id;
+                p_info.path_cost_from_designated_bridge_to_root = p_info.received_bpdu.root_path_cost;
             } else {
-                // Is this port a designated port for its segment?
-                // It is DP if its path to the root is better than any other bridge on that segment (from received BPDUs)
-                // OR if its path is equally good but its bridge_id/port_id is lower (tie-breaking)
-                // This requires comparing our bridge's root path cost + this port's cost
-                // with p_info.received_bpdu.root_path_cost from other bridges on the segment.
-
-                // Simplified: If not root port, assume alternate for now.
-                // Proper DP election per segment is complex.
-                // A port is DP if our_bpdu_info for this segment is better than any other received_bpdu on this port.
-                ReceivedBpduInfo our_proposal_for_segment = bridge_config_.our_bpdu_info;
-                // our_proposal_for_segment.root_path_cost is already set to our cost to root.
-                // our_proposal_for_segment.sender_bridge_id is our ID.
-                our_proposal_for_segment.sender_port_id = p_info.stp_port_id_field;
-
+                ReceivedBpduInfo our_offer_bpdu = bridge_config_.our_bpdu_info;
+                our_offer_bpdu.sender_port_id = p_info.stp_port_id_field;
 
                 if (p_info.has_valid_bpdu_info(bridge_config_.max_age_seconds) &&
-                    p_info.received_bpdu.is_superior_to(our_proposal_for_segment)) {
-                    // Another bridge on this segment is a better DP, or offers a better path.
-                    p_info.role = PortRole::ALTERNATE; // Or backup, but simplified to alternate
+                    p_info.received_bpdu.is_superior_to(our_offer_bpdu, bridge_config_.bridge_id_value)) {
+                    p_info.role = PortRole::ALTERNATE;
                     p_info.designated_bridge_id_for_segment = p_info.received_bpdu.sender_bridge_id;
                     p_info.designated_port_id_for_segment = p_info.received_bpdu.sender_port_id;
                     p_info.path_cost_from_designated_bridge_to_root = p_info.received_bpdu.root_path_cost;
-
-                } else { // Our bridge is the DP for this segment
+                } else {
                     p_info.role = PortRole::DESIGNATED;
                     p_info.designated_bridge_id_for_segment = bridge_config_.bridge_id_value;
                     p_info.designated_port_id_for_segment = p_info.stp_port_id_field;
@@ -315,31 +518,59 @@ void StpManager::recalculate_stp_roles_and_states() {
             }
         }
 
-        // State transitions based on new roles (simplified)
-        // This doesn't implement the forward_delay timers for LISTENING/LEARNING properly yet.
-        // It should be handled by run_stp_timers based on these roles.
+        PortState old_state = p_info.state;
         switch (p_info.role) {
             case PortRole::ROOT:
             case PortRole::DESIGNATED:
-                if (p_info.state == PortState::BLOCKING) {
+                if (p_info.state == PortState::BLOCKING || p_info.state == PortState::UNKNOWN) {
                     p_info.state = PortState::LISTENING;
-                    p_info.forward_delay_timer_seconds = 0; // Reset timer for new transition
+                    p_info.forward_delay_timer_seconds = 0;
                 }
-                // If already LISTENING/LEARNING/FORWARDING, let timer logic handle it.
                 break;
             case PortRole::ALTERNATE:
             case PortRole::BACKUP:
-            case PortRole::UNKNOWN: // Should not happen if logic is complete
+            case PortRole::DISABLED:
                 p_info.state = PortState::BLOCKING;
                 p_info.forward_delay_timer_seconds = 0;
                 break;
-            case PortRole::DISABLED:
-                p_info.state = PortState::DISABLED;
+            case PortRole::UNKNOWN:
+                p_info.state = PortState::BLOCKING;
                 break;
         }
-        // std::cout << "STP Recalc: Port " << p_info.port_id_internal << " Role: " << port_role_to_string(p_info.role) << " State: " << port_state_to_string(p_info.state) << std::endl;
+        if (old_state != p_info.state) {
+             logger.info("STP_STATE_CHANGE", "Port " + std::to_string(p_info.port_id_internal) +
+                                          " changed from " + port_state_to_string(old_state) +
+                                          " to " + port_state_to_string(p_info.state) +
+                                          " (Role: " + port_role_to_string(p_info.role) + ")");
+        }
+         p_info.new_bpdu_received_flag = false;
     }
-    // std::cout << "STP: Bridge " << std::hex << bridge_config_.bridge_id_value << " is " << (i_am_root ? "ROOT" : "NOT ROOT") << ". Known Root: " << bridge_config_.our_bpdu_info.root_id << std::dec << std::endl;
+}
+
+
+// --- Helper methods for converting enum to string ---
+std::string StpManager::port_state_to_string(PortState state) const {
+    switch (state) {
+        case PortState::UNKNOWN:   return "UNKNOWN";
+        case PortState::DISABLED:  return "DISABLED";
+        case PortState::BLOCKING:  return "BLOCKING";
+        case PortState::LISTENING: return "LISTENING";
+        case PortState::LEARNING:  return "LEARNING";
+        case PortState::FORWARDING:return "FORWARDING";
+        default:                   return "INVALID_STATE";
+    }
+}
+
+std::string StpManager::port_role_to_string(PortRole role) const {
+    switch (role) {
+        case PortRole::UNKNOWN:    return "UNKNOWN";
+        case PortRole::ROOT:       return "ROOT";
+        case PortRole::DESIGNATED: return "DESIGNATED";
+        case PortRole::ALTERNATE:  return "ALTERNATE";
+        case PortRole::BACKUP:     return "BACKUP";
+        case PortRole::DISABLED:   return "DISABLED";
+        default:                   return "INVALID_ROLE";
+    }
 }
 
 } // namespace netflow

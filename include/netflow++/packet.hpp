@@ -68,34 +68,6 @@ inline uint32_t ntohl(uint32_t val) {
 
 namespace netflow {
 
-// Helper function for Internet Checksum calculation
-// data: pointer to the data (treated as a sequence of 16-bit words)
-// length_bytes: length of the data in bytes
-// Returns checksum in network byte order
-static uint16_t calculate_internet_checksum(const void* data_ptr, size_t length_bytes) {
-    uint32_t sum = 0;
-    const uint16_t* data = reinterpret_cast<const uint16_t*>(data_ptr);
-
-    // Sum 16-bit words
-    while (length_bytes > 1) {
-        sum += *data++;
-        length_bytes -= 2;
-    }
-
-    // If there's an odd byte left, add it (padded with a zero byte)
-    if (length_bytes > 0) {
-        sum += *reinterpret_cast<const uint8_t*>(data); // Add the last byte
-    }
-
-    // Fold 32-bit sum to 16 bits
-    while (sum >> 16) {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-
-    return ~static_cast<uint16_t>(sum); // One's complement
-}
-
-
 // Placeholder for MAC Address
 struct MacAddress {
     uint8_t bytes[6];
@@ -515,46 +487,18 @@ public:
     }
 
 
+    // Placeholder for checksum updates (e.g., IP, TCP/UDP)
     void update_checksums() {
-        IPv4Header* ip_hdr = ipv4(); // ipv4() method finds the IPv4 header
-        if (ip_hdr) {
-            // Store original checksum for logging/debugging if needed, though not strictly necessary here
-            // uint16_t original_checksum = ip_hdr->header_checksum;
-
-            ip_hdr->header_checksum = 0; // Zero out the checksum field before calculation
-
-            // Calculate checksum.
-            // The calculate_internet_checksum function returns the checksum in host byte order (as per typical implementations of the algorithm)
-            // but the IP header requires it in network byte order.
-            // However, the checksum algorithm itself is defined in terms of 16-bit words in network byte order.
-            // If calculate_internet_checksum already handles data as if it's network byte order and returns a value
-            // that is the one's complement sum (which is also effectively network byte order for checksum purposes),
-            // then direct assignment is fine.
-            // The provided calculate_internet_checksum sums words and then one's complements.
-            // It's standard for this sum to be done on words interpreted as they are in memory (often network byte order for headers).
-            // The result of one's complement is then directly usable.
-            uint16_t checksum = calculate_internet_checksum(reinterpret_cast<const uint16_t*>(ip_hdr), ip_hdr->get_header_length());
-
-            // The checksum field in IPv4Header should be in network byte order.
-            // The `calculate_internet_checksum` as implemented returns a uint16_t.
-            // Standard practice is that the checksum itself is stored in network byte order.
-            // The algorithm is defined such that if all words are in network byte order, the result is also effectively in network byte order.
-            ip_hdr->header_checksum = checksum; // Direct assignment if calculate_internet_checksum's result is already network byte order oriented.
-                                                // Or htons(checksum) if it returned host byte order and needs conversion.
-                                                // Given the typical implementation, direct assignment is usually correct.
-        }
-
-        // TODO: Implement TCP/UDP checksum updates if necessary.
-        // This requires constructing a pseudo-header for TCP/UDP.
-        // TcpHeader* tcp_hdr = tcp();
-        // if (tcp_hdr) {
-        //     // Construct pseudo-header, zero tcp_hdr->checksum, calculate, set.
+        // This would involve recalculating checksums for IP, TCP, UDP
+        // if their headers or payloads have changed.
+        // For example, an IP checksum:
+        // IPv4Header* ip = ipv4();
+        // if (ip) {
+        //   ip->header_checksum = 0;
+        //   uint16_t checksum = calculate_internet_checksum(reinterpret_cast<uint16_t*>(ip), ip->get_header_length());
+        //   ip->header_checksum = htons(checksum);
         // }
-        // UdpHeader* udp_hdr = udp();
-        // if (udp_hdr) {
-        //    // Construct pseudo-header, zero udp_hdr->checksum, calculate, set.
-        //    // Note: UDP checksum can be 0 to indicate no checksum, but calculation should result in 0xFFFF if it computes to 0.
-        // }
+        // Similar logic for TCP/UDP checksums which also involve pseudo-headers.
     }
 
 

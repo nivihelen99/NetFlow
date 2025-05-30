@@ -1,5 +1,4 @@
 #include "netflow++/switch.hpp"
-#include "netflow++/config_manager.hpp" // Added for ConfigManager
 #include <iostream>
 #include <vector>
 
@@ -18,30 +17,21 @@ int main(int argc, char* argv[]) {
     std::cout << "Netflow++ Software Switch Simulation" << std::endl;
 
     // Create a switch with a specific number of ports
-    uint32_t num_ports = 4; // Example: 4 ports
-    uint64_t switch_main_mac = 0x0000DEADBEEF0001ULL;
-    uint16_t switch_main_stp_priority = 0x8000; // Default 32768
-
-    sw.logger_.info("MAIN", "Creating Switch with MAC: " + sw.logger_.mac_to_string(switch_main_mac) +
-                          " STP Priority: " + std::to_string(switch_main_stp_priority));
-    netflow::Switch sw(num_ports, switch_main_mac, switch_main_stp_priority);
+    uint32_t num_ports = 8; // Example: 8 ports
+    netflow::Switch sw(num_ports);
 
     // Configure packet handler (optional)
     sw.set_packet_handler(handle_cpu_packet);
 
-    // --- STP Bridge Configuration (can be done via ConfigManager or directly) ---
-    // The StpManager is now initialized with MAC and priority in Switch constructor.
-    // We can still adjust it here if needed, e.g. by calling:
-    // sw.stp_manager.set_bridge_priority_and_reinit(0x4000); // Make this switch more likely root
-    // sw.logger_.info("STP_CONFIG", "Switch STP Bridge ID: 0x" +
-    //               sw.logger_.uint64_to_hex_string(sw.stp_manager.get_bridge_config().bridge_id_value));
+    // --- Example Configuration ---
 
+    // 1. Bridge Configuration (STP)
+    netflow::StpManager::BridgeConfig bridge_cfg;
+    bridge_cfg.bridge_id = 0x8000000000000001ULL; // Example bridge ID (priority + MAC)
+    sw.stp_manager.set_bridge_config(bridge_cfg);
+    std::cout << "STP Bridge ID set to: 0x" << std::hex << sw.stp_manager.get_bridge_config().bridge_id << std::dec << std::endl;
 
-    // --- Port Configuration (VLANs) ---
-    // Note: STP port states (FORWARDING, BLOCKING) are now managed by StpManager logic.
-    // We should primarily configure admin state (up/down) and other parameters like VLAN.
-    // STP will then decide if an admin_up port can transition to FORWARDING.
-
+    // 2. Port Configuration (VLANs)
     netflow::VlanManager::PortConfig access_port_cfg;
     access_port_cfg.type = netflow::PortType::ACCESS;
     access_port_cfg.native_vlan = 10; // VLAN 10 for port 0
@@ -60,17 +50,12 @@ int main(int argc, char* argv[]) {
     netflow::VlanManager::PortConfig default_access_config;
     default_access_config.type = netflow::PortType::ACCESS;
     default_access_config.native_vlan = 1;
-    for(uint32_t i = 0; i < num_ports; ++i) { // Configure all ports initially
+    for(uint32_t i = 2; i < num_ports; ++i) {
         sw.vlan_manager.configure_port(i, default_access_config);
-        // Set ports to admin up; STP will decide their forwarding state.
-        netflow::InterfaceManager::PortConfig if_cfg;
-        if_cfg.admin_up = true; // Bring ports admin_up
-        if_cfg.speed_mbps = 1000; // Example speed
-        sw.interface_manager_.configure_port(i, if_cfg);
-        sw.interface_manager_.simulate_port_link_up(i); // Simulate link is also up
-        // sw.stp_manager.admin_set_port_state(i, true); // Enable port in STP if it was disabled
+        sw.stp_manager.set_port_state(i, netflow::StpManager::PortState::FORWARDING); // Assume STP converged
     }
-    // Initial STP states are set by StpManager constructor and first recalculate call.
+    sw.stp_manager.set_port_state(0, netflow::StpManager::PortState::FORWARDING);
+    sw.stp_manager.set_port_state(1, netflow::StpManager::PortState::FORWARDING);
 
 
     // --- Logger Example ---
@@ -78,60 +63,37 @@ int main(int argc, char* argv[]) {
     sw.logger_.set_min_log_level(netflow::LogLevel::DEBUG); // Set to DEBUG for more verbose output during setup
     sw.logger_.debug("MAIN", "Logger level set to DEBUG for detailed setup logs.");
 
-    // --- ConfigManager Loading from JSON File ---
-    std::cout << "\n--- ConfigManager Loading from File ---" << std::endl;
-    sw.logger_.info("CONFIG_MAIN", "Loading configuration from default_switch_config.json...");
-    if (sw.config_manager_.load_config("default_switch_config.json")) {
-        sw.logger_.info("CONFIG_MAIN", "Configuration loaded successfully.");
 
-        // Log some loaded values
-        std::optional<std::string> hostname = sw.config_manager_.get_parameter_as<std::string>("global.hostname");
-        if (hostname) {
-            sw.logger_.info("CONFIG_MAIN", "Loaded hostname: " + hostname.value());
+    // --- ConfigManager Example Usage ---
+    std::cout << "\n--- ConfigManager Examples ---" << std::endl;
+    sw.logger_.info("CONFIG_MAIN", "Demonstrating ConfigManager parameter setting...");
+    sw.config_manager_.set_parameter("port.1.admin_up", true);
+    sw.config_manager_.set_parameter("port.1.speed_mbps", static_cast<uint32_t>(10000)); // Set speed for port 1 again via config
+    sw.config_manager_.set_parameter("vlan.20.name", std::string("Engineering")); // Example of a VLAN name
+    sw.config_manager_.set_parameter("global.hostname", std::string("MyCoreSwitch"));
+
+    // Apply these manually set parameters
+    sw.logger_.info("CONFIG_MAIN", "Applying manually set parameters to the switch...");
+    sw.config_manager_.apply_config(sw.config_manager_.get_current_config_data(), sw);
+
+    // Verify if admin_up for port 1 was applied (optional check)
+    auto port1_cfg_after_apply = sw.interface_manager_.get_port_config(1);
+    if (port1_cfg_after_apply && port1_cfg_after_apply.value().admin_up) {
+        sw.logger_.info("CONFIG_VERIFY", "Port 1 is now admin_up after apply_config.");
+        // If port 1 was previously link_down due to admin_down, and now admin_up, simulate link going up
+        if(!sw.interface_manager_.is_port_link_up(1)) {
+            sw.interface_manager_.simulate_port_link_up(1);
         }
-        std::optional<int> aging_time = sw.config_manager_.get_parameter_as<int>("fdb.aging_time_seconds");
-        if (aging_time) {
-            sw.logger_.info("CONFIG_MAIN", "Loaded FDB aging time: " + std::to_string(aging_time.value()));
-        }
-        std::optional<int> bridge_prio = sw.config_manager_.get_parameter_as<int>("stp.bridge_priority");
-        if (bridge_prio) {
-            sw.logger_.info("CONFIG_MAIN", "Loaded STP Bridge Priority: " + std::to_string(bridge_prio.value()));
-        }
-
-        sw.logger_.info("CONFIG_MAIN", "Applying loaded configuration to the switch...");
-        sw.config_manager_.apply_config(sw); // Apply the loaded config
-
-        // Example: Verify a value after applying (actual application logic is still basic)
-        // This assumes apply_config would eventually set the switch's internal hostname or similar
-        sw.logger_.info("CONFIG_MAIN", "Hostname from config_data after load: " +
-            (sw.config_manager_.get_parameter_as<std::string>("global.hostname").value_or("Not Set")));
-
     } else {
-        sw.logger_.error("CONFIG_MAIN", "Failed to load configuration from default_switch_config.json.");
+        sw.logger_.warning("CONFIG_VERIFY", "Port 1 admin_up status not correctly applied or port not found.");
     }
 
-    // --- Original ConfigManager Example Usage (can be removed or adapted) ---
-    // std::cout << "\n--- ConfigManager Manual Examples ---" << std::endl;
-    // sw.logger_.info("CONFIG_MAIN_MANUAL", "Demonstrating ConfigManager parameter setting manually...");
-    // sw.config_manager_.set_parameter("port.1.admin_up", true);
-    // sw.config_manager_.set_parameter("port.1.speed_mbps", static_cast<uint32_t>(10000));
-    // sw.config_manager_.set_parameter("vlan.20.name", std::string("Engineering"));
-    // sw.config_manager_.set_parameter("global.hostname", std::string("MyCoreSwitchManual")); // Different hostname
-
-    // sw.logger_.info("CONFIG_MAIN_MANUAL", "Applying manually set parameters to the switch...");
-    // sw.config_manager_.apply_config(sw); // Apply manually set params
-
-    // auto port1_cfg_after_apply = sw.interface_manager_.get_port_config(1);
-    // if (port1_cfg_after_apply && port1_cfg_after_apply.value().admin_up) {
-    //     sw.logger_.info("CONFIG_VERIFY_MANUAL", "Port 1 is now admin_up after manual apply_config.");
-    //     if(!sw.interface_manager_.is_port_link_up(1)) {
-    //         sw.interface_manager_.simulate_port_link_up(1);
-    //     }
-    // } else {
-    //     sw.logger_.warning("CONFIG_VERIFY_MANUAL", "Port 1 admin_up status not correctly applied or port not found after manual config.");
-    // }
-    // sw.logger_.info("CONFIG_MAIN_MANUAL", "Hostname from config_data after manual set: " +
-    //         (sw.config_manager_.get_parameter_as<std::string>("global.hostname").value_or("Not Set")));
+    // Placeholder save
+    if (sw.config_manager_.save_config("current_config_output.json")) {
+        sw.logger_.info("CONFIG_MAIN", "Configuration saved (placeholder) to current_config_output.json");
+    } else {
+        sw.logger_.error("CONFIG_MAIN", "Failed to save configuration (placeholder).");
+    }
 
 
     // --- ManagementInterface Example Usage ---
@@ -229,7 +191,21 @@ int main(int argc, char* argv[]) {
 
     // --- Simulate Packet Processing (Example) ---
     std::cout << "\n--- Simulating Packet Processing ---" << std::endl;
-    // Port link states already simulated up during port configuration loop.
+    // Ensure port 0 (ingress for first test packet) is also link up for packet to pass
+    netflow::InterfaceManager::PortConfig main_port0_config; // Renamed to avoid conflict
+    main_port0_config.admin_up = true;
+    sw.interface_manager_.configure_port(0, main_port0_config);
+    sw.interface_manager_.simulate_port_link_up(0);
+    std::cout << "Port 0 link status (simulated): " << std::boolalpha
+              << sw.interface_manager_.is_port_link_up(0) << std::endl;
+
+    // Ensure port 2 is up for ACL redirect test
+    netflow::InterfaceManager::PortConfig main_port2_config;
+    main_port2_config.admin_up = true;
+    sw.interface_manager_.configure_port(2, main_port2_config);
+    sw.interface_manager_.simulate_port_link_up(2);
+    std::cout << "Port 2 link status (simulated): " << std::boolalpha
+              << sw.interface_manager_.is_port_link_up(2) << std::endl;
 
 
     // --- QoS Example Configuration ---
@@ -293,233 +269,67 @@ int main(int argc, char* argv[]) {
 
     // Create a dummy packet buffer (normally from NIC driver or another source)
     // This packet is untagged, destined for a MAC address.
-    size_t buffer_size = 128;
+    size_t buffer_size = 128; // Increased for potential headers
+    netflow::PacketBuffer* pb1 = sw.buffer_pool.allocate_buffer(buffer_size);
+    if (pb1) {
+        // Fill with some dummy Ethernet frame data
+        // Dst MAC: 00:00:00:00:00:AA, Src MAC: 00:00:00:00:00:BB
+        // EtherType: IPv4 (0x0800)
+        // IP: 192.168.1.1 -> 192.168.1.10
+        // Protocol: TCP (6)
+        // TCP Ports: 12345 -> 80 (HTTP)
+        uint8_t dummy_frame[] = {
+            // Ethernet Header
+            0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, // Dst MAC
+            0x00, 0x00, 0x00, 0x00, 0x00, 0xBB, // Src MAC
+            0x08, 0x00,                         // EtherType (IPv4)
+            // IPv4 Header (20 bytes)
+            0x45, 0x00,                         // Version (4) IHL (5), DSCP/ECN
+            0x00, 0x28,                         // Total Length (40 bytes: 20 IP + 20 TCP)
+            0x12, 0x34, 0x00, 0x00,             // Identification, Flags/Fragment Offset
+            0x40, 0x06,                         // TTL (64), Protocol (TCP=6)
+            0x00, 0x00,                         // Header Checksum (placeholder)
+            192, 168, 1, 1,                   // Src IP (192.168.1.1)
+            192, 168, 1, 10,                  // Dst IP (192.168.1.10)
+            // TCP Header (20 bytes)
+            (12345 >> 8), (12345 & 0xFF),       // Src Port (12345)
+            (80 >> 8), (80 & 0xFF),             // Dst Port (80)
+            0x00, 0x00, 0x00, 0x00,             // Sequence Number
+            0x00, 0x00, 0x00, 0x00,             // Ack Number
+            0x50, 0x00,                         // Data Offset (5), Reserved, Flags
+            0x00, 0x00,                         // Window Size (placeholder)
+            0x00, 0x00,                         // Checksum (placeholder)
+            0x00, 0x00                          // Urgent Pointer
+        };
+        memcpy(pb1->data, dummy_frame, sizeof(dummy_frame));
+        pb1->size = sizeof(dummy_frame); // Actual data size
 
-    // --- LACP Configuration ---
-    sw.logger_.info("LACP_CONFIG", "Configuring LACP...");
-    netflow::LagConfig lag1_cfg;
-    lag1_cfg.lag_id = 1; // LAG ID 1
-    lag1_cfg.member_ports = {0, 1}; // Ports 0 and 1 are members
-    lag1_cfg.active_mode = true;    // Switch is in Active LACP mode
-    lag1_cfg.lacp_rate = 1;         // Fast rate (1 second)
-    // actor_admin_key will be derived from lag_id if 0.
-    if (sw.lacp_manager_.create_lag(lag1_cfg)) {
-        sw.logger_.info("LACP_CONFIG", "LAG 1 created with ports 0, 1. Active Mode, Fast Rate.");
-    } else {
-        sw.logger_.error("LACP_CONFIG", "Failed to create LAG 1.");
+        std::cout << "\nSimulating packet (matching HTTP rule) ingress on Port 0 (Access VLAN 10):" << std::endl;
+        sw.process_received_packet(0, pb1); // Ingress on port 0
+        // pb1's ref_count will be handled by Packet and BufferPool within process_received_packet lifecycle
     }
-    // Ensure LACP ports are admin up (already done in earlier loop)
-    // sw.interface_manager_.configure_port(0, {.admin_up = true});
-    // sw.interface_manager_.configure_port(1, {.admin_up = true});
 
-
-    // --- Main Simulation Loop (STP & LACP) ---
-    sw.logger_.info("MAIN_SIM", "Starting main simulation loop (STP & LACP)...");
-    for (int tick = 0; tick < 60; ++tick) { // Simulate for 60 seconds
-        sw.logger_.info("MAIN_SIM_TICK", "Tick " + std::to_string(tick));
-
-        // Run STP timers and logic
-        sw.stp_manager.run_stp_timers();
-        std::vector<netflow::Packet> generated_bpdus = sw.stp_manager.generate_bpdus(sw.buffer_pool);
-        if (!generated_bpdus.empty()) {
-            sw.logger_.info("STP_SIM_GEN", "Generated " + std::to_string(generated_bpdus.size()) + " BPDUs.");
-            // In a real switch, BPDUs are sent out. Here we just log.
-        }
-
-        // Run LACP timers and state machines
-        sw.lacp_manager_.run_lacp_timers_and_statemachines();
-        std::vector<netflow::Packet> generated_lacpdus = sw.lacp_manager_.generate_lacpdus(sw.buffer_pool);
-        if (!generated_lacpdus.empty()) {
-            sw.logger_.info("LACP_SIM_GEN", "Generated " + std::to_string(generated_lacpdus.size()) + " LACPDUs.");
-            // In a real switch, LACPDUs are sent out. Here we might loop them back for test.
-            // For now, just log.
-        }
-
-        // Log STP port states
-        auto stp_summary = sw.stp_manager.get_all_ports_stp_info_summary();
-        for(const auto& port_info_pair : stp_summary) {
-            sw.logger_.debug("STP_STATE", "Port " + std::to_string(port_info_pair.first) +
-                                         ": Role=" + port_info_pair.second.first +
-                                         ", State=" + port_info_pair.second.second);
-        }
-
-        // Log LACP port states (simplified)
-        // TODO: Add a get_all_ports_lacp_info_summary to LacpManager for detailed logging
-        for(uint32_t port_id = 0; port_id < num_ports; ++port_id) {
-            if(sw.lacp_manager_.is_port_in_lag(port_id)) {
-                 // Add more detailed logging from LacpPortInfo if needed
-                 // For now, just checking if it's active in a LAG
-                 // bool is_active = sw.lacp_manager_. // Need a method like is_port_active_in_lag
-                 // sw.logger_.debug("LACP_STATE", "Port " + std::to_string(port_id) + " LACP state: ...");
-            }
-        }
-
-
-        // Simulate receiving an STP BPDU (as before)
-        if (tick == 5) {
-            // (STP BPDU reception code from previous step - can be kept or adapted)
-            sw.logger_.info("STP_SIM_RX", "Simulating external STP BPDU reception on port 2 from a 'better' root.");
-            // Assuming port 2 is not part of the LAG for this test
-            netflow::PacketBuffer* sim_bpdu_pb = sw.buffer_pool.allocate_buffer(sizeof(netflow::EthernetHeader) + sizeof(netflow::LLCHeader) + netflow::CONFIG_BPDU_PAYLOAD_SIZE);
-            if(sim_bpdu_pb) { /* ... (fill BPDU as before) ... */
-                // Fill with BPDU data similar to previous step, make sure src MAC is different from switch MAC
-                // and Bridge ID in BPDU is better than this switch's.
-                // For example, on port 2 (if num_ports >=3)
-                if (num_ports >=3) {
-                    // ... (BPDU creation as in previous task for STP)
-                    // For brevity, not repeating the full BPDU creation here.
-                    // Ensure it's a valid BPDU that might cause a topology change.
-                    // sw.process_received_packet(2, sim_bpdu_pb);
-                } else {
-                     sw.buffer_pool.release_buffer(sim_bpdu_pb); // Release if not used
-                }
-            }
-        }
-
-        // Simulate receiving an LACPDU on port 0 (member of LAG 1)
-        // This LACPDU is from a partner that agrees to aggregate.
-        if (tick == 10) {
-            sw.logger_.info("LACP_SIM_RX", "Simulating LACPDU reception on port 0 from an active partner.");
-            netflow::PacketBuffer* sim_lacpdu_pb = sw.buffer_pool.allocate_buffer(sizeof(netflow::EthernetHeader) + netflow::LACPDU_MIN_SIZE);
-            if(sim_lacpdu_pb) {
-                netflow::EthernetHeader* eth_h = reinterpret_cast<netflow::EthernetHeader*>(sim_lacpdu_pb->data);
-                eth_h->dst_mac = netflow::ConfigBpdu::htonll(netflow::LacpDefaults::LACP_MULTICAST_MAC);
-                eth_h->src_mac = netflow::ConfigBpdu::htonll(0x0000PARTNERMAC01ULL); // Partner's MAC
-                eth_h->ethertype = htons(netflow::LacpDefaults::LACP_ETHERTYPE);
-
-                netflow::Lacpdu* lacpdu_payload = reinterpret_cast<netflow::Lacpdu*>(sim_lacpdu_pb->data + sizeof(netflow::EthernetHeader));
-                // Actor info in PDU (is our Partner's info about itself)
-                lacpdu_payload->subtype = netflow::LacpDefaults::LACP_SUBTYPE;
-                lacpdu_payload->version_number = netflow::LacpDefaults::LACP_VERSION;
-                lacpdu_payload->tlv_type_actor = 0x01; lacpdu_payload->actor_info_length = 0x14;
-                // Partner (sender of this PDU)
-                lacpdu_payload->set_actor_system_id( (uint64_t(0x8000)<<48) | 0x0000PARTNERMAC00ULL ); // Partner system ID
-                lacpdu_payload->actor_key = htons(lag1_cfg.actor_admin_key); // Partner uses same key
-                lacpdu_payload->actor_port_priority = htons(128);
-                lacpdu_payload->actor_port_number = htons(1); // Partner's port 1
-                lacpdu_payload->actor_state = netflow::LACP_ACTIVITY | netflow::LACP_TIMEOUT | netflow::AGGREGATION | netflow::SYNCHRONIZATION | netflow::COLLECTING | netflow::DISTRIBUTING;
-
-                // Partner info in PDU (is our Partner's view of us - the Actor)
-                lacpdu_payload->tlv_type_partner = 0x02; lacpdu_payload->partner_info_length = 0x14;
-                // Us (receiver of this PDU)
-                lacpdu_payload->partner_system_priority = htons(switch_main_stp_priority); // Our system priority
-                uint64_t temp_our_mac = switch_main_mac; // Our MAC
-                for(int i=0; i<6; ++i) lacpdu_payload->partner_system_mac[5-i] = (temp_our_mac >> (i*8)) & 0xFF;
-                lacpdu_payload->partner_key = htons(lag1_cfg.actor_admin_key); // Our key
-                lacpdu_payload->partner_port_priority = htons(128); // Our port 0 priority
-                lacpdu_payload->partner_port_number = htons(0);    // Our port 0
-                lacpdu_payload->partner_state = netflow::LACP_ACTIVITY | netflow::LACP_TIMEOUT | netflow::AGGREGATION; // What partner thinks of our state (e.g. not yet sync)
-
-                lacpdu_payload->tlv_type_collector = 0x03; lacpdu_payload->collector_info_length = 0x10;
-                lacpdu_payload->collector_max_delay = htons(0);
-                lacpdu_payload->tlv_type_terminator = 0x00; lacpdu_payload->terminator_length = 0x00;
-
-                sim_lacpdu_pb->size = sizeof(netflow::EthernetHeader) + netflow::LACPDU_MIN_SIZE;
-                sw.process_received_packet(0, sim_lacpdu_pb);
-            }
-        }
-
-        // Test LACP egress selection if LAG becomes active
-        if (tick > 15) { // Give LACP some time to potentially converge
-            netflow::PacketBuffer* test_pkt_pb = sw.buffer_pool.allocate_buffer(64);
-            if(test_pkt_pb) {
-                // Create a dummy packet for hashing
-                memset(test_pkt_pb->data, 0, 64);
-                netflow::EthernetHeader* eth_h = reinterpret_cast<netflow::EthernetHeader*>(test_pkt_pb->data);
-                eth_h->src_mac = netflow::ConfigBpdu::htonll(0xAAAAAAAAAAAAULL);
-                eth_h->dst_mac = netflow::ConfigBpdu::htonll(0xBBBBBBBBBBBBULL);
-                eth_h->ethertype = htons(0x0800); // IPv4
-                test_pkt_pb->size = 64;
-                netflow::Packet test_pkt(test_pkt_pb);
-
-                uint32_t egress_port = sw.lacp_manager_.select_egress_port(lag1_cfg.lag_id, test_pkt);
-                if (egress_port != 0 || lag1_cfg.lag_id == 0) { // Port 0 can be a valid member
-                     sw.logger_.info("LACP_EGRESS_TEST", "Packet hashed to egress port " + std::to_string(egress_port) + " for LAG " + std::to_string(lag1_cfg.lag_id));
-                } else {
-                     sw.logger_.warning("LACP_EGRESS_TEST", "LACP egress selection for LAG " + std::to_string(lag1_cfg.lag_id) + " returned invalid port 0 or LAG has no active members.");
-                }
-                sw.buffer_pool.release_buffer(test_pkt_pb); // Release our ref, Packet had one
-            }
-        }
+    // Simulate another packet, this time one that might be a BPDU
+    netflow::PacketBuffer* pb2 = sw.buffer_pool.allocate_buffer(buffer_size);
+    if(pb2) {
+        uint8_t bpdu_frame[] = {
+            0x01, 0x80, 0xC2, 0x00, 0x00, 0x00, // BPDU Dst MAC
+            0x00, 0x00, 0x00, 0x00, 0x00, 0xCC, // Src MAC
+            0x00, 0x26, // Length field for LLC (example, actual BPDU is more complex)
+            0x42, 0x42, 0x03, // LLC DSAP, SSAP, Control
+            // ... Rest of BPDU data (highly simplified)
+        };
+        memcpy(pb2->data, bpdu_frame, sizeof(bpdu_frame));
+        pb2->size = sizeof(bpdu_frame);
+        std::cout << "\nSimulating BPDU packet ingress on Port 1 (Trunk, Link Up):" << std::endl;
+        // Ensure port 1 is admin up for this test (already done by configure_port)
+        // sw.interface_manager_.simulate_port_link_up(1); // Already done above
+        sw.process_received_packet(1, pb2);
     }
+
 
     std::cout << "\n--- Simulation Finished ---" << std::endl;
-
-    // --- Checksum Calculation Test ---
-    sw.logger_.info("CHECKSUM_TEST", "Starting IPv4 Checksum Test...");
-    {
-        size_t eth_ipv4_size = sizeof(netflow::EthernetHeader) + sizeof(netflow::IPv4Header);
-        netflow::PacketBuffer* pb_chksum_test = sw.buffer_pool.allocate_buffer(eth_ipv4_size);
-        if (pb_chksum_test) {
-            pb_chksum_test->size = eth_ipv4_size;
-            memset(pb_chksum_test->data, 0, eth_ipv4_size); // Zero out buffer
-
-            netflow::EthernetHeader* eth_h = reinterpret_cast<netflow::EthernetHeader*>(pb_chksum_test->data);
-            eth_h->ethertype = htons(0x0800); // IPv4
-
-            netflow::IPv4Header* ip_h = reinterpret_cast<netflow::IPv4Header*>(pb_chksum_test->data + sizeof(netflow::EthernetHeader));
-            ip_h->version_ihl = (4 << 4) | 5; // IPv4, 5 words (20 bytes) header length
-            ip_h->dscp_ecn = 0;
-            ip_h->total_length = htons(sizeof(netflow::IPv4Header)); // No payload for this test
-            ip_h->identification = htons(12345);
-            ip_h->flags_fragment_offset = 0;
-            ip_h->ttl = 64;
-            ip_h->protocol = 6; // TCP (dummy)
-            ip_h->header_checksum = 0; // Initial checksum is 0
-            ip_h->src_ip = htonl(0xC0A80101); // 192.168.1.1
-            ip_h->dst_ip = htonl(0xC0A8010A); // 192.168.1.10
-
-            netflow::Packet test_pkt(pb_chksum_test);
-            sw.logger_.info("CHECKSUM_TEST", "IPv4 Header before checksum update (checksum field should be 0):");
-            // Log relevant IP header fields, especially checksum
-            if(test_pkt.ipv4()){
-                 sw.logger_.info("CHECKSUM_TEST", "  Initial Checksum: 0x" + sw.logger_.uint16_to_hex_string(ntohs(test_pkt.ipv4()->header_checksum)));
-            }
-
-            test_pkt.update_checksums();
-
-            if(test_pkt.ipv4()){
-                uint16_t calculated_checksum = ntohs(test_pkt.ipv4()->header_checksum); // ntohs for logging if it was stored as network order
-                sw.logger_.info("CHECKSUM_TEST", "IPv4 Checksum after first update: 0x" + sw.logger_.uint16_to_hex_string(calculated_checksum));
-
-                // Verify that the checksum is not 0 (unless header is all zeros, which it isn't)
-                if (calculated_checksum == 0) {
-                    sw.logger_.error("CHECKSUM_TEST", "Error: Calculated checksum is 0, which is unlikely for a valid header.");
-                }
-
-                // Modify a field and recalculate
-                test_pkt.ipv4()->ttl = 100;
-                sw.logger_.info("CHECKSUM_TEST", "Modified TTL to 100.");
-                test_pkt.update_checksums();
-                uint16_t new_calculated_checksum = ntohs(test_pkt.ipv4()->header_checksum);
-                sw.logger_.info("CHECKSUM_TEST", "IPv4 Checksum after TTL change and second update: 0x" + sw.logger_.uint16_to_hex_string(new_calculated_checksum));
-
-                if (new_calculated_checksum == calculated_checksum) {
-                     sw.logger_.error("CHECKSUM_TEST", "Error: Checksum did not change after modifying TTL.");
-                } else {
-                     sw.logger_.info("CHECKSUM_TEST", "Checksum changed as expected.");
-                }
-            } else {
-                 sw.logger_.error("CHECKSUM_TEST", "Failed to get IPv4 header after creating packet.");
-            }
-            // PacketBuffer ref count is managed by Packet object, will be decremented when test_pkt goes out of scope.
-            // If pb_chksum_test was used directly after Packet creation, its ref count should be handled carefully.
-            // Here, Packet test_pkt takes ownership (increments ref), and decrements on destruction.
-            // No, Packet constructor takes a pointer and increments. The original pb_chksum_test is not managed by Packet.
-            // We must release the initial ref obtained from allocate_buffer if Packet is expected to fully manage it.
-            // However, Packet dtor decrements. So if Packet is the sole user, this is fine.
-            // For safety: sw.buffer_pool.release_buffer(pb_chksum_test); // if Packet made a copy or similar
-            // But Packet takes the pointer, so it should manage the one ref it got.
-            // The issue is if Packet's lifetime is shorter than the buffer's intended use.
-            // Current Packet takes a raw ptr and inc/dec. So the original pb_chksum_test is not needed after Packet creation.
-            // To be super safe, if Packet might be copied or buffer shared, use std::shared_ptr or careful manual ref counting.
-            // For this simple test, Packet's RAII on the buffer is sufficient.
-        } else {
-            sw.logger_.error("CHECKSUM_TEST", "Failed to allocate PacketBuffer for checksum test.");
-        }
-    }
-    sw.logger_.info("CHECKSUM_TEST", "IPv4 Checksum Test Finished.");
-
+    // Switch object sw goes out of scope here, its destructor will be called.
 
     return 0;
 }

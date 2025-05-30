@@ -17,7 +17,7 @@ add_library(netflow_switching_lib STATIC
     # switching/vlan_manager.cpp    # Removed as VlanManager is header-only
     netflow++/config_manager.cpp
     netflow++/stp_manager.cpp
-    netflow++/lacp_manager.cpp
+    # netflow++/lacp_manager.cpp # lacp_manager.cpp should also be here from previous work
 )
 
 # Make sure the libraries can find their own headers if they were in src,
@@ -34,7 +34,7 @@ add_library(netflow_switching_lib STATIC
 
 target_include_directories(netflow_switching_lib PUBLIC
     ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/include/netflow++/third_party # Added for nlohmann/json
+    ${CMAKE_SOURCE_DIR}/include/netflow++/third_party # For nlohmann/json used by config_manager
 )
 
 # No external dependencies for these libs yet, other than standard library.
