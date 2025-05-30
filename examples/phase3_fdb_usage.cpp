@@ -1,12 +1,23 @@
-#include "netflow_plus_plus/switching/fdb.hpp"
-#include "netflow_plus_plus/core/types.hpp" // For MacAddress
+#include "netflow++/forwarding_database.hpp" // Updated include
+#include "netflow++/packet.hpp"      // Updated include for MacAddress
 #include <iostream>
 #include <string>
+#include <vector>    // For MacAddress constructor from bytes if needed, and for future args
+#include <cstdio>    // For snprintf in mac_to_string
 
-void print_fdb_lookup(const netflow_plus_plus::switching::ForwardingDatabase& fdb,
-                      const netflow_plus_plus::core::MacAddress& mac,
+// Helper function to convert MacAddress to string for this example
+std::string mac_to_string_local(const netflow::MacAddress& mac) {
+    char buf[18];
+    std::snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                  mac.bytes[0], mac.bytes[1], mac.bytes[2],
+                  mac.bytes[3], mac.bytes[4], mac.bytes[5]);
+    return std::string(buf);
+}
+
+void print_fdb_lookup(const netflow::ForwardingDatabase& fdb, // Updated namespace
+                      const netflow::MacAddress& mac,       // Updated namespace
                       uint16_t vlan_id) {
-    std::cout << "  Looking up MAC " << mac.toString() << " in VLAN " << vlan_id << ": ";
+    std::cout << "  Looking up MAC " << mac_to_string_local(mac) << " in VLAN " << vlan_id << ": "; // Used local helper
     auto port_opt = fdb.lookup_port(mac, vlan_id);
     if (port_opt) {
         std::cout << "Found on port " << *port_opt << std::endl;
@@ -18,30 +29,33 @@ void print_fdb_lookup(const netflow_plus_plus::switching::ForwardingDatabase& fd
 int main() {
     std::cout << "--- Phase 3: Forwarding Database (FDB) Usage Example ---" << std::endl;
 
-    netflow_plus_plus::switching::ForwardingDatabase fdb;
+    netflow::ForwardingDatabase fdb; // Updated namespace
 
     std::cout << "Initial FDB entry count: " << fdb.entry_count() << std::endl;
 
     // Learn some MAC addresses
-    netflow_plus_plus::core::MacAddress mac1("00:00:00:AA:BB:C1");
-    netflow_plus_plus::core::MacAddress mac2("00:00:00:AA:BB:C2");
-    netflow_plus_plus::core::MacAddress mac3("00:00:00:AA:BB:C3");
-    netflow_plus_plus::core::MacAddress static_mac("00:11:22:33:44:FF");
+    // MacAddress constructor in packet.hpp takes const uint8_t*.
+    // The old MacAddress("00:...") constructor is not available.
+    // Create MacAddress objects using byte arrays.
+    netflow::MacAddress mac1(reinterpret_cast<const uint8_t*>("\x00\x00\x00\xAA\xBB\xC1"));
+    netflow::MacAddress mac2(reinterpret_cast<const uint8_t*>("\x00\x00\x00\xAA\xBB\xC2"));
+    netflow::MacAddress mac3(reinterpret_cast<const uint8_t*>("\x00\x00\x00\xAA\xBB\xC3")); // Not used for learning, but for lookup
+    netflow::MacAddress static_mac(reinterpret_cast<const uint8_t*>("\x00\x11\x22\x33\x44\xFF"));
 
     std::cout << "\nLearning MACs..." << std::endl;
     fdb.learn_mac(mac1, 1, 100);
-    std::cout << "  Learned " << mac1.toString() << " on port 1, VLAN 100." << std::endl;
+    std::cout << "  Learned " << mac_to_string_local(mac1) << " on port 1, VLAN 100." << std::endl;
     fdb.learn_mac(mac2, 2, 100);
-    std::cout << "  Learned " << mac2.toString() << " on port 2, VLAN 100." << std::endl;
+    std::cout << "  Learned " << mac_to_string_local(mac2) << " on port 2, VLAN 100." << std::endl;
     fdb.learn_mac(mac1, 3, 200); // mac1 in a different VLAN
-    std::cout << "  Learned " << mac1.toString() << " on port 3, VLAN 200." << std::endl;
+    std::cout << "  Learned " << mac_to_string_local(mac1) << " on port 3, VLAN 200." << std::endl;
 
     std::cout << "FDB entry count after learning: " << fdb.entry_count() << std::endl;
 
     // Add a static entry
     std::cout << "\nAdding static MAC..." << std::endl;
     fdb.add_static_entry(static_mac, 5, 100);
-    std::cout << "  Added static entry for " << static_mac.toString() << " on port 5, VLAN 100." << std::endl;
+    std::cout << "  Added static entry for " << mac_to_string_local(static_mac) << " on port 5, VLAN 100." << std::endl;
     std::cout << "FDB entry count after static add: " << fdb.entry_count() << std::endl;
 
     // Test lookups

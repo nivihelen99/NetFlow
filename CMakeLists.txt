@@ -53,7 +53,7 @@ endif()
 
 
 # --- Optional: Installation for main library headers (always install these) ---
-install(DIRECTORY include/netflow_plus_plus DESTINATION include)
+install(DIRECTORY include/netflow++ DESTINATION include)
 
 # --- Optional: Testing (using CTest) ---
 # CTest should only be enabled and tests added if BUILD_EXAMPLES is ON,
@@ -71,6 +71,14 @@ endif()
 # --- Add subdirectory for src files ---
 # This must be done before defining targets (like examples) that depend on libraries built in src.
 add_subdirectory(src)
+
+# --- Add our main application executable ---
+add_executable(netflow_app src/main.cpp)
+target_link_libraries(netflow_app PRIVATE netflow_switching_lib)
+# Ensure it can find headers from the 'include' directory (already covered by global include_directories(include))
+# target_include_directories(netflow_app PRIVATE ${CMAKE_SOURCE_DIR}/include) # Explicitly if needed
+
+install(TARGETS netflow_app DESTINATION bin) # Optional: install the app
 
 
 # --- Optional: Add subdirectory for tests ---
