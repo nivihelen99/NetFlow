@@ -202,7 +202,7 @@ public:
     }
 
     template <typename HeaderType>
-    HeaderType* get_header_at_current_offset() {
+    HeaderType* get_header_at_current_offset() const {
         if (!buffer_ || current_offset_ + sizeof(HeaderType) > buffer_->size) {
             return nullptr;
         }
@@ -216,7 +216,7 @@ public:
     }
 
 
-    EthernetHeader* ethernet() {
+    EthernetHeader* ethernet() const {
         current_offset_ = 0; // Ethernet is always first
         auto* eth = get_header<EthernetHeader>(current_offset_);
         if (eth) {
@@ -231,7 +231,7 @@ public:
         return eth;
     }
 
-    VlanHeader* vlan() {
+    VlanHeader* vlan() const {
         // Assumes ethernet() was called first to identify base L2 type
         auto* eth = get_header<EthernetHeader>(0);
         if (eth && ntohs(eth->ethertype) == 0x8100) { // VLAN_ETHERTYPE
@@ -243,7 +243,7 @@ public:
 
     // Note: These L3 accessors assume ethernet() and potentially vlan() have been called
     // to set up current_offset_ or determine the L2 framing size.
-    IPv4Header* ipv4() {
+    IPv4Header* ipv4() const {
         // Determine offset after L2 headers
         current_offset_ = l2_header_size_;
         auto* eth = get_header<EthernetHeader>(0);
@@ -264,7 +264,7 @@ public:
         return nullptr;
     }
 
-    IPv6Header* ipv6() {
+    IPv6Header* ipv6() const {
         current_offset_ = l2_header_size_;
         auto* eth = get_header<EthernetHeader>(0);
         if (!eth) return nullptr;
@@ -284,7 +284,7 @@ public:
         return nullptr;
     }
 
-    TcpHeader* tcp() {
+    TcpHeader* tcp() const {
         size_t previous_l4_offset = l2_header_size_; // Start after L2
         IPv4Header* ip4 = ipv4(); // This sets current_offset_ based on L2 and checks ethertype
         if (ip4) {
@@ -313,7 +313,7 @@ public:
         return nullptr;
     }
 
-    UdpHeader* udp() {
+    UdpHeader* udp() const {
         size_t previous_l4_offset = l2_header_size_;
         IPv4Header* ip4 = ipv4();
         if (ip4) {
@@ -339,12 +339,12 @@ public:
     }
 
     // L2 Methods
-    bool has_vlan() {
+    bool has_vlan() const {
         auto* eth = ethernet(); // This also recalculates l2_header_size_
         return eth && ntohs(eth->ethertype) == 0x8100; // VLAN_ETHERTYPE
     }
 
-    std::optional<uint16_t> vlan_id() {
+    std::optional<uint16_t> vlan_id() const {
         if (has_vlan()) { // has_vlan calls ethernet() which sets up l2_header_size_
             auto* vlan_hdr = get_header<VlanHeader>(EthernetHeader::SIZE);
             if (vlan_hdr) {
@@ -354,7 +354,7 @@ public:
         return std::nullopt;
     }
 
-    std::optional<uint8_t> vlan_priority() {
+    std::optional<uint8_t> vlan_priority() const {
         if (has_vlan()) {
             auto* vlan_hdr = get_header<VlanHeader>(EthernetHeader::SIZE);
             if (vlan_hdr) {
@@ -364,7 +364,7 @@ public:
         return std::nullopt;
     }
 
-    std::optional<MacAddress> src_mac() {
+    std::optional<MacAddress> src_mac() const {
         auto* eth = ethernet();
         if (eth) {
             return eth->src_mac;
@@ -372,7 +372,7 @@ public:
         return std::nullopt;
     }
 
-    std::optional<MacAddress> dst_mac() {
+    std::optional<MacAddress> dst_mac() const {
         auto* eth = ethernet();
         if (eth) {
             return eth->dst_mac;
@@ -504,8 +504,8 @@ public:
 
 private:
     PacketBuffer* buffer_;
-    size_t current_offset_; // Tracks the current position while parsing headers sequentially
-    size_t l2_header_size_; // Stores the size of L2 headers (Ethernet + potentially VLAN)
+    mutable size_t current_offset_; // Tracks the current position while parsing headers sequentially
+    mutable size_t l2_header_size_; // Stores the size of L2 headers (Ethernet + potentially VLAN)
 
     // Hypothetical member for actual allocated capacity if different from buffer_->size
     // This is needed for safe push_vlan like operations.

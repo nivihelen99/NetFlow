@@ -7,6 +7,9 @@
 #include "forwarding_database.hpp"
 #include "vlan_manager.hpp"
 #include "stp_manager.hpp"
+#include "packet_classifier.hpp"
+#include "lock_free_hash_table.hpp"
+#include "interface_manager.hpp"
 
 #include <cstdint>
 #include <functional> // For std::function
@@ -21,10 +24,19 @@ public:
     ForwardingDatabase fdb;
     VlanManager vlan_manager;
     StpManager stp_manager;
+    InterfaceManager interface_manager_; // New
+    PacketClassifier packet_classifier_; // New
 
-    Switch(uint32_t num_ports) : num_ports_(num_ports) {
+    // Type alias for a common flow table
+    using FlowKey = PacketClassifier::FlowKey; // Make FlowKey easily accessible
+    using FlowTable = LockFreeHashTable<FlowKey, uint32_t /* Action ID or Flow Data ID */>;
+    FlowTable flow_table_; // New
+
+    Switch(uint32_t num_ports) :
+        num_ports_(num_ports),
+        flow_table_(1024) /* Default capacity for FlowTable */ {
         std::cout << "Switch created with " << num_ports_ << " ports." << std::endl;
-        // Initialize port states for STP, e.g., to BLOCKING or DISABLED initially
+        // Initialize port states for STP and InterfaceManager, e.g., to BLOCKING or DISABLED initially
         for (uint32_t i = 0; i < num_ports_; ++i) {
             // Default port configuration for VLANs might be set here or expected to be configured explicitly
             // VlanManager::PortConfig default_vlan_port_config;
@@ -32,6 +44,13 @@ public:
 
             // Default STP state, e.g. BLOCKING until STP converges
             stp_manager.set_port_state(i, StpManager::PortState::BLOCKING);
+
+            // Default port configuration for InterfaceManager (e.g., admin down)
+            InterfaceManager::PortConfig default_if_config;
+            default_if_config.admin_up = false;
+            interface_manager_.configure_port(i, default_if_config);
+            // Simulate link down state initially for all ports
+            interface_manager_.simulate_port_link_down(i);
         }
         // stp_manager.set_buffer_pool(&buffer_pool); // If StpManager needs to allocate BPDUs
     }
@@ -170,7 +189,45 @@ public:
     void process_received_packet(uint32_t ingress_port_id, PacketBuffer* raw_buffer) {
         if (!raw_buffer) return;
 
+        // 0. Check Interface Link Status
+        if (!interface_manager_.is_port_link_up(ingress_port_id)) {
+            std::cout << "Packet dropped, ingress port " << ingress_port_id << " link is down." << std::endl;
+            // Note: PacketBuffer ref_count will be decremented when raw_buffer is handled by caller
+            // or if we create a Packet object and it goes out of scope.
+            // If we don't create Packet pkt(raw_buffer), then raw_buffer needs explicit handling here.
+            // For simplicity, let's assume raw_buffer's lifecycle is managed if we return early.
+            // A common pattern: if Packet takes ownership, then its destructor handles it.
+            // If not creating Packet, then: buffer_pool.free_buffer(raw_buffer) or similar would be needed.
+            // Let's assume for now that not creating Packet means the buffer is immediately freed/recycled.
+            // This detail depends on BufferPool's design which currently expects Packet to decr_ref.
+            // So, to be safe with current PacketBuffer design:
+            raw_buffer->decrement_ref(); // Manually decrement if Packet object is not created.
+            return;
+        }
+        interface_manager_._increment_rx_stats(ingress_port_id, raw_buffer->size);
+
+
         Packet pkt(raw_buffer); // Packet takes ownership (increments ref count)
+
+        // X. Packet Classification (early stage)
+        uint32_t classification_action_id = packet_classifier_.classify(pkt);
+        if (classification_action_id != 0) { // 0 might mean "no specific rule, continue normal L2/L3"
+            std::cout << "Packet on port " << ingress_port_id
+                      << " classified with action ID: " << classification_action_id
+                      << ". (Placeholder: Action not taken yet)" << std::endl;
+            // Depending on action, might bypass normal switching (e.g., ACL drop, send to CPU, specific queue)
+            // For now, just log it.
+            // We could also use this to populate/check the flow_table_ here.
+            FlowKey current_flow_key = packet_classifier_.extract_flow_key(pkt);
+            auto flow_entry = flow_table_.lookup(current_flow_key);
+            if(flow_entry.has_value()){
+                 std::cout << "  Flow entry found in table. Action ID: " << flow_entry.value() << std::endl;
+            } else {
+                 std::cout << "  No specific flow entry in table for this packet." << std::endl;
+                 // Potentially add to flow table after L2/L3 processing if it's a new valid flow.
+            }
+        }
+
 
         // 1. Ingress VLAN Processing
         PacketAction vlan_action = vlan_manager.process_ingress(pkt, ingress_port_id);
@@ -257,14 +314,17 @@ public:
                 // If forward_packet sends the original buffer, this needs careful handling.
                 // For now, assume process_egress modifies pkt, and forward_packet sends it.
                 vlan_manager.process_egress(pkt, egress_port);
-                forward_packet(pkt, egress_port);
+                forward_packet(pkt, egress_port); // This should also update egress stats
+                interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->size);
             } else {
                 // Destination MAC unknown, flood the packet.
+                // flood_packet itself should handle stats for multiple egress ports.
                 flood_packet(pkt, ingress_port_id);
             }
         } else {
             // Not an Ethernet packet or no destination MAC, decide policy (e.g. drop or limited flood)
             std::cout << "Packet dropped, not Ethernet or no destination MAC." << std::endl;
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true); // false for error, true for drop
         }
         // pkt's destructor will decrement ref count of raw_buffer when it goes out of scope
     }
@@ -274,6 +334,10 @@ private:
     uint32_t num_ports_;
     std::function<void(Packet& pkt, uint32_t ingress_port)> packet_handler_;
     // Other switch-wide configurations can go here.
+    // Note: _increment_rx_stats/_increment_tx_stats in InterfaceManager are marked with underscore
+    // suggesting they are intended for internal use by Switch or data plane handlers.
+    // Making them public or providing a proper stats update interface would be better.
+    // For now, Switch calls them directly.
 };
 
 } // namespace netflow

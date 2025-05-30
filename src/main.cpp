@@ -61,26 +61,113 @@ int main(int argc, char* argv[]) {
     // --- Start the switch ---
     sw.start(); // Calls the placeholder start method
 
+    // --- Interface Manager Example Usage ---
+    std::cout << "\n--- Interface Manager Examples ---" << std::endl;
+    netflow::InterfaceManager::PortConfig port1_config;
+    port1_config.admin_up = true;
+    port1_config.speed_mbps = 10000; // 10 Gbps
+    port1_config.mtu = 9000;        // Jumbo frame
+    sw.interface_manager_.configure_port(1, port1_config);
+    std::cout << "Port 1 configured: admin_up=" << std::boolalpha << port1_config.admin_up
+              << ", speed=" << port1_config.speed_mbps << " Mbps, MTU=" << port1_config.mtu << std::endl;
+
+    sw.interface_manager_.on_link_up([](uint32_t port_id){
+        std::cout << "[Callback] Port " << port_id << " link is UP." << std::endl;
+    });
+    sw.interface_manager_.on_link_down([](uint32_t port_id){
+        std::cout << "[Callback] Port " << port_id << " link is DOWN." << std::endl;
+    });
+
+    sw.interface_manager_.simulate_port_link_down(1); // Should call link_down_callbacks
+    sw.interface_manager_.simulate_port_link_up(1);   // Should call link_up_callbacks
+    std::cout << "Port 1 link status (simulated): " << std::boolalpha
+              << sw.interface_manager_.is_port_link_up(1) << std::endl;
+
+
+    // --- Packet Classifier and Flow Table Example Usage ---
+    std::cout << "\n--- Packet Classifier & Flow Table Examples ---" << std::endl;
+    netflow::PacketClassifier::FlowKey rule_key_template;
+    rule_key_template.src_ip = ntohl(0xC0A80101); // 192.168.1.1
+    rule_key_template.dst_ip = ntohl(0xC0A8010A); // 192.168.1.10
+    rule_key_template.protocol = 6; // TCP
+    rule_key_template.dst_port = ntohs(80); // Port 80 (HTTP)
+
+    netflow::PacketClassifier::FlowKey rule_mask; // Mask for specific fields
+    // For IP and port matching, typically use all 1s in mask for fields to match
+    rule_mask.src_ip = 0xFFFFFFFF;
+    rule_mask.dst_ip = 0xFFFFFFFF;
+    rule_mask.protocol = 0xFF;
+    rule_mask.dst_port = 0xFFFF;
+    // Other fields in mask are 0 (wildcard) by default in FlowKey constructor
+
+    uint32_t rule_action_id = 1001; // Custom action ID for this rule
+    netflow::PacketClassifier::ClassificationRule http_rule(rule_key_template, rule_mask, rule_action_id, 100); // Priority 100
+    sw.packet_classifier_.add_rule(http_rule);
+    std::cout << "Added HTTP classification rule for 192.168.1.1 -> 192.168.1.10:80, action_id=" << rule_action_id << std::endl;
+
+    // Example FlowKey for table insertion (can be extracted from a packet or created manually)
+    netflow::Switch::FlowKey flow_key_example = rule_key_template; // Use the same key for simplicity
+    uint32_t flow_action_id = 2002;
+    if (sw.flow_table_.insert(flow_key_example, flow_action_id)) {
+        std::cout << "Inserted flow into FlowTable. Key (src_ip=" << std::hex << flow_key_example.src_ip
+                  << ", dst_port=" << std::dec << ntohs(flow_key_example.dst_port) // Display in host order for readability
+                  << "), action_id=" << flow_action_id << std::endl;
+    }
+    auto looked_up_action = sw.flow_table_.lookup(flow_key_example);
+    if (looked_up_action) {
+        std::cout << "Lookup in FlowTable successful. Action ID: " << *looked_up_action << std::endl;
+    }
+
+
     // --- Simulate Packet Processing (Example) ---
     std::cout << "\n--- Simulating Packet Processing ---" << std::endl;
+    // Ensure port 0 (ingress for first test packet) is also link up for packet to pass
+    netflow::InterfaceManager::PortConfig port0_config;
+    port0_config.admin_up = true;
+    sw.interface_manager_.configure_port(0, port0_config);
+    sw.interface_manager_.simulate_port_link_up(0);
+    std::cout << "Port 0 link status (simulated): " << std::boolalpha
+              << sw.interface_manager_.is_port_link_up(0) << std::endl;
+
 
     // Create a dummy packet buffer (normally from NIC driver or another source)
     // This packet is untagged, destined for a MAC address.
-    size_t buffer_size = 128;
+    size_t buffer_size = 128; // Increased for potential headers
     netflow::PacketBuffer* pb1 = sw.buffer_pool.allocate_buffer(buffer_size);
     if (pb1) {
         // Fill with some dummy Ethernet frame data
-        // Dst MAC: 00:00:00:00:00:AA, Src MAC: 00:00:00:00:00:BB, EtherType: IPv4 (0x0800)
+        // Dst MAC: 00:00:00:00:00:AA, Src MAC: 00:00:00:00:00:BB
+        // EtherType: IPv4 (0x0800)
+        // IP: 192.168.1.1 -> 192.168.1.10
+        // Protocol: TCP (6)
+        // TCP Ports: 12345 -> 80 (HTTP)
         uint8_t dummy_frame[] = {
+            // Ethernet Header
             0x00, 0x00, 0x00, 0x00, 0x00, 0xAA, // Dst MAC
             0x00, 0x00, 0x00, 0x00, 0x00, 0xBB, // Src MAC
             0x08, 0x00,                         // EtherType (IPv4)
-            // ... rest of IPv4 packet data (dummy)
+            // IPv4 Header (20 bytes)
+            0x45, 0x00,                         // Version (4) IHL (5), DSCP/ECN
+            0x00, 0x28,                         // Total Length (40 bytes: 20 IP + 20 TCP)
+            0x12, 0x34, 0x00, 0x00,             // Identification, Flags/Fragment Offset
+            0x40, 0x06,                         // TTL (64), Protocol (TCP=6)
+            0x00, 0x00,                         // Header Checksum (placeholder)
+            192, 168, 1, 1,                   // Src IP (192.168.1.1)
+            192, 168, 1, 10,                  // Dst IP (192.168.1.10)
+            // TCP Header (20 bytes)
+            (12345 >> 8), (12345 & 0xFF),       // Src Port (12345)
+            (80 >> 8), (80 & 0xFF),             // Dst Port (80)
+            0x00, 0x00, 0x00, 0x00,             // Sequence Number
+            0x00, 0x00, 0x00, 0x00,             // Ack Number
+            0x50, 0x00,                         // Data Offset (5), Reserved, Flags
+            0x00, 0x00,                         // Window Size (placeholder)
+            0x00, 0x00,                         // Checksum (placeholder)
+            0x00, 0x00                          // Urgent Pointer
         };
         memcpy(pb1->data, dummy_frame, sizeof(dummy_frame));
         pb1->size = sizeof(dummy_frame); // Actual data size
 
-        std::cout << "\nSimulating packet ingress on Port 0 (Access VLAN 10):" << std::endl;
+        std::cout << "\nSimulating packet (matching HTTP rule) ingress on Port 0 (Access VLAN 10):" << std::endl;
         sw.process_received_packet(0, pb1); // Ingress on port 0
         // pb1's ref_count will be handled by Packet and BufferPool within process_received_packet lifecycle
     }
@@ -97,7 +184,9 @@ int main(int argc, char* argv[]) {
         };
         memcpy(pb2->data, bpdu_frame, sizeof(bpdu_frame));
         pb2->size = sizeof(bpdu_frame);
-        std::cout << "\nSimulating BPDU packet ingress on Port 1 (Trunk):" << std::endl;
+        std::cout << "\nSimulating BPDU packet ingress on Port 1 (Trunk, Link Up):" << std::endl;
+        // Ensure port 1 is admin up for this test (already done by configure_port)
+        // sw.interface_manager_.simulate_port_link_up(1); // Already done above
         sw.process_received_packet(1, pb2);
     }
 
