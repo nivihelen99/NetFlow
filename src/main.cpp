@@ -16,20 +16,26 @@ void handle_cpu_packet(netflow::Packet& pkt, uint32_t ingress_port) {
 int main(int argc, char* argv[]) {
     std::cout << "Netflow++ Software Switch Simulation" << std::endl;
 
-    // Create a switch with a specific number of ports
-    uint32_t num_ports = 8; // Example: 8 ports
-    netflow::Switch sw(num_ports);
+    // Define default MAC and priorities for the switch
+    uint32_t num_ports = 4; // Example: 4 ports
+    uint64_t switch_main_mac = 0x0000DEADBEEF0001ULL; // Example MAC
+    uint16_t default_stp_priority = 0x8000; // 32768
+    uint16_t default_lacp_priority = 32768;
+
+    // Create a switch with a specific number of ports and MAC address
+    netflow::Switch sw(num_ports, switch_main_mac, default_stp_priority, default_lacp_priority);
 
     // Configure packet handler (optional)
     sw.set_packet_handler(handle_cpu_packet);
 
     // --- Example Configuration ---
+    // STP Bridge configuration is now handled by Switch constructor passing MAC/priority to StpManager.
+    // Old manual configuration:
+    // netflow::StpManager::BridgeConfig bridge_cfg;
+    // bridge_cfg.bridge_id = 0x8000000000000001ULL; // Example bridge ID (priority + MAC)
+    // sw.stp_manager.set_bridge_config(bridge_cfg); // This method might be removed or changed in StpManager
+    // std::cout << "STP Bridge ID set to: 0x" << std::hex << sw.stp_manager.get_bridge_config().bridge_id_value << std::dec << std::endl;
 
-    // 1. Bridge Configuration (STP)
-    netflow::StpManager::BridgeConfig bridge_cfg;
-    bridge_cfg.bridge_id = 0x8000000000000001ULL; // Example bridge ID (priority + MAC)
-    sw.stp_manager.set_bridge_config(bridge_cfg);
-    std::cout << "STP Bridge ID set to: 0x" << std::hex << sw.stp_manager.get_bridge_config().bridge_id << std::dec << std::endl;
 
     // 2. Port Configuration (VLANs)
     netflow::VlanManager::PortConfig access_port_cfg;
@@ -74,7 +80,8 @@ int main(int argc, char* argv[]) {
 
     // Apply these manually set parameters
     sw.logger_.info("CONFIG_MAIN", "Applying manually set parameters to the switch...");
-    sw.config_manager_.apply_config(sw.config_manager_.get_current_config_data(), sw);
+    // sw.config_manager_.apply_config(sw.config_manager_.get_current_config_data(), sw); // Old signature
+    sw.config_manager_.apply_config(sw); // Corrected signature
 
     // Verify if admin_up for port 1 was applied (optional check)
     auto port1_cfg_after_apply = sw.interface_manager_.get_port_config(1);
