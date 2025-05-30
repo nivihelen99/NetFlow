@@ -1,2 +1,0 @@
-/usr/bin/ar qc libnetflow_switching_lib.a CMakeFiles/netflow_switching_lib.dir/switching/fdb.cpp.o CMakeFiles/netflow_switching_lib.dir/switching/vlan_manager.cpp.o
-/usr/bin/ranlib libnetflow_switching_lib.a
