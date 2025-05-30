@@ -13,11 +13,15 @@
 #include "qos_manager.hpp"
 #include "acl_manager.hpp"
 #include "lacp_manager.hpp"
+#include "logger.hpp" // Ensure logger is included
+#include "config_manager.hpp" // Ensure ConfigManager is included
+#include "management_interface.hpp" // Ensure ManagementInterface is included
 
 #include <cstdint>
 #include <functional> // For std::function
 #include <vector>
-#include <iostream>   // For placeholder messages
+#include <iostream>   // For std::cout, std::cerr (though trying to replace them)
+#include <string>     // For std::to_string
 
 namespace netflow {
 
@@ -27,364 +31,276 @@ public:
     ForwardingDatabase fdb;
     VlanManager vlan_manager;
     StpManager stp_manager;
-    InterfaceManager interface_manager_; // New
-    PacketClassifier packet_classifier_; // New
+    InterfaceManager interface_manager_;
+    PacketClassifier packet_classifier_;
 
-    // Type alias for a common flow table
-    using FlowKey = PacketClassifier::FlowKey; // Make FlowKey easily accessible
+    using FlowKey = PacketClassifier::FlowKey;
     using FlowTable = LockFreeHashTable<FlowKey, uint32_t /* Action ID or Flow Data ID */>;
-    FlowTable flow_table_; // New
+    FlowTable flow_table_;
 
-    QosManager qos_manager_;         // New
-    AclManager acl_manager_;         // New
-    LacpManager lacp_manager_;       // New
+    QosManager qos_manager_;
+    AclManager acl_manager_;
+    LacpManager lacp_manager_;
+    SwitchLogger logger_;
+    ConfigManager config_manager_;             // Added member
+    ManagementInterface management_interface_; // Added member
 
     Switch(uint32_t num_ports) :
         num_ports_(num_ports),
-        flow_table_(1024) /* Default capacity for FlowTable */ {
-        // Default constructors for qos_manager_, acl_manager_, lacp_manager_ are sufficient.
-        std::cout << "Switch created with " << num_ports_ << " ports." << std::endl;
-        // Initialize port states for STP and InterfaceManager, e.g., to BLOCKING or DISABLED initially
-        for (uint32_t i = 0; i < num_ports_; ++i) {
-            // Default port configuration for VLANs might be set here or expected to be configured explicitly
-            // VlanManager::PortConfig default_vlan_port_config;
-            // vlan_manager.configure_port(i, default_vlan_port_config);
+        flow_table_(1024),
+        logger_(LogLevel::INFO) { // Default log level INFO, can be changed by config or main.cpp
 
-            // Default STP state, e.g. BLOCKING until STP converges
-            stp_manager.set_port_state(i, StpManager::PortState::BLOCKING);
+        logger_.info("SWITCH_LIFECYCLE", "Switch class constructing for " + std::to_string(num_ports_) + " ports.");
+        fdb.set_logger(&logger_);
+        // config_manager_.set_logger(&logger_); // If ConfigManager had a set_logger method
 
-            // Default port configuration for InterfaceManager (e.g., admin down)
-            InterfaceManager::PortConfig default_if_config;
-            default_if_config.admin_up = false;
-            interface_manager_.configure_port(i, default_if_config);
-            // Simulate link down state initially for all ports
-            interface_manager_.simulate_port_link_down(i);
+        logger_.info("CONFIG", "Loading default configuration (default_switch_config.json)...");
+        if (config_manager_.load_config("default_switch_config.json")) {
+            logger_.info("CONFIG", "Default configuration loaded. Applying now...");
+            config_manager_.apply_config(config_manager_.get_current_config_data(), *this);
+        } else {
+            logger_.warning("CONFIG", "Failed to load default_switch_config.json. Using empty/hardcoded defaults.");
         }
-        // stp_manager.set_buffer_pool(&buffer_pool); // If StpManager needs to allocate BPDUs
+
+        logger_.info("SWITCH_INIT", "Initializing per-port defaults (may be overridden by loaded config)...");
+        for (uint32_t i = 0; i < num_ports_; ++i) {
+             if(stp_manager.get_port_state(i) == StpManager::PortState::UNKNOWN) {
+                 stp_manager.set_port_state(i, StpManager::PortState::BLOCKING);
+                 logger_.debug("STP_INIT", "Port " + std::to_string(i) + " STP state set to BLOCKING (default).");
+            }
+            if (!interface_manager_.get_port_config(i).has_value()) {
+                InterfaceManager::PortConfig default_if_config;
+                default_if_config.admin_up = false;
+                interface_manager_.configure_port(i, default_if_config);
+                logger_.debug("IFACE_INIT", "Port " + std::to_string(i) + " configured with default admin_down state.");
+            }
+            bool current_admin_up = interface_manager_.get_port_config(i).value_or(InterfaceManager::PortConfig()).admin_up;
+            if (!interface_manager_.is_port_link_up(i) && !current_admin_up) {
+                 interface_manager_.simulate_port_link_down(i);
+                 logger_.debug("IFACE_INIT", "Port " + std::to_string(i) + " link state confirmed/simulated down (default).");
+            } else if (current_admin_up && !interface_manager_.is_port_link_up(i)) {
+                interface_manager_.simulate_port_link_up(i);
+                logger_.debug("IFACE_INIT", "Port " + std::to_string(i) + " link state simulated up due to admin_up config.");
+            }
+        }
+        logger_.info("SWITCH_INIT", "Switch basic initialization sequence complete.");
     }
 
     ~Switch() {
-        std::cout << "Switch shutting down." << std::endl;
+        logger_.info("SWITCH_SHUTDOWN", "Switch shutting down.");
     }
 
-    // Sets a handler to be called when a packet is received and needs processing by CPU/control plane.
     void set_packet_handler(std::function<void(Packet& pkt, uint32_t ingress_port)> handler) {
         packet_handler_ = handler;
-        std::cout << "Packet handler set." << std::endl;
+        logger_.info("SWITCH_CONFIG", "Packet handler set.");
     }
 
-    // Sends a packet out of a specific port.
-    // This is a low-level function; actual forwarding decisions use this.
     void forward_packet(Packet& pkt, uint32_t egress_port) {
         if (egress_port >= num_ports_) {
-            std::cerr << "Error: Egress port " << egress_port << " out of range." << std::endl;
+            logger_.error("FORWARDING", "Egress port " + std::to_string(egress_port) + " out of range.");
             return;
         }
-        // In a real switch, this would queue the packet for transmission on the hardware port.
-        // The Packet's PacketBuffer would be handed off.
-        std::cout << "Placeholder: Forwarding packet (size " << pkt.get_buffer()->size
-                  << ") out of port " << egress_port << std::endl;
-
-        // Example of how packet handler could be used if packet is for CPU
-        // if (packet_handler_ && egress_port == CPU_PORT_PLACEHOLDER) {
-        //     packet_handler_(pkt, ingress_port_placeholder);
-        // }
-
-        // For simulation, we might just log or call another handler.
-        // The packet's buffer would be decremented once sent or copied to hardware queue.
-        // pkt.get_buffer()->decrement_ref(); // If this function consumes the packet reference
+        logger_.debug("FORWARDING_QUEUE", "Packet (size " + std::to_string(pkt.get_buffer()->size)
+                  + ") conceptually passed to hardware for transmission on port " + std::to_string(egress_port));
     }
 
-    // Floods a packet to all active, forwarding ports except the ingress port, respecting VLAN and STP.
     void flood_packet(Packet& pkt, uint32_t ingress_port) {
-        std::cout << "Placeholder: Flooding packet from ingress port " << ingress_port << std::endl;
+        logger_.debug("FLOOD", "Flooding packet from ingress port " + std::to_string(ingress_port));
 
         std::optional<uint16_t> vlan_id_opt = pkt.vlan_id();
-        // If untagged on ingress (after ingress VLAN processing), it's associated with native VLAN.
-        // This vlan_id needs to be the one determined by ingress processing.
-        // For now, let's assume pkt.vlan_id() gives the correct VLAN context.
-        uint16_t vlan_id_for_flooding = 0; // Default or unassigned
+        uint16_t vlan_id_for_flooding = 0;
 
-        const auto* ingress_port_vlan_config = vlan_manager.get_port_config(ingress_port);
+        std::optional<VlanManager::PortConfig> ingress_port_vlan_config_opt = vlan_manager.get_port_config(ingress_port);
         if (vlan_id_opt.has_value()){
             vlan_id_for_flooding = vlan_id_opt.value();
-        } else if (ingress_port_vlan_config) {
-            // If packet became untagged after ingress processing (e.g. access port native vlan)
-            // or was untagged on a trunk and associated with native vlan.
-            vlan_id_for_flooding = ingress_port_vlan_config->native_vlan;
+        } else if (ingress_port_vlan_config_opt.has_value()) {
+            vlan_id_for_flooding = ingress_port_vlan_config_opt.value().native_vlan;
         } else {
-            std::cerr << "Warning: Could not determine VLAN for flooding for packet from port " << ingress_port << std::endl;
-            // Default to vlan 0 or drop, depending on policy
+            logger_.warning("FLOOD", "Could not determine VLAN for flooding for packet from port " + std::to_string(ingress_port) + " (no VLAN config found for port).");
         }
 
-
+        int flooded_count = 0;
         for (uint32_t i = 0; i < num_ports_; ++i) {
-            if (i == ingress_port) {
-                continue; // Don't send back to ingress port
+            if (i == ingress_port) continue;
+
+            if (!interface_manager_.is_port_link_up(i)) {
+                 logger_.debug("FLOOD_SKIP", "Port " + std::to_string(i) + " link is down.");
+                 continue;
             }
 
-            // Check STP state
-            if (!stp_manager.should_forward(i)) {
-                // std::cout << "Port " << i << " is not in STP forwarding state." << std::endl;
+            uint32_t actual_flood_egress_port = i;
+            if (lacp_manager_.get_lag_config(i).has_value()) {
+                actual_flood_egress_port = lacp_manager_.select_egress_port(i, pkt);
+                if (actual_flood_egress_port == 0 && i != 0) {
+                     logger_.debug("FLOOD_SKIP", "LAG " + std::to_string(i) + " has no active members for flood egress.");
+                     continue;
+                }
+                logger_.debug("LACP", "Flood: LAG ID " + std::to_string(i) + " resolved to physical port " + std::to_string(actual_flood_egress_port));
+            }
+
+            StpManager::PortState flood_egress_stp_state = stp_manager.get_port_state(actual_flood_egress_port);
+            if (flood_egress_stp_state != StpManager::PortState::FORWARDING) {
+                logger_.debug("FLOOD_SKIP", "Port " + std::to_string(actual_flood_egress_port) + " not in STP forwarding state (" + stp_manager.port_state_to_string(flood_egress_stp_state) + ")");
+                continue;
+            }
+            if (!vlan_manager.should_forward(ingress_port, actual_flood_egress_port, vlan_id_for_flooding)) {
+                logger_.debug("FLOOD_SKIP", "VLAN " + std::to_string(vlan_id_for_flooding) + " not allowed on port " + std::to_string(actual_flood_egress_port));
                 continue;
             }
 
-            // Check VLAN membership
-            if (!vlan_manager.should_forward(ingress_port, i, vlan_id_for_flooding)) {
-                 // std::cout << "VLAN " << vlan_id_for_flooding << " not allowed on port " << i << " for egress from ingress " << ingress_port << std::endl;
-                continue;
-            }
-
-            // Create a new Packet object or copy buffer for each egress port if necessary,
-            // or use a mechanism that allows multiple ports to reference the same buffer.
-            // For simplicity, assume forward_packet handles ref counting or copying if needed.
-            // A real switch might need to replicate the packet buffer if sending to multiple ports
-            // unless it's a simple bus or shared medium (not typical for modern switches).
-
-            // We need to potentially modify the packet for egress (e.g. VLAN tag stripping)
-            // This implies that `pkt` might need to be cloned or handled carefully if modified per port.
-            // Let's assume process_egress modifies a temporary copy or that forward_packet handles it.
-            // This is a simplification.
-
-            // Create a temporary Packet object for egress processing for this specific port
-            // This is a shallow copy for its state, but shares the PacketBuffer initially.
-            // Packet egress_pkt_copy = pkt; // This copy constructor is deleted. TODO: Fix this for proper flood.
-                                          // Or, Packet methods should be const if they don't modify,
-                                          // or process_egress should work on a copy of data if it modifies.
-
-            // The Packet class as defined doesn't support easy copying for this scenario.
-            // Let's assume for this placeholder that forward_packet implicitly handles
-            // any necessary per-port modification based on VlanManager's state for that port.
-            // Or, we call VlanManager::process_egress on the *original* packet,
-            // which is problematic if it modifies it and it needs to be different for other ports.
-
-            // A more realistic approach:
-            // PacketBuffer* original_buf = pkt.get_buffer();
-            // original_buf->increment_ref(); // For this egress port
-            // Packet temp_egress_pkt(original_buf); // New packet instance around same buffer
-            // vlan_manager.process_egress(temp_egress_pkt, i); // Modify temp_egress_pkt (and its buffer view)
-            // forward_packet(temp_egress_pkt, i); // forward_packet will then call decrement_ref on original_buf
-            // original_buf->decrement_ref(); // Decrement our local ref, temp_egress_pkt took its own.
-
-            // Simpler placeholder:
-            // We assume forward_packet will internally call vlan_manager.process_egress
-            // or that the packet is already in the correct state for this port.
-            // This is often true if ingress processing normalizes the packet to a common representation.
-
-            std::cout << "  Flooding to port " << i << " (VLAN " << vlan_id_for_flooding << ") - (Actual send commented due to copy issue)" << std::endl;
-            // forward_packet(pkt, i); // TODO: This is problematic as pkt state might change due to process_egress. Needs packet duplication.
-
-            // For now, the flood is very conceptual.
-            // A real flood would need to handle buffer replication or careful modification.
+            logger_.debug("FLOOD_TARGET", "Conceptually flooding to port " + std::to_string(actual_flood_egress_port) + ". Egress processing & QoS for flood is simplified/skipped.");
+            interface_manager_._increment_tx_stats(actual_flood_egress_port, pkt.get_buffer()->size);
+            flooded_count++;
+        }
+        if (flooded_count == 0 && num_ports_ > 1 && ingress_port < num_ports_) {
+            logger_.debug("FLOOD", "Packet from port " + std::to_string(ingress_port) + " not flooded to any other suitable ports.");
         }
     }
 
-    // Placeholder for starting switch operations (e.g., enabling ports, starting STP timers).
     void start() {
-        std::cout << "Switch starting..." << std::endl;
-        // This could involve:
-        // - Initializing all ports (e.g., bringing them up if not done in constructor)
-        // - Starting STP timers and logic (e.g., Bridge::run_stp_timers_and_logic() in a loop/thread)
-        // - Setting up packet processing loop if this is a software switch handling data plane
-
-        // For now, just a message.
-        // In a real system, this might kick off threads for STP, packet polling, etc.
-        // stp_manager.run_stp_timers_and_logic(); // Example call
-        std::cout << "Switch operational." << std::endl;
+        logger_.info("SWITCH_LIFECYCLE", "Switch starting...");
+        logger_.info("SWITCH_LIFECYCLE", "Switch operational.");
     }
 
-    // Main packet processing logic (called when a raw frame/buffer is received on a port)
     void process_received_packet(uint32_t ingress_port_id, PacketBuffer* raw_buffer) {
-        if (!raw_buffer) return;
+        if (!raw_buffer) {
+            logger_.error("PROCESS_PACKET", "Null PacketBuffer received on port " + std::to_string(ingress_port_id));
+            return;
+        }
 
-        // 0. Check Interface Link Status
         if (!interface_manager_.is_port_link_up(ingress_port_id)) {
-            std::cout << "Packet dropped, ingress port " << ingress_port_id << " link is down." << std::endl;
-            // Note: PacketBuffer ref_count will be decremented when raw_buffer is handled by caller
-            // or if we create a Packet object and it goes out of scope.
-            // If we don't create Packet pkt(raw_buffer), then raw_buffer needs explicit handling here.
-            // For simplicity, let's assume raw_buffer's lifecycle is managed if we return early.
-            // A common pattern: if Packet takes ownership, then its destructor handles it.
-            // If not creating Packet, then: buffer_pool.free_buffer(raw_buffer) or similar would be needed.
-            // Let's assume for now that not creating Packet means the buffer is immediately freed/recycled.
-            // This detail depends on BufferPool's design which currently expects Packet to decr_ref.
-            // So, to be safe with current PacketBuffer design:
-            raw_buffer->decrement_ref(); // Manually decrement if Packet object is not created.
+            logger_.info("PACKET_DROP", "Packet dropped on ingress port " + std::to_string(ingress_port_id) + ": Link is down.");
+            raw_buffer->decrement_ref();
             return;
         }
         interface_manager_._increment_rx_stats(ingress_port_id, raw_buffer->size);
+        logger_.debug("PROCESS_PACKET", "RX on port " + std::to_string(ingress_port_id) + ", size " + std::to_string(raw_buffer->size));
 
+        Packet pkt(raw_buffer);
 
-        Packet pkt(raw_buffer); // Packet takes ownership (increments ref count)
-
-        // X. ACL Evaluation (early stage)
-        uint32_t redirect_port_id_acl = 0; // Will be set by evaluate if REDIRECT
+        uint32_t redirect_port_id_acl = 0;
         AclActionType acl_action = acl_manager_.evaluate(pkt, redirect_port_id_acl);
 
         if (acl_action == AclActionType::DENY) {
-            std::cout << "Packet dropped by ACL DENY rule on ingress port " << ingress_port_id << std::endl;
-            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true); // is_drop = true
-            return; // pkt destructor handles buffer ref_count
+            logger_.log_packet_drop(pkt, ingress_port_id, "ACL DENY rule");
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+            return;
         }
         if (acl_action == AclActionType::REDIRECT) {
-            std::cout << "Packet redirected by ACL to port " << redirect_port_id_acl
-                      << " from ingress port " << ingress_port_id << std::endl;
-            // For REDIRECT, we might bypass further L2/L3 processing and send directly to the redirect_port.
-            // This simplified REDIRECT assumes the redirect_port_id is a physical port.
-            // QoS could still be applied on the new egress port.
+            logger_.info("ACL", "Packet REDIRECTED by ACL to port " + std::to_string(redirect_port_id_acl) + " from ingress port " + std::to_string(ingress_port_id));
             uint8_t queue_id_redirect = qos_manager_.classify_packet_to_queue(pkt, redirect_port_id_acl);
             qos_manager_.enqueue_packet(pkt, redirect_port_id_acl, queue_id_redirect);
-            interface_manager_._increment_tx_stats(redirect_port_id_acl, pkt.get_buffer()->size); // Assuming it will be sent
-            // TODO: A separate scheduler would dequeue and call the actual physical forward_packet.
-            return; // pkt destructor handles buffer ref_count
+            logger_.debug("QOS", "Redirected packet enqueued to port " + std::to_string(redirect_port_id_acl) + " queue " + std::to_string(static_cast<int>(queue_id_redirect)));
+            interface_manager_._increment_tx_stats(redirect_port_id_acl, pkt.get_buffer()->size);
+            return;
         }
-        // If PERMIT, continue normal processing.
 
-        // Y. Packet Classification (can happen before or after L2/L3 logic depending on use case)
         uint32_t classification_action_id = packet_classifier_.classify(pkt);
-        if (classification_action_id != 0) { // 0 might mean "no specific rule, continue normal L2/L3"
-            std::cout << "Packet on port " << ingress_port_id
-                      << " classified by PacketClassifier with action ID: " << classification_action_id
-                      << ". (Placeholder: Action not explicitly taken beyond logging/flow table)" << std::endl;
-
+        if (classification_action_id != 0) {
+            logger_.debug("PACKET_CLASSIFIER", "Packet on port " + std::to_string(ingress_port_id)
+                      + " classified by PacketClassifier with action ID: " + std::to_string(classification_action_id));
             FlowKey current_flow_key = packet_classifier_.extract_flow_key(pkt);
             auto flow_entry = flow_table_.lookup(current_flow_key);
             if(flow_entry.has_value()){
-                 std::cout << "  Flow entry found in FlowTable. Action ID: " << flow_entry.value() << std::endl;
-                 // Action could be to use this action_id to override normal forwarding, e.g., if it's a specific egress port or policer.
+                 logger_.debug("FLOW_TABLE", "  Flow entry found in FlowTable. Action ID: " + std::to_string(flow_entry.value()));
             } else {
-                 std::cout << "  No specific flow entry in FlowTable for this packet." << std::endl;
-                 // Potentially add to flow table after L2/L3 processing if it's a new valid flow that should be fast-pathed.
-                 // Example: flow_table_.insert(current_flow_key, some_derived_action_or_port_id);
+                 logger_.debug("FLOW_TABLE", "  No specific flow entry in FlowTable for this packet.");
             }
         }
 
-        // 1. Ingress VLAN Processing
         PacketAction vlan_action = vlan_manager.process_ingress(pkt, ingress_port_id);
         if (vlan_action == PacketAction::DROP) {
-            std::cout << "Packet dropped by ingress VLAN processing on port " << ingress_port_id << std::endl;
-            // pkt's destructor will decrement ref count of raw_buffer
+            logger_.log_packet_drop(pkt, ingress_port_id, "Ingress VLAN processing");
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
             return;
         }
-        // If PacketAction::CONSUME, it might be sent to packet_handler_ directly.
 
-        // 2. STP Check (on ingress port - BPDUs are processed, data might be dropped)
-        if (stp_manager.get_port_state(ingress_port_id) == StpManager::PortState::BLOCKING ||
-            stp_manager.get_port_state(ingress_port_id) == StpManager::PortState::LISTENING) {
-            // Only BPDUs should be processed by CPU if port is BLOCKING/LISTENING.
-            // Here we assume BPDUs are handled separately or by packet_handler_ if they reach here.
-            // For non-BPDU traffic:
-            bool is_bpdu = false; // TODO: Logic to identify BPDUs (e.g. check MAC dst, LLC type)
-            if (!is_bpdu) {
-                 std::cout << "Packet dropped, port " << ingress_port_id << " not in STP forwarding/learning state." << std::endl;
-                 return;
-            }
-        }
-
-        // If packet is a BPDU, it should be sent to STP manager or CPU
-        // Example: Check destination MAC for BPDU multicast address
         static const uint8_t bpdu_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00};
         MacAddress bpdu_mac(bpdu_mac_bytes);
-        if (pkt.ethernet() && pkt.dst_mac() && pkt.dst_mac().value() == bpdu_mac) {
+        bool is_bpdu = (pkt.ethernet() && pkt.dst_mac() && pkt.dst_mac().value() == bpdu_mac);
+
+        if (is_bpdu) {
+            logger_.debug("STP", "BPDU received on port " + std::to_string(ingress_port_id));
             stp_manager.process_bpdu(pkt, ingress_port_id);
-            // BPDUs are typically not forwarded further in the data plane by this path.
             return;
         }
 
+        StpManager::PortState current_stp_state = stp_manager.get_port_state(ingress_port_id);
+        if (current_stp_state == StpManager::PortState::BLOCKING ||
+            current_stp_state == StpManager::PortState::LISTENING) {
+            logger_.log_packet_drop(pkt, ingress_port_id, "STP state " + stp_manager.port_state_to_string(current_stp_state));
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+            return;
+        }
 
-        // 3. MAC Learning
-        if (stp_manager.should_learn(ingress_port_id)) { // Learn only if port is in Learning or Forwarding state
+        if (stp_manager.should_learn(ingress_port_id)) {
             if (pkt.ethernet() && pkt.src_mac().has_value()) {
-                uint16_t vlan_for_learning = 0; // Default if no VLAN
-                if (pkt.vlan_id().has_value()) {
-                    vlan_for_learning = pkt.vlan_id().value();
-                } else {
-                    // If packet is untagged after ingress processing, associate with native VLAN of ingress port
-                    const auto* port_cfg = vlan_manager.get_port_config(ingress_port_id);
-                    if (port_cfg) vlan_for_learning = port_cfg->native_vlan;
-                }
+                uint16_t vlan_for_learning = pkt.vlan_id().value_or(vlan_manager.get_port_config(ingress_port_id).value_or(VlanManager::PortConfig()).native_vlan);
                 fdb.learn_mac(pkt.src_mac().value(), ingress_port_id, vlan_for_learning);
             }
         }
 
-        // 4. Forwarding Lookup
         if (pkt.ethernet() && pkt.dst_mac().has_value()) {
-            uint16_t vlan_for_lookup = 0;
-            if (pkt.vlan_id().has_value()) {
-                vlan_for_lookup = pkt.vlan_id().value();
-            } else {
-                const auto* port_cfg = vlan_manager.get_port_config(ingress_port_id);
-                if (port_cfg) vlan_for_lookup = port_cfg->native_vlan;
-            }
-
+            uint16_t vlan_for_lookup = pkt.vlan_id().value_or(vlan_manager.get_port_config(ingress_port_id).value_or(VlanManager::PortConfig()).native_vlan);
             std::optional<uint32_t> egress_port_opt = fdb.lookup_port(pkt.dst_mac().value(), vlan_for_lookup);
 
             if (egress_port_opt.has_value()) {
                 uint32_t egress_port = egress_port_opt.value();
                 if (egress_port == ingress_port_id) {
-                    // MAC learned on this port, but destination is also this port (e.g. reflection) - drop
-                    std::cout << "Packet dropped, destination MAC is on ingress port " << ingress_port_id << std::endl;
+                    logger_.log_packet_drop(pkt, ingress_port_id, "Destination MAC is on ingress port (reflection)");
+                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
                     return;
                 }
 
-                // Check STP state for egress port
-                if (!stp_manager.should_forward(egress_port)) {
-                    std::cout << "Packet dropped, egress port " << egress_port << " not in STP forwarding state." << std::endl;
-                    return;
-                }
-
-                // Check VLAN membership for egress (should_forward in VLAN manager checks both ingress and egress permissions)
-                if (!vlan_manager.should_forward(ingress_port_id, egress_port, vlan_for_lookup)) {
-                    std::cout << "Packet dropped, VLAN " << vlan_for_lookup << " not allowed between port " << ingress_port_id << " and " << egress_port << std::endl;
-                    return;
-                }
-
-                // Apply egress VLAN processing
-                // This is tricky: process_egress might modify the packet.
-                // If forward_packet sends the original buffer, this needs careful handling.
-                // For now, assume process_egress modifies pkt, and forward_packet sends it.
-
-                // LACP: Determine actual physical port if egress_port is a LAG
                 uint32_t final_egress_port = egress_port;
-                if (lacp_manager_.get_lag_config(egress_port).has_value()) { // egress_port is a LAG ID
+                if (lacp_manager_.get_lag_config(egress_port).has_value()) {
                     final_egress_port = lacp_manager_.select_egress_port(egress_port, pkt);
-                    std::cout << "LAG " << egress_port << " resolved to physical port " << final_egress_port << std::endl;
+                    logger_.debug("LACP", "LAG ID " + std::to_string(egress_port) + " resolved to physical port " + std::to_string(final_egress_port) + " for packet.");
+                    if ((final_egress_port == 0 && egress_port != 0) || !interface_manager_.is_port_link_up(final_egress_port)) {
+                        logger_.log_packet_drop(pkt, ingress_port_id, "LACP LAG " + std::to_string(egress_port) + " has no active/valid/up members for egress (selected: " + std::to_string(final_egress_port) + ").");
+                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                        return;
+                    }
+                } else {
+                    if(!interface_manager_.is_port_link_up(final_egress_port)){
+                        logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " link is down.");
+                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                        return;
+                    }
                 }
 
-                // Apply egress VLAN processing for the final physical port
-                vlan_manager.process_egress(pkt, final_egress_port);
+                StpManager::PortState egress_stp_state = stp_manager.get_port_state(final_egress_port);
+                if (egress_stp_state != StpManager::PortState::FORWARDING) {
+                    logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " not in STP forwarding state (" + stp_manager.port_state_to_string(egress_stp_state) + ")");
+                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                    return;
+                }
 
-                // QoS: Classify and Enqueue for the final physical port
+                if (!vlan_manager.should_forward(ingress_port_id, final_egress_port, vlan_for_lookup)) {
+                    logger_.log_packet_drop(pkt, ingress_port_id, "VLAN " + std::to_string(vlan_for_lookup) + " not allowed between port " + std::to_string(ingress_port_id) + " and final egress " + std::to_string(final_egress_port));
+                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                    return;
+                }
+
+                vlan_manager.process_egress(pkt, final_egress_port);
                 uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, final_egress_port);
                 qos_manager_.enqueue_packet(pkt, final_egress_port, queue_id);
-                std::cout << "Packet enqueued to port " << final_egress_port << " queue " << static_cast<int>(queue_id) << std::endl;
-
-                // Original direct forwarding commented out - now handled by enqueue + separate scheduler (conceptual)
-                // forward_packet(pkt, final_egress_port);
-                interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->size); // Assume sent by scheduler
+                logger_.debug("QOS", "Packet enqueued to port " + std::to_string(final_egress_port) + " queue " + std::to_string(static_cast<int>(queue_id)));
+                interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->size);
             } else {
-                // Destination MAC unknown, flood the packet.
-                // Flood logic needs to be updated to consider LACP and QoS for each member port.
-                // For now, high-level flood_packet call remains; its internals would need LACP/QoS.
+                logger_.info("FDB", "Destination MAC unknown. Flooding packet from ingress port " + std::to_string(ingress_port_id) + " on VLAN " + std::to_string(vlan_for_lookup));
                 flood_packet(pkt, ingress_port_id);
             }
         } else {
-            // Not an Ethernet packet or no destination MAC, decide policy (e.g. drop or limited flood)
-            std::cout << "Packet dropped, not Ethernet or no destination MAC." << std::endl;
-            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true); // false for error, true for drop
+            logger_.log_packet_drop(pkt, ingress_port_id, "Not Ethernet or no destination MAC");
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
         }
-        // pkt's destructor will decrement ref count of raw_buffer when it goes out of scope
     }
-
 
 private:
     uint32_t num_ports_;
     std::function<void(Packet& pkt, uint32_t ingress_port)> packet_handler_;
-    // Other switch-wide configurations can go here.
-    // Note: _increment_rx_stats/_increment_tx_stats in InterfaceManager are marked with underscore
-    // suggesting they are intended for internal use by Switch or data plane handlers.
-    // Making them public or providing a proper stats update interface would be better.
-    // For now, Switch calls them directly.
+    // PerformanceCounters performance_counters_; // TODO: Add and manage this
 };
 
 } // namespace netflow

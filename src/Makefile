@@ -199,6 +199,30 @@ netflow_switching_lib/fast:
 	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/build
 .PHONY : netflow_switching_lib/fast
 
+netflow++/config_manager.o: netflow++/config_manager.cpp.o
+.PHONY : netflow++/config_manager.o
+
+# target to build an object file
+netflow++/config_manager.cpp.o:
+	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o
+.PHONY : netflow++/config_manager.cpp.o
+
+netflow++/config_manager.i: netflow++/config_manager.cpp.i
+.PHONY : netflow++/config_manager.i
+
+# target to preprocess a source file
+netflow++/config_manager.cpp.i:
+	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.i
+.PHONY : netflow++/config_manager.cpp.i
+
+netflow++/config_manager.s: netflow++/config_manager.cpp.s
+.PHONY : netflow++/config_manager.s
+
+# target to generate assembly for a file
+netflow++/config_manager.cpp.s:
+	cd /app && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/netflow_switching_lib.dir/build.make src/CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.s
+.PHONY : netflow++/config_manager.cpp.s
+
 port/interface_manager.o: port/interface_manager.cpp.o
 .PHONY : port/interface_manager.o
 
@@ -286,6 +310,9 @@ help:
 	@echo "... test"
 	@echo "... netflow_port_lib"
 	@echo "... netflow_switching_lib"
+	@echo "... netflow++/config_manager.o"
+	@echo "... netflow++/config_manager.i"
+	@echo "... netflow++/config_manager.s"
 	@echo "... port/interface_manager.o"
 	@echo "... port/interface_manager.i"
 	@echo "... port/interface_manager.s"

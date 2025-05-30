@@ -11,6 +11,7 @@ add_library(netflow_port_lib STATIC
 add_library(netflow_switching_lib STATIC
     switching/fdb.cpp
     switching/vlan_manager.cpp
+    netflow++/config_manager.cpp # Added ConfigManager source
 )
 
 # Make sure the libraries can find their own headers if they were in src,

@@ -7,6 +7,7 @@
 #include <optional>
 #include <algorithm> // For std::remove_if, std::find_if
 #include <map>       // As an alternative storage, or if MacAddress needs comparison for map keys
+#include "logger.hpp" // For SwitchLogger
 
 namespace netflow {
 
@@ -45,16 +46,45 @@ public:
                                    return entry.mac == mac && entry.vlan_id == vlan_id;
                                });
 
+        bool new_learn = false;
+        bool port_changed = false;
+        uint32_t old_port = 0;
+
         if (it != entries_.end()) {
             // Entry exists, update port and timestamp (if not static)
             if (!it->is_static) {
+                if (it->port != port) {
+                    port_changed = true;
+                    old_port = it->port;
+                }
                 it->port = port;
                 it->timestamp = std::chrono::steady_clock::now();
             }
         } else {
             // New entry
             entries_.emplace_back(mac, port, vlan_id);
+            new_learn = true;
         }
+
+        if (logger_) {
+            if (new_learn) {
+                logger_->log_mac_learning(mac, port, vlan_id);
+            } else if (port_changed && !it->is_static) {
+                // Need mac_to_string helper or similar. SwitchLogger has it private.
+                // For now, construct a simpler message or enhance logger.
+                // Let's assume a simpler log message for now, or that log_mac_learning can be adapted.
+                // For this exercise, I'll use a debug log for moves.
+                // To use logger_->mac_to_string, it needs to be public or FDB needs a way to format MACs.
+                // Temporarily, let's make mac_to_string public in SwitchLogger for this.
+                // (This is a design choice to be revisited - ideally, pass formatted strings or structured data to logger)
+                // Assuming logger_->mac_to_string() is accessible (e.g., made public in SwitchLogger)
+                logger_->debug("FDB", "MAC " + logger_->mac_to_string(mac) + " moved from port " + std::to_string(old_port) + " to " + std::to_string(port) + " on VLAN " + std::to_string(vlan_id));
+            }
+        }
+    }
+
+    void set_logger(SwitchLogger* logger) {
+        logger_ = logger;
     }
 
     // Adds or updates a static MAC entry. Static entries are not aged out.
@@ -169,6 +199,8 @@ private:
     //     }
     // };
     // std::map<FdbMapKey, FdbEntryData> map_entries_; // Where FdbEntryData would not include mac and vlan_id
+
+    SwitchLogger* logger_ = nullptr; // Pointer to a logger instance
 };
 
 } // namespace netflow

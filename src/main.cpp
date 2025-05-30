@@ -58,10 +58,80 @@ int main(int argc, char* argv[]) {
     sw.stp_manager.set_port_state(1, netflow::StpManager::PortState::FORWARDING);
 
 
+    // --- Logger Example ---
+    sw.logger_.info("MAIN", "Switch initialization complete. Management interface getting ready.");
+    sw.logger_.set_min_log_level(netflow::LogLevel::DEBUG); // Set to DEBUG for more verbose output during setup
+    sw.logger_.debug("MAIN", "Logger level set to DEBUG for detailed setup logs.");
+
+
+    // --- ConfigManager Example Usage ---
+    std::cout << "\n--- ConfigManager Examples ---" << std::endl;
+    sw.logger_.info("CONFIG_MAIN", "Demonstrating ConfigManager parameter setting...");
+    sw.config_manager_.set_parameter("port.1.admin_up", true);
+    sw.config_manager_.set_parameter("port.1.speed_mbps", static_cast<uint32_t>(10000)); // Set speed for port 1 again via config
+    sw.config_manager_.set_parameter("vlan.20.name", std::string("Engineering")); // Example of a VLAN name
+    sw.config_manager_.set_parameter("global.hostname", std::string("MyCoreSwitch"));
+
+    // Apply these manually set parameters
+    sw.logger_.info("CONFIG_MAIN", "Applying manually set parameters to the switch...");
+    sw.config_manager_.apply_config(sw.config_manager_.get_current_config_data(), sw);
+
+    // Verify if admin_up for port 1 was applied (optional check)
+    auto port1_cfg_after_apply = sw.interface_manager_.get_port_config(1);
+    if (port1_cfg_after_apply && port1_cfg_after_apply.value().admin_up) {
+        sw.logger_.info("CONFIG_VERIFY", "Port 1 is now admin_up after apply_config.");
+        // If port 1 was previously link_down due to admin_down, and now admin_up, simulate link going up
+        if(!sw.interface_manager_.is_port_link_up(1)) {
+            sw.interface_manager_.simulate_port_link_up(1);
+        }
+    } else {
+        sw.logger_.warning("CONFIG_VERIFY", "Port 1 admin_up status not correctly applied or port not found.");
+    }
+
+    // Placeholder save
+    if (sw.config_manager_.save_config("current_config_output.json")) {
+        sw.logger_.info("CONFIG_MAIN", "Configuration saved (placeholder) to current_config_output.json");
+    } else {
+        sw.logger_.error("CONFIG_MAIN", "Failed to save configuration (placeholder).");
+    }
+
+
+    // --- ManagementInterface Example Usage ---
+    std::cout << "\n--- ManagementInterface Examples ---" << std::endl;
+    sw.logger_.info("MGMT_IF_MAIN", "Registering sample CLI commands and OID handlers...");
+
+    // CLI Command
+    sw.management_interface_.register_command("show_version",
+        [&](const std::vector<std::string>& args) -> std::string {
+            // Accessing logger from Switch instance captured by lambda (if needed, or use global)
+            // sw.logger_.debug("CLI_HANDLER", "'show_version' command executed.");
+            return "NetFlow++ Switch Version 1.0.1-alpha";
+        }
+    );
+    std::string version_output = sw.management_interface_.handle_cli_command("show_version");
+    sw.logger_.info("CLI_TEST", "Output of 'show_version': " + version_output);
+    std::string help_output = sw.management_interface_.handle_cli_command("help"); // Test unknown command
+    sw.logger_.info("CLI_TEST", "Output of 'help': " + help_output);
+
+    // OID Handler
+    sw.management_interface_.register_oid_handler(
+        "1.3.6.1.2.1.1.1.0", // sysDescr OID
+        [](){ return std::string("NetFlow++ Switch - High Performance Software Defined Networking"); }
+    );
+    auto oid_val = sw.management_interface_.handle_oid_get("1.3.6.1.2.1.1.1.0");
+    if(oid_val) {
+        sw.logger_.info("OID_TEST", "Value of OID '1.3.6.1.2.1.1.1.0' (sysDescr): " + oid_val.value());
+    } else {
+        sw.logger_.warning("OID_TEST", "Could not get value for OID '1.3.6.1.2.1.1.1.0'.");
+    }
+    bool oid_set_result = sw.management_interface_.handle_oid_set("1.3.6.1.2.1.1.1.0", "New Description"); // Try to set a read-only OID
+    sw.logger_.info("OID_TEST", std::string("Attempt to set read-only OID '1.3.6.1.2.1.1.1.0': ") + (oid_set_result ? "Succeeded (unexpected)" : "Failed (expected)"));
+
+
     // --- Start the switch ---
     sw.start(); // Calls the placeholder start method
 
-    // --- Interface Manager Example Usage ---
+    // --- Interface Manager Example Usage (Original examples, can be kept or modified) ---
     std::cout << "\n--- Interface Manager Examples ---" << std::endl;
     netflow::InterfaceManager::PortConfig port1_config;
     port1_config.admin_up = true;

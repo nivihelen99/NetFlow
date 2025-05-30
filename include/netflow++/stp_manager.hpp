@@ -163,6 +163,19 @@ private:
     // BufferPool* buffer_pool_ = nullptr;
     // public:
     //  void set_buffer_pool(BufferPool* pool) { buffer_pool_ = pool; }
+
+public: // Helper for logging
+    std::string port_state_to_string(PortState state) const {
+        switch (state) {
+            case PortState::UNKNOWN:   return "UNKNOWN";
+            case PortState::DISABLED:  return "DISABLED";
+            case PortState::BLOCKING:  return "BLOCKING";
+            case PortState::LISTENING: return "LISTENING";
+            case PortState::LEARNING:  return "LEARNING";
+            case PortState::FORWARDING:return "FORWARDING";
+            default:                   return "INVALID_STATE";
+        }
+    }
 };
 
 } // namespace netflow
