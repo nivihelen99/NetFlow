@@ -274,13 +274,31 @@ std::vector<Packet> StpManager::generate_bpdus(BufferPool& buffer_pool, SwitchLo
                 llc_hdr->ssap = 0x42;
                 llc_hdr->control = 0x03;
                 memcpy(pb->data + sizeof(EthernetHeader) + sizeof(LLCHeader), &bpdu_to_send_struct, CONFIG_BPDU_PAYLOAD_SIZE);
-                Packet new_bpdu_packet(pb);
-                bpdus_to_send.push_back(new_bpdu_packet);
+                bpdus_to_send.emplace_back(pb);
                 logger.info("STP_BPDU_GEN", "Generated BPDU on port " + std::to_string(port_id));
             }
         }
     }
     return bpdus_to_send;
+}
+
+StpManager::PortState StpManager::get_port_stp_state(uint32_t port_id) const {
+    auto it = port_stp_info_.find(port_id);
+    if (it != port_stp_info_.end()) {
+        return it->second.state;
+    }
+    // TODO: Consider logging a warning if a logger is accessible here
+    return PortState::UNKNOWN;
+}
+
+bool StpManager::should_learn(uint32_t port_id) const {
+    auto it = port_stp_info_.find(port_id);
+    if (it != port_stp_info_.end()) {
+        // Learning happens in LEARNING or FORWARDING states
+        return it->second.state == PortState::LEARNING || it->second.state == PortState::FORWARDING;
+    }
+    // TODO: Consider logging a warning if a logger is accessible here
+    return false;
 }
 
 // --- StpManager::recalculate_stp_roles_and_states ---
@@ -420,19 +438,106 @@ void StpManager::recalculate_stp_roles_and_states(SwitchLogger& logger) {
     }
 }
 
-// --- Helper methods for converting enum to string ---
-std::string StpManager::port_state_to_string(PortState state) const {
-    switch (state) {
-        case PortState::UNKNOWN:   return "UNKNOWN";
-        case PortState::DISABLED:  return "DISABLED";
-        case PortState::BLOCKING:  return "BLOCKING";
-        case PortState::LISTENING: return "LISTENING";
-        case PortState::LEARNING:  return "LEARNING";
-        case PortState::FORWARDING:return "FORWARDING";
-        default:                   return "INVALID_STATE";
+// --- StpManager Other Public Method Implementations (Example: get_port_stp_role) ---
+StpManager::PortRole StpManager::get_port_stp_role(uint32_t port_id) const {
+    auto it = port_stp_info_.find(port_id);
+    if (it != port_stp_info_.end()) {
+        return it->second.role;
+    }
+    return PortRole::UNKNOWN;
+}
+
+// --- StpManager Other Public Method Implementations (Example: admin_set_port_state) ---
+void StpManager::admin_set_port_state(uint32_t port_id, bool enable) {
+    auto it = port_stp_info_.find(port_id);
+    if (it != port_stp_info_.end()) {
+        if (enable) {
+            // Transitioning from DISABLED to BLOCKING typically.
+            // Actual state will be determined by recalculate_stp_roles_and_states.
+            if (it->second.state == PortState::DISABLED) {
+                it->second.state = PortState::BLOCKING; // Initial state when enabling
+                it->second.role = PortRole::UNKNOWN; // Will be recalculated
+                // TODO: Need access to logger here or make recalculate_stp_roles_and_states part of this.
+                // For now, assume recalculation will happen due to external event or timer.
+            }
+        } else {
+            it->second.state = PortState::DISABLED;
+            it->second.role = PortRole::DISABLED;
+            // Reset timers or other state associated with the port if necessary
+            it->second.message_age_timer_seconds = 0;
+            it->second.forward_delay_timer_seconds = 0;
+            it->second.hello_timer_seconds = 0;
+            it->second.new_bpdu_received_flag = false;
+        }
+    }
+    // TODO: Consider logging if port not found.
+}
+
+// --- StpManager Other Public Method Implementations (Example: should_forward) ---
+bool StpManager::should_forward(uint32_t port_id) const {
+    auto it = port_stp_info_.find(port_id);
+    if (it != port_stp_info_.end()) {
+        return it->second.state == PortState::FORWARDING;
+    }
+    return false;
+}
+
+// --- StpManager Other Public Method Implementations (Example: run_stp_timers) ---
+void StpManager::run_stp_timers() {
+    // This is a simplified representation. Real STP timer logic is more complex
+    // and tied to BPDU reception and state transitions.
+    // This function would typically be called periodically (e.g., every second).
+    // For now, it's a placeholder.
+    for (auto& pair : port_stp_info_) {
+        StpPortInfo& p_info = pair.second;
+        if (p_info.state != PortState::DISABLED) {
+            p_info.message_age_timer_seconds++; // Increment even if not strictly per spec here
+            p_info.hello_timer_seconds++; // For BPDU generation timing
+            if (p_info.state == PortState::LISTENING || p_info.state == PortState::LEARNING) {
+                p_info.forward_delay_timer_seconds++;
+            }
+
+            // TODO: Add logic for timer expiry actions (e.g., BPDU aging, state transitions)
+            // This would involve calling recalculate_stp_roles_and_states if significant timers expire.
+        }
     }
 }
 
+
+// --- StpManager Other Public Method Implementations (Example: set_bridge_mac_address_and_reinit) ---
+void StpManager::set_bridge_mac_address_and_reinit(uint64_t mac) {
+    bridge_config_.bridge_mac_address = mac;
+    bridge_config_.update_bridge_id_value();
+    // Re-initialize ports as bridge ID has changed, affecting all STP calculations
+    initialize_ports(port_stp_info_.size());
+    // TODO: Consider logging this significant change if logger is available.
+    // recalculate_stp_roles_and_states(logger); // Would need logger access
+}
+
+// --- StpManager Other Public Method Implementations (Example: set_bridge_priority_and_reinit) ---
+void StpManager::set_bridge_priority_and_reinit(uint16_t priority) {
+    bridge_config_.bridge_priority = priority;
+    bridge_config_.update_bridge_id_value();
+    initialize_ports(port_stp_info_.size());
+    // TODO: Log and recalculate
+}
+
+// --- StpManager Other Public Method Implementations (Example: get_bridge_config) ---
+const StpManager::BridgeConfig& StpManager::get_bridge_config() const {
+    return bridge_config_;
+}
+
+// --- StpManager Other Public Method Implementations (Example: get_all_ports_stp_info_summary) ---
+std::map<uint32_t, std::pair<std::string, std::string>> StpManager::get_all_ports_stp_info_summary() const {
+    std::map<uint32_t, std::pair<std::string, std::string>> summary;
+    for (const auto& pair : port_stp_info_) {
+        summary[pair.first] = {port_state_to_string(pair.second.state), port_role_to_string(pair.second.role)};
+    }
+    return summary;
+}
+
+
+// --- Helper methods for converting enum to string ---
 std::string StpManager::port_role_to_string(PortRole role) const {
     switch (role) {
         case PortRole::UNKNOWN:    return "UNKNOWN";

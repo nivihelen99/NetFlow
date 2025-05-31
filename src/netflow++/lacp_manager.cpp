@@ -38,7 +38,7 @@ void Lacpdu::set_actor_system_id(uint64_t system_id) {
 
 
 // Constructor for LacpPortInfo (if not inline)
-LacpManager::LacpPortInfo::LacpPortInfo(uint32_t phys_id)
+LacpPortInfo::LacpPortInfo(uint32_t phys_id)
     : port_id_physical(phys_id),
       actor_system_id_val(0), actor_port_id_val(0), actor_key_val(0), actor_state_val(0),
       partner_system_id_val(0), partner_port_id_val(0), partner_key_val(0), partner_state_val(0),
@@ -55,12 +55,12 @@ LacpManager::LacpPortInfo::LacpPortInfo(uint32_t phys_id)
     partner_state_val = LacpStateFlag::DEFAULTED | LacpStateFlag::EXPIRED;
 }
 
-void LacpManager::LacpPortInfo::set_actor_state_flag(LacpStateFlag flag, bool set) {
+void LacpPortInfo::set_actor_state_flag(LacpStateFlag flag, bool set) {
     if (set) actor_state_val |= static_cast<uint8_t>(flag);
     else actor_state_val &= ~static_cast<uint8_t>(flag);
 }
 
-bool LacpManager::LacpPortInfo::get_actor_state_flag(LacpStateFlag flag) const {
+bool LacpPortInfo::get_actor_state_flag(LacpStateFlag flag) const {
     return (actor_state_val & static_cast<uint8_t>(flag)) != 0;
 }
 
@@ -80,44 +80,20 @@ LacpManager::LacpManager(uint64_t switch_base_mac, uint16_t system_priority)
 // For example: create_lag, add_port_to_lag, process_lacpdu, generate_lacpdus, etc.
 // These were already present in the header in a simplified form or defined in a previous .cpp file.
 // For this subtask, only the constructor is strictly required to be defined here.
-// The select_egress_port, process_lacpdu, generate_lacpdus, run_lacp_timers_and_statemachines
-// were defined in the .cpp in the previous LACP subtask [2024-03-08 22:12:52.941 UTC].
+// The select_egress_port, process_lacpdu were defined inline in the header.
+// generate_lacpdus, run_lacp_timers_and_statemachines etc. are still missing declarations in the header.
 // We should ensure those definitions are also present if this file is being created fresh.
 // For now, focusing on the constructor as per the subtask step.
 
 
-// Placeholder definitions for other methods declared in lacp_manager.hpp
-// to allow for compilation if they are not defined inline.
-// These would need their full logic from the previous LACP subtask.
+// Placeholder definitions for other methods.
+// These would need their full logic from the previous LACP subtask AND declarations in the header.
 
-uint32_t LacpManager::select_egress_port(uint32_t lag_id, const Packet& pkt) const {
-    // Placeholder - full implementation was in previous LACP subtask
-    auto it = lags_.find(lag_id);
-    if (it == lags_.end() || it->second.member_ports.empty()) {
-        return 0;
-    }
-    const LagConfig& lag_config = it->second;
-    std::vector<uint32_t> active_members;
-    for (uint32_t port_id : lag_config.member_ports) {
-        auto p_info_it = port_lacp_info_.find(port_id);
-        if (p_info_it != port_lacp_info_.end() && p_info_it->second.is_active_member_of_lag) {
-            active_members.push_back(port_id);
-        }
-    }
-    if (active_members.empty()) return 0;
-    // Basic hash
-    uint32_t hash_val = 0;
-    if(pkt.src_mac().has_value()){
-        const MacAddress& mac = pkt.src_mac().value();
-        for(int i=0; i<6; ++i) hash_val += mac.bytes[i];
-    }
-    return active_members[hash_val % active_members.size()];
-}
+// select_egress_port is defined inline in the header. This definition is redundant.
+// uint32_t LacpManager::select_egress_port(uint32_t lag_id, const Packet& pkt) const { ... }
 
-void LacpManager::process_lacpdu(const Packet& lacpdu_packet, uint32_t ingress_port_id) {
-    // Placeholder - full implementation was in previous LACP subtask
-    // std::cout << "LACP: process_lacpdu called for port " << ingress_port_id << std::endl;
-}
+// process_lacpdu is defined inline in the header. This definition is redundant.
+// void LacpManager::process_lacpdu(const Packet& lacpdu_packet, uint32_t ingress_port_id) { ... }
 
 std::vector<Packet> LacpManager::generate_lacpdus(BufferPool& buffer_pool) {
     // Placeholder - full implementation was in previous LACP subtask

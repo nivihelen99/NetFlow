@@ -17,7 +17,7 @@ add_library(netflow_switching_lib STATIC
     # switching/vlan_manager.cpp    # Removed as VlanManager is header-only
     netflow++/config_manager.cpp
     netflow++/stp_manager.cpp
-    # netflow++/lacp_manager.cpp # lacp_manager.cpp should also be here from previous work
+    netflow++/lacp_manager.cpp # lacp_manager.cpp should also be here from previous work
 )
 
 # Make sure the libraries can find their own headers if they were in src,

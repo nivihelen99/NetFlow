@@ -11,6 +11,7 @@
 
 #include "packet.hpp" // For Packet class, used in select_egress_port and process_lacpdu
 #include "netflow++/logger.hpp" // For SwitchLogger, if used in future methods
+#include "netflow++/buffer_pool.hpp" // For BufferPool, used in generate_lacpdus
 
 // Forward declare PacketClassifier if its FlowKey might be used directly for hashing inspiration
 // namespace netflow { class PacketClassifier; }
@@ -318,6 +319,15 @@ public:
     const std::map<uint32_t, LagConfig>& get_all_lags() const {
         return lags_;
     }
+
+    // Methods that were defined in .cpp but not declared in .hpp
+    std::vector<Packet> generate_lacpdus(BufferPool& buffer_pool);
+    void run_lacp_timers_and_statemachines();
+    void initialize_lacp_port_info(uint32_t port_id, const LagConfig& lag_config);
+    void run_lacp_rx_machine(uint32_t port_id);
+    void run_lacp_periodic_tx_machine(uint32_t port_id);
+    void run_lacp_mux_machine(uint32_t port_id);
+    void update_port_selection_logic(uint32_t port_id);
 
 private:
     uint64_t switch_mac_address_; // Base MAC for the switch
