@@ -43,139 +43,22 @@ public:
         }
     };
 
-    VlanManager(const VlanManagerConfig& global_config = VlanManagerConfig())
-        : global_config_(global_config) {}
+    explicit VlanManager(const VlanManagerConfig& global_config = VlanManagerConfig());
 
-    void configure_port(uint32_t port_id, const PortConfig& config) {
-        PortConfig new_config = config;
-        // Ensure basic consistency for access ports
-        if (new_config.type == PortType::ACCESS) {
-            new_config.allowed_vlans.clear();
-            new_config.allowed_vlans.insert(new_config.native_vlan); // Access port implicitly allows only its native VLAN
-        }
-        port_configs_[port_id] = new_config;
-    }
+    void configure_port(uint32_t port_id, const PortConfig& config);
 
-    std::optional<PortConfig> get_port_config(uint32_t port_id) const {
-        auto it = port_configs_.find(port_id);
-        if (it != port_configs_.end()) {
-            return it->second; // Return by value, wrapped in std::optional
-        }
-        return std::nullopt;
-    }
+    std::optional<PortConfig> get_port_config(uint32_t port_id) const;
 
     // Determines if traffic with a given VLAN ID can pass from ingress_port to egress_port.
-    bool should_forward(uint32_t ingress_port_id, uint32_t egress_port_id, uint16_t vlan_id) const {
-        std::optional<PortConfig> ingress_cfg_opt = get_port_config(ingress_port_id);
-        std::optional<PortConfig> egress_cfg_opt = get_port_config(egress_port_id);
-
-        if (!ingress_cfg_opt.has_value() || !egress_cfg_opt.has_value()) {
-            return false; // Port configuration missing
-        }
-        const PortConfig& ingress_cfg = ingress_cfg_opt.value();
-        const PortConfig& egress_cfg = egress_cfg_opt.value();
-
-        // Check if VLAN is allowed on ingress port
-        bool allowed_on_ingress = false;
-        if (ingress_cfg.type == PortType::ACCESS) {
-            allowed_on_ingress = (vlan_id == ingress_cfg.native_vlan);
-        } else { // TRUNK or HYBRID
-            allowed_on_ingress = (ingress_cfg.allowed_vlans.count(vlan_id) > 0);
-        }
-
-        if (!allowed_on_ingress) {
-            return false;
-        }
-
-        // Check if VLAN is allowed on egress port
-        bool allowed_on_egress = false;
-        if (egress_cfg.type == PortType::ACCESS) {
-            allowed_on_egress = (vlan_id == egress_cfg.native_vlan);
-        } else { // TRUNK or HYBRID
-            allowed_on_egress = (egress_cfg.allowed_vlans.count(vlan_id) > 0);
-        }
-
-        return allowed_on_egress;
-    }
+    bool should_forward(uint32_t ingress_port_id, uint32_t egress_port_id, uint16_t vlan_id) const;
 
     // Processes a packet arriving on an ingress port.
     // Modifies packet (e.g., adds VLAN tag) and returns an action.
-    PacketAction process_ingress(Packet& pkt, uint32_t port_id) {
-        std::optional<PortConfig> config_opt = get_port_config(port_id);
-        if (!config_opt.has_value()) {
-            return PacketAction::DROP; // No configuration for this port
-        }
-        const PortConfig& config = config_opt.value();
+    PacketAction process_ingress(Packet& pkt, uint32_t port_id);
 
-        bool packet_has_vlan = pkt.has_vlan();
-        std::optional<uint16_t> packet_vlan_id_opt = pkt.vlan_id();
-        uint16_t packet_vlan_id = packet_vlan_id_opt.value_or(0); // 0 if no VLAN tag
-
-        switch (config.type) {
-            case PortType::ACCESS:
-                if (packet_has_vlan) {
-                    if (packet_vlan_id != config.native_vlan) {
-                        return PacketAction::DROP;
-                    }
-                } else {
-                    if (!pkt.push_vlan(config.native_vlan, 0)) {
-                        return PacketAction::DROP;
-                    }
-                }
-                if (!config.allowed_vlans.count(config.native_vlan)) {
-                    return PacketAction::DROP;
-                }
-                break;
-
-            case PortType::TRUNK:
-            case PortType::HYBRID:
-                if (packet_has_vlan) {
-                    if (config.allowed_vlans.count(packet_vlan_id) == 0) {
-                        return PacketAction::DROP;
-                    }
-                } else {
-                    if (config.allowed_vlans.count(config.native_vlan) == 0) {
-                         return PacketAction::DROP;
-                    }
-                }
-                break;
-            default:
-                return PacketAction::DROP;
-        }
-        return PacketAction::FORWARD;
-    }
-
-    void process_egress(Packet& pkt, uint32_t port_id) {
-        std::optional<PortConfig> config_opt = get_port_config(port_id);
-        if (!config_opt.has_value()) {
-            return;
-        }
-        const PortConfig& config = config_opt.value();
-
-        std::optional<uint16_t> packet_vlan_id_opt = pkt.vlan_id();
-        if (!packet_vlan_id_opt.has_value()) {
-            return;
-        }
-
-        uint16_t packet_vlan_id = packet_vlan_id_opt.value();
-
-        switch (config.type) {
-            case PortType::ACCESS:
-                if (packet_vlan_id == config.native_vlan) {
-                    pkt.pop_vlan(); // Assuming pop_vlan() returns bool, but not checking here for simplicity
-                }
-                break;
-
-            case PortType::TRUNK:
-            case PortType::HYBRID:
-                if (packet_vlan_id == config.native_vlan && !config.tag_native) {
-                    pkt.pop_vlan(); // Assuming pop_vlan() returns bool
-                }
-                break;
-            default:
-                break;
-        }
-    }
+    // Processes a packet leaving on an egress port.
+    // Modifies packet (e.g., removes or changes VLAN tag).
+    void process_egress(Packet& pkt, uint32_t port_id);
 
 private:
     std::map<uint32_t, PortConfig> port_configs_;
