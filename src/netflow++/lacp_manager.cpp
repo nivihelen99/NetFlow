@@ -94,12 +94,112 @@ bool LacpManager::create_lag(LagConfig& config) {
 }
 
 bool LacpManager::add_port_to_lag(uint32_t lag_id, uint32_t port_id) {
-    // ... (Implementation as before) ...
+    // 1. Check if the LAG ID exists
+    auto lag_it = lags_.find(lag_id);
+    if (lag_it == lags_.end()) {
+        if (logger_) logger_->warning("LACP", "Attempt to add port " + std::to_string(port_id) + " to non-existent LAG ID " + std::to_string(lag_id));
+        return false;
+    }
+
+    // 2. Check if the port_id is already in port_to_lag_map_
+    if (port_to_lag_map_.count(port_id)) {
+        if (logger_) logger_->warning("LACP", "Port " + std::to_string(port_id) + " already belongs to LAG " + std::to_string(port_to_lag_map_[port_id]));
+        return false;
+    }
+
+    // 3. Retrieve the LagConfig
+    LagConfig& lag_config = lag_it->second;
+
+    // 4. Add the port_id to the member_ports vector
+    lag_config.member_ports.push_back(port_id);
+
+    // Ensure member_ports list remains sorted and unique (good practice)
+    std::sort(lag_config.member_ports.begin(), lag_config.member_ports.end());
+    lag_config.member_ports.erase(std::unique(lag_config.member_ports.begin(), lag_config.member_ports.end()), lag_config.member_ports.end());
+
+    // 5. Update the lags_ map (already done by reference with lag_config)
+
+    // 6. Add an entry to port_to_lag_map_
+    port_to_lag_map_[port_id] = lag_id;
+
+    // 7. Call initialize_lacp_port_info to set up LACP-specific data for the port.
+    // This also creates an entry in port_lacp_info_ if one doesn't exist.
+    initialize_lacp_port_info(port_id, lag_config);
+
+    // Additionally, ensure the port's LACP enabled status is consistent with the LAG's nature.
+    // For now, assume LACP is enabled by default when a port is added to a LAG.
+    // InterfaceManager might handle the port_enabled physical status.
+    auto port_info_it = port_lacp_info_.find(port_id);
+    if (port_info_it != port_lacp_info_.end()) {
+        port_info_it->second.lacp_enabled = true; // Enable LACP on this port as it's now part of a LAG
+        // port_info_it->second.port_enabled = true; // This should be managed by InterfaceManager
+                                                 // or set explicitly based on physical port status.
+                                                 // For now, assume it's operationally up for LACP.
+        if (logger_) logger_->info("LACP", "Port " + std::to_string(port_id) + " LACP explicitly enabled due to LAG addition.");
+    }
+
+
+    if (logger_) logger_->info("LACP", "Port " + std::to_string(port_id) + " added to LAG " + std::to_string(lag_id));
     return true;
 }
 
 bool LacpManager::remove_port_from_lag(uint32_t lag_id, uint32_t port_id) {
-    // ... (Implementation as before) ...
+    // 1. Check if the LAG ID exists
+    auto lag_it = lags_.find(lag_id);
+    if (lag_it == lags_.end()) {
+        if (logger_) logger_->warning("LACP", "Attempt to remove port " + std::to_string(port_id) + " from non-existent LAG ID " + std::to_string(lag_id));
+        return false;
+    }
+
+    // 2. Retrieve the LagConfig
+    LagConfig& lag_config = lag_it->second;
+
+    // 3. Check if the port_id is actually a member of this LAG
+    auto& members = lag_config.member_ports;
+    auto port_member_it = std::find(members.begin(), members.end(), port_id);
+    if (port_member_it == members.end()) {
+        if (logger_) logger_->warning("LACP", "Port " + std::to_string(port_id) + " is not a member of LAG " + std::to_string(lag_id));
+        return false;
+    }
+
+    // 4. Remove the port_id from the member_ports vector
+    members.erase(port_member_it);
+
+    // 5. Update the lags_ map (already done by reference with lag_config)
+    // If the LAG becomes empty, the LAG itself is not deleted here. delete_lag is separate.
+
+    // 6. Remove the port_id from the port_to_lag_map_
+    auto port_map_it = port_to_lag_map_.find(port_id);
+    if (port_map_it != port_to_lag_map_.end() && port_map_it->second == lag_id) {
+        port_to_lag_map_.erase(port_map_it);
+    } else {
+        // This case should ideally not happen if data is consistent
+        if (logger_) logger_->warning("LACP", "Port " + std::to_string(port_id) + " was not found in port_to_lag_map_ or mapped to a different LAG.");
+        // Continue with removal from LAG members and LACP info as a cleanup measure.
+    }
+
+    // 7. Remove the port_id entry from the port_lacp_info_ map
+    auto port_info_it = port_lacp_info_.find(port_id);
+    if (port_info_it != port_lacp_info_.end()) {
+        // Before removing, we might want to ensure LACP state machines are properly transitioned or reset.
+        // For example, detach MUX, set port to LACP_DISABLED, etc.
+        // For now, directly removing as per requirement.
+        // Consider adding:
+        // port_info_it->second.lacp_enabled = false;
+        // port_info_it->second.mux_state = LacpPortInfo::MuxMachineState::DETACHED;
+        // run_lacp_mux_machine(port_id); // To process detachment
+        // run_lacp_rx_machine(port_id); // To process LACP disabled state
+        port_lacp_info_.erase(port_info_it);
+    } else {
+        if (logger_) logger_->warning("LACP", "No LACP info found for port " + std::to_string(port_id) + " during removal from LAG " + std::to_string(lag_id));
+    }
+
+    // Also remove from active_distributing_members if present
+    auto& active_members = lag_config.active_distributing_members;
+    active_members.erase(std::remove(active_members.begin(), active_members.end(), port_id), active_members.end());
+
+
+    if (logger_) logger_->info("LACP", "Port " + std::to_string(port_id) + " removed from LAG " + std::to_string(lag_id));
     return true;
 }
 
@@ -107,9 +207,144 @@ void LacpManager::delete_lag(uint32_t lag_id) {
     // ... (Implementation as before) ...
 }
 
+// Helper function for hashing MAC address
+uint32_t hash_mac(uint64_t mac) {
+    // Simple XOR hash for MAC address
+    uint32_t hash = 0;
+    hash ^= (mac >> 32) & 0xFFFFFFFF;
+    hash ^= mac & 0xFFFFFFFF;
+    return hash;
+}
+
+// Helper function for hashing IP address (assuming IPv4 for now)
+uint32_t hash_ip(uint32_t ip) {
+    return ip; // IP addresses are already good hash values
+}
+
+// Helper function for hashing L4 port
+uint32_t hash_l4_port(uint16_t port) {
+    return static_cast<uint32_t>(port);
+}
+
+
 uint32_t LacpManager::select_egress_port(uint32_t lag_id, const Packet& pkt) const {
-    // ... (Implementation as before) ...
-    return 0; // Placeholder
+    // 1. Check if the lag_id exists
+    auto lag_it = lags_.find(lag_id);
+    if (lag_it == lags_.end()) {
+        if (logger_) logger_->error("LACP", "select_egress_port: LAG ID " + std::to_string(lag_id) + " does not exist.");
+        return 0; // Or some defined INVALID_PORT_ID
+    }
+
+    // 2. Retrieve the LagConfig
+    const LagConfig& lag_config = lag_it->second;
+
+    // 3. Check if active_distributing_members is empty
+    if (lag_config.active_distributing_members.empty()) {
+        if (logger_) logger_->warning("LACP", "select_egress_port: LAG ID " + std::to_string(lag_id) + " has no active distributing members.");
+        return 0; // Or some defined INVALID_PORT_ID
+    }
+
+    // 4. Implement hashing logic
+    uint32_t hash_value = 0;
+    const EthernetHeader& eth_header = pkt.get_ethernet_header();
+
+    // Check if packet is IP or ARP to access network/transport headers safely
+    bool is_ip = eth_header.ethertype == ETHERTYPE_IP;
+    // bool is_ipv6 = eth_header.ethertype == ETHERTYPE_IPV6; // Future
+    // bool is_arp = eth_header.ethertype == ETHERTYPE_ARP; // Future, if ARP fields are needed for hashing
+
+    const IpHeader* ip_header = nullptr;
+    if (is_ip && pkt.get_payload().size() >= sizeof(IpHeader)) { // Ensure there's enough data for IP header
+        ip_header = reinterpret_cast<const IpHeader*>(pkt.get_payload().data());
+    }
+
+    const TcpHeader* tcp_header = nullptr;
+    const UdpHeader* udp_header = nullptr;
+    if (ip_header) { // Only try to get L4 headers if IP header is present
+        if (ip_header->protocol == IP_PROTOCOL_TCP && (pkt.get_payload().size() >= (ip_header->ihl * 4) + sizeof(TcpHeader))) {
+            tcp_header = reinterpret_cast<const TcpHeader*>(pkt.get_payload().data() + (ip_header->ihl * 4));
+        } else if (ip_header->protocol == IP_PROTOCOL_UDP && (pkt.get_payload().size() >= (ip_header->ihl * 4) + sizeof(UdpHeader))) {
+            udp_header = reinterpret_cast<const UdpHeader*>(pkt.get_payload().data() + (ip_header->ihl * 4));
+        }
+    }
+
+
+    switch (lag_config.hash_mode) {
+        case LacpHashMode::SRC_MAC:
+            hash_value = hash_mac(eth_header.src_mac);
+            break;
+        case LacpHashMode::DST_MAC:
+            hash_value = hash_mac(eth_header.dst_mac);
+            break;
+        case LacpHashMode::SRC_DST_MAC:
+            hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac);
+            break;
+        case LacpHashMode::SRC_IP:
+            if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip));
+            else hash_value = hash_mac(eth_header.src_mac); // Fallback for non-IP
+            break;
+        case LacpHashMode::DST_IP:
+            if (ip_header) hash_value = hash_ip(ntohl(ip_header->dst_ip));
+            else hash_value = hash_mac(eth_header.dst_mac); // Fallback for non-IP
+            break;
+        case LacpHashMode::SRC_DST_IP:
+            if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip)) ^ hash_ip(ntohl(ip_header->dst_ip));
+            else hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac); // Fallback
+            break;
+        case LacpHashMode::SRC_PORT:
+            if (tcp_header) hash_value = hash_l4_port(ntohs(tcp_header->src_port));
+            else if (udp_header) hash_value = hash_l4_port(ntohs(udp_header->src_port));
+            else if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip)); // Fallback to IP
+            else hash_value = hash_mac(eth_header.src_mac); // Fallback to MAC
+            break;
+        case LacpHashMode::DST_PORT:
+            if (tcp_header) hash_value = hash_l4_port(ntohs(tcp_header->dst_port));
+            else if (udp_header) hash_value = hash_l4_port(ntohs(udp_header->dst_port));
+            else if (ip_header) hash_value = hash_ip(ntohl(ip_header->dst_ip)); // Fallback to IP
+            else hash_value = hash_mac(eth_header.dst_mac); // Fallback to MAC
+            break;
+        case LacpHashMode::SRC_DST_PORT:
+            if (tcp_header) hash_value = hash_l4_port(ntohs(tcp_header->src_port)) ^ hash_l4_port(ntohs(tcp_header->dst_port));
+            else if (udp_header) hash_value = hash_l4_port(ntohs(udp_header->src_port)) ^ hash_l4_port(ntohs(udp_header->dst_port));
+            else if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip)) ^ hash_ip(ntohl(ip_header->dst_ip)); // Fallback
+            else hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac); // Fallback
+            break;
+        case LacpHashMode::SRC_DST_IP_L4_PORT: // 5-tuple
+            if (ip_header) {
+                hash_value = hash_ip(ntohl(ip_header->src_ip)) ^ hash_ip(ntohl(ip_header->dst_ip)) ^ static_cast<uint32_t>(ip_header->protocol);
+                if (tcp_header) {
+                    hash_value ^= hash_l4_port(ntohs(tcp_header->src_port)) ^ hash_l4_port(ntohs(tcp_header->dst_port));
+                } else if (udp_header) {
+                    hash_value ^= hash_l4_port(ntohs(udp_header->src_port)) ^ hash_l4_port(ntohs(udp_header->dst_port));
+                }
+            } else { // Fallback for non-IP
+                 hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac);
+            }
+            break;
+        default:
+            // Default to L2 hash if mode is unknown or not implemented
+            hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac);
+            if (logger_) logger_->warning("LACP", "select_egress_port: Unknown hash mode " + std::to_string(static_cast<int>(lag_config.hash_mode)) + ", defaulting to SRC_DST_MAC.");
+            break;
+    }
+
+    // 5. Select a port
+    const auto& active_members = lag_config.active_distributing_members;
+    uint32_t selected_port_index = hash_value % active_members.size();
+    uint32_t selected_port_id = active_members[selected_port_index];
+
+    // 6. Log the selected port (optional)
+    if (logger_ && logger_->get_level() <= LogLevel::DEBUG) { // Only log if debug level or lower
+        logger_->debug("LACP", "select_egress_port: LAG ID " + std::to_string(lag_id) +
+                                ", Hash Mode: " + std::to_string(static_cast<int>(lag_config.hash_mode)) +
+                                ", Hash Value: " + std::to_string(hash_value) +
+                                ", Selected Port Index: " + std::to_string(selected_port_index) +
+                                ", Selected Port ID: " + std::to_string(selected_port_id) +
+                                " from " + std::to_string(active_members.size()) + " active members.");
+    }
+
+    // 7. Return the selected port_id
+    return selected_port_id;
 }
 
 void LacpManager::process_lacpdu(const Packet& lacpdu_packet, uint32_t ingress_port_id) {
