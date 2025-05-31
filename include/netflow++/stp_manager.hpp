@@ -109,6 +109,9 @@ public:
     PortState get_port_stp_state(uint32_t port_id) const;
     PortRole get_port_stp_role(uint32_t port_id) const;
 
+    void set_port_path_cost(uint32_t port_id, uint32_t cost);
+    void set_port_priority(uint32_t port_id, uint8_t priority);
+
     bool should_forward(uint32_t port_id) const;
     bool should_learn(uint32_t port_id) const;
 

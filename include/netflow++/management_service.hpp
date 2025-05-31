@@ -3,6 +3,11 @@
 
 #include "netflow++/routing_manager.hpp"
 #include "netflow++/interface_manager.hpp" // For interface validation
+#include "netflow++/management_interface.hpp"
+#include "netflow++/vlan_manager.hpp"
+#include "netflow++/forwarding_database.hpp"
+#include "netflow++/stp_manager.hpp"
+#include "netflow++/lacp_manager.hpp"
 #include "netflow++/packet.hpp"            // For IpAddress
 #include <string>
 #include <optional>
@@ -12,7 +17,9 @@ namespace netflow {
 
 class ManagementService {
 public:
-    ManagementService(RoutingManager& rm, InterfaceManager& im);
+    ManagementService(RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi, netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm, netflow::StpManager& stpm, netflow::LacpManager& lacpm);
+
+    void register_cli_commands();
 
     // Returns error string on failure, std::nullopt on success
     std::optional<std::string> add_route(
@@ -45,6 +52,11 @@ public:
 private:
     RoutingManager& routing_manager_;
     InterfaceManager& interface_manager_;
+    ManagementInterface& management_interface_;
+    netflow::VlanManager& vlan_manager_;
+    netflow::ForwardingDatabase& fdb_manager_;
+    netflow::StpManager& stp_manager_;
+    netflow::LacpManager& lacp_manager_;
 };
 
 } // namespace netflow

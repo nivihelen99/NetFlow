@@ -66,6 +66,10 @@ public:
     // Get all entries (e.g. for display or debugging)
     const std::vector<FdbEntry>& get_all_entries() const;
 
+    // Removes an FDB entry (static or dynamic) matching MAC and VLAN ID.
+    // Returns true if an entry was found and removed, false otherwise.
+    bool remove_entry(const netflow::MacAddress& mac, uint16_t vlan_id);
+
 private:
     std::vector<FdbEntry> entries_;
     // Alternative using std::map. The key could be a struct combining MAC and VLAN, or a pair.

@@ -65,13 +65,26 @@ void ForwardingDatabase::add_static_entry(const MacAddress& mac, uint32_t port, 
     if (it != entries_.end()) {
         // Entry exists, update it and mark as static
         it->port = port;
-        it->vlan_id = vlan_id;
+        it->vlan_id = vlan_id; // Should be same, but update for completeness
         it->is_static = true;
-        it->timestamp = std::chrono::steady_clock::now();
+        it->timestamp = std::chrono::steady_clock::now(); // Update timestamp for consistency, though not used for static
     } else {
         entries_.emplace_back(mac, port, vlan_id, true);
     }
 }
+
+bool ForwardingDatabase::remove_entry(const netflow::MacAddress& mac, uint16_t vlan_id) {
+    auto it = std::find_if(entries_.begin(), entries_.end(),
+                           [&](const FdbEntry& entry) {
+                               return entry.mac == mac && entry.vlan_id == vlan_id;
+                           });
+    if (it != entries_.end()) {
+        entries_.erase(it);
+        return true;
+    }
+    return false;
+}
+
 
 std::optional<uint32_t> ForwardingDatabase::lookup_port(const MacAddress& mac, uint16_t vlan_id) const {
     auto it = std::find_if(entries_.begin(), entries_.end(),
@@ -81,12 +94,6 @@ std::optional<uint32_t> ForwardingDatabase::lookup_port(const MacAddress& mac, u
 
     if (it != entries_.end()) {
         // Refresh on hit is not implemented here as per original header, can be added if needed.
-        // if (!it->is_static) {
-        //    // Note: This would require `entries_` to be mutable or `it` to be non-const,
-        //    // which contradicts `const` on `lookup_port`. Refresh-on-hit for const lookup
-        //    // is typically done with `mutable` on `timestamp` or by having a non-const lookup.
-        //    // For now, adhering to the original structure.
-        // }
         return it->port;
     }
     return std::nullopt;
