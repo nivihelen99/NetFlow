@@ -31,7 +31,6 @@ public:
     ForwardingDatabase fdb;
     VlanManager vlan_manager;
     // StpManager stp_manager; // Initialized in constructor
-    // LacpManager lacp_manager_; // Initialized in constructor
     InterfaceManager interface_manager_;
     PacketClassifier packet_classifier_;
 
@@ -46,7 +45,7 @@ public:
     ConfigManager config_manager_;             // Added member
     ManagementInterface management_interface_; // Added member
     StpManager stp_manager;
-    LacpManager lacp_manager_;
+    // LacpManager lacp_manager_; // Removed redundant declaration
 
     Switch(uint32_t num_ports, uint64_t switch_mac_address,
            uint16_t stp_default_priority = 32768, uint16_t lacp_default_priority = 32768) :
@@ -56,14 +55,24 @@ public:
         flow_table_(1024),
         logger_(LogLevel::INFO) {
 
-        logger_.info("SWITCH_LIFECYCLE", "Switch constructing for " + std::to_string(num_ports_) + " ports. MAC: " + logger_.mac_to_string(switch_mac_address));
+        // Convert uint64_t MAC to MacAddress for logging
+        uint8_t temp_mac_bytes[6];
+        temp_mac_bytes[0] = (switch_mac_address >> 40) & 0xFF;
+        temp_mac_bytes[1] = (switch_mac_address >> 32) & 0xFF;
+        temp_mac_bytes[2] = (switch_mac_address >> 24) & 0xFF;
+        temp_mac_bytes[3] = (switch_mac_address >> 16) & 0xFF;
+        temp_mac_bytes[4] = (switch_mac_address >> 8) & 0xFF;
+        temp_mac_bytes[5] = (switch_mac_address >> 0) & 0xFF;
+        MacAddress mac_addr_for_log(temp_mac_bytes);
+
+        logger_.info("SWITCH_LIFECYCLE", "Switch constructing for " + std::to_string(num_ports_) + " ports. MAC: " + logger_.mac_to_string(mac_addr_for_log));
         fdb.set_logger(&logger_);
         // config_manager_.set_logger(&logger_);
 
         logger_.info("CONFIG", "Loading default configuration (default_switch_config.json)...");
         if (config_manager_.load_config("default_switch_config.json")) {
             logger_.info("CONFIG", "Default configuration loaded. Applying now...");
-            config_manager_.apply_config(*this); // Corrected signature
+            config_manager_.apply_config(config_manager_.get_current_config_data(), *this); // Reverted to two-argument call
         } else {
             logger_.warning("CONFIG", "Failed to load default_switch_config.json. Using empty/hardcoded defaults.");
         }
