@@ -83,6 +83,21 @@ void run_sample_commands(netflow::ManagementInterface& mi) {
         "interface 3 channel-group 1",             // Add port 3 to PC1
         "interface 2 lacp port-priority 100",
         "show lacp 1 internal",
+        "// --- LLDP Commands ---",
+        "show lldp interface", // Show initial state (should be disabled)
+        "lldp enable",         // Enable LLDP globally
+        "show lldp interface 0",
+        "show lldp interface 1",
+        "interface 0 lldp tx-interval 10",
+        "interface 0 lldp ttl-multiplier 5",
+        "show lldp interface 0",
+        "// Note: show lldp neighbors may be empty unless another LLDP-enabled device is connected",
+        "show lldp neighbors",
+        "show lldp neighbors interface 0 detail",
+        "interface 1 lldp disable",
+        "show lldp interface 1",
+        "lldp disable",        // Disable LLDP globally
+        "show lldp interface", // Show final state
         // Clear commands
         "clear interface 0 stats",
         "clear mac address-table dynamic",

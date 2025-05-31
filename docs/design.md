@@ -152,6 +152,40 @@ NetFlow++ adopts a component-based architecture, where distinct networking funct
 *   **Evaluation Engine:** For each packet, iterates through applicable ACLs. The first matching rule (based on priority) determines the action.
 *   **Optimization:** For performance, especially with many rules, ACLs might be compiled into a more efficient data structure (e.g., a decision tree, tuple space search, or a software TCAM emulation) rather than simple linear matching.
 
+### 5.5 LldpManager
+
+The `LldpManager` class is responsible for handling the Link Layer Discovery Protocol (LLDP, IEEE 802.1AB). LLDP is a Layer 2 neighbor discovery protocol that allows network devices to advertise their identity and capabilities to adjacent devices and learn information about their neighbors. This information is crucial for network topology mapping, troubleshooting, and management.
+
+**Key Functionalities:**
+
+*   **LLDPDU Transmission:** Periodically sends LLDP Data Units (LLDPDUs) on all LLDP-enabled ports. These frames contain information about the switch itself.
+*   **LLDPDU Reception & Processing:** Receives and parses LLDPDUs from neighboring devices.
+*   **TLV Handling:** Constructs and parses standard LLDP TLVs (Type-Length-Value structures), including:
+    *   Chassis ID TLV (using the switch's MAC address).
+    *   Port ID TLV (using interface MAC address or name).
+    *   Time-to-Live (TTL) TLV.
+    *   System Name TLV (e.g., hostname of the switch).
+    *   System Description TLV.
+    *   (Optional) Port Description TLV.
+    *   (Optional) Management Address TLV.
+*   **Neighbor Information Storage:** Stores information about discovered neighbors in an `LldpNeighborInfo` structure, associated with the ingress port. This includes Chassis ID, Port ID, TTL, and any optional information received.
+*   **Neighbor Aging:** Neighbors are aged out based on the TTL value received in their LLDPDUs. If a neighbor's information is not refreshed before its TTL expires, it is removed from the list of active neighbors.
+*   **Configuration:** LLDP can be configured per port:
+    *   Enable/Disable LLDP on an interface.
+    *   Set the transmission interval (`tx_interval_seconds`): How often LLDP frames are sent.
+    *   Set the TTL multiplier (`ttl_multiplier`): The TTL advertised in LLDP frames is typically `tx_interval_seconds * ttl_multiplier`.
+
+**Interactions:**
+
+*   **`InterfaceManager`:** `LldpManager` queries `InterfaceManager` to get local interface information required for LLDP TLVs, such as MAC addresses and interface names (for Port ID TLV), and to check if a port is operationally up.
+*   **`Switch`:**
+    *   The `Switch` class is responsible for dispatching incoming packets with the LLDP EtherType (0x88CC) to the `LldpManager` for processing.
+    *   `LldpManager` uses a method provided by the `Switch` class (e.g., `send_control_plane_frame`) to construct and transmit LLDPDUs.
+    *   The `Switch` class's main timer/event loop calls `LldpManager::handle_timer_tick()` periodically to trigger LLDPDU transmissions and neighbor aging.
+*   **`lldp_defs.hpp`:** This header file contains definitions for LLDP constants (EtherType, multicast MAC), TLV types, subtypes, and structures like `LldpTlvHeader` and `LldpNeighborInfo`.
+
+The `LldpManager` helps build a dynamic view of the directly connected network devices, which is essential for network management and operational awareness.
+
 ## 6. System Integration Component Design (High-Level)
 
 ### 6.1. `ConfigManager`
@@ -367,7 +401,7 @@ int main() {
     netflow::RoutingManager rm(im); // Assuming RoutingManager needs InterfaceManager
 
     netflow::ManagementInterface mi;
-    netflow::ManagementService ms(rm, im, mi, vm, fdb, stp, lacp);
+    netflow::ManagementService ms(rm, im, mi, vm, fdb, stp, lacp); // Assuming LldpManager is added here if needed by ManagementService
     ms.register_cli_commands(); // ManagementService registers its commands with ManagementInterface
 
     std::string line;
@@ -691,3 +725,80 @@ The `no` command is used to negate or remove configurations.
         Static MAC entry 00:de:ad:be:ef:00 for VLAN 10 removed.
         ```
 *   Other `no` commands typically mirror the configuration commands, e.g., `no interface <id> shutdown`.
+
+#### 9.2.8. LLDP Commands
+
+The Link Layer Discovery Protocol (LLDP) commands allow for the configuration and monitoring of LLDP on the switch.
+
+*   **`show lldp neighbors [interface <interface_id>] [detail]`**
+    *   **Syntax:** `show lldp neighbors [interface <interface_id>] [detail]`
+    *   **Description:** Displays discovered LLDP neighbors.
+        *   Without `interface <interface_id>`, shows a summary of all neighbors on all active ports.
+        *   With `interface <interface_id>`, filters neighbors discovered on that specific port.
+        *   The `detail` keyword provides a more verbose output for each neighbor, including all learned TLVs like System Description, Management Addresses, etc.
+    *   **Example:**
+        ```
+        > show lldp neighbors
+        Port ID  Chassis ID           Remote Port ID       Remote System Name   TTL
+        Gi0/1    00:1a:2b:3c:4d:5e    Gi0/5                NeighborSwitch1      120
+        Gi0/2    00:aa:bb:cc:dd:ee    Eth2                 ServerA              90
+
+        > show lldp neighbors interface Gi0/1 detail
+        Neighbor on port Gi0/1:
+          Chassis ID Subtype: MAC address
+          Chassis ID: 00:1a:2b:3c:4d:5e
+          Port ID Subtype: Interface Name
+          Port ID: Gi0/5
+          TTL: 120s
+          Time Remaining: 115s
+          System Name: NeighborSwitch1
+          System Description: Cisco IOS Software, C2960 Software (C2960-LANBASEK9-M), Version 15.0(2)SE, RELEASE SOFTWARE (fc1)
+          Management Address: 192.168.1.10
+          ... (other TLVs) ...
+        ```
+
+*   **`show lldp interface [<interface_id>]`**
+    *   **Syntax:** `show lldp interface [<interface_id>]`
+    *   **Description:** Displays LLDP configuration and operational status for network interfaces.
+        *   Without `<interface_id>`, shows information for all interfaces.
+        *   With `<interface_id>`, shows information for the specified interface.
+    *   **Output Format:** Port ID, Admin Status (Enabled/Disabled), Tx Interval, Tx Multiplier (TTL = Interval * Multiplier), Next Tx Time.
+    *   **Example:**
+        ```
+        > show lldp interface Gi0/1
+        Interface Gi0/1:
+          LLDP Admin Status: Enabled
+          Tx Interval: 30 seconds
+          TTL Multiplier: 4 (TTL: 120 seconds)
+          Next Tx scheduled in: 25 seconds
+        ```
+
+*   **`lldp enable`**
+    *   **Syntax:** `lldp enable`
+    *   **Description:** Globally enables LLDP on all interfaces. This applies the default LLDP configuration (or last configured per-interface settings if previously modified) and enables transmission and reception of LLDP frames.
+    *   **Example:** `> lldp enable`
+
+*   **`lldp disable`**
+    *   **Syntax:** `lldp disable`
+    *   **Description:** Globally disables LLDP on all interfaces. No LLDP frames will be sent, and received LLDP frames will be ignored.
+    *   **Example:** `> lldp disable`
+
+*   **`interface <id> lldp enable`**
+    *   **Syntax:** `interface <id> lldp enable`
+    *   **Description:** Enables LLDP on the specified interface.
+    *   **Example:** `> interface Gi0/1 lldp enable`
+
+*   **`interface <id> lldp disable`**
+    *   **Syntax:** `interface <id> lldp disable`
+    *   **Description:** Disables LLDP on the specified interface.
+    *   **Example:** `> interface Gi0/1 lldp disable`
+
+*   **`interface <id> lldp tx-interval <seconds>`**
+    *   **Syntax:** `interface <id> lldp tx-interval <5-32768>`
+    *   **Description:** Configures the transmission interval for LLDP frames on the specified interface. Default is 30 seconds.
+    *   **Example:** `> interface Gi0/1 lldp tx-interval 15`
+
+*   **`interface <id> lldp ttl-multiplier <value>`**
+    *   **Syntax:** `interface <id> lldp ttl-multiplier <2-10>`
+    *   **Description:** Configures the TTL multiplier. The actual TTL value advertised in LLDP frames is `tx-interval * ttl-multiplier`. Default is 4.
+    *   **Example:** `> interface Gi0/1 lldp ttl-multiplier 5`
