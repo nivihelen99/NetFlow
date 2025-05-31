@@ -199,12 +199,12 @@ void StpManager::process_bpdu(const Packet& bpdu_packet, uint32_t ingress_port_i
         return;
     }
     const PacketBuffer* pb = bpdu_packet.get_buffer();
-    if (!pb || pb->size < (sizeof(EthernetHeader) + sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE)) {
+    if (!pb || pb->get_data_length() < (sizeof(EthernetHeader) + sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE)) {
         logger.warning("STP_BPDU", "Packet too small for BPDU on port " + std::to_string(ingress_port_id));
         return;
     }
-    const uint8_t* bpdu_payload_start = pb->data + sizeof(EthernetHeader) + sizeof(LLCHeader);
-    size_t bpdu_payload_length = pb->size - (sizeof(EthernetHeader) + sizeof(LLCHeader));
+    const uint8_t* bpdu_payload_start = pb->get_data_start_ptr() + sizeof(EthernetHeader) + sizeof(LLCHeader);
+    size_t bpdu_payload_length = pb->get_data_length() - (sizeof(EthernetHeader) + sizeof(LLCHeader));
     if (bpdu_payload_length < CONFIG_BPDU_PAYLOAD_SIZE) {
         logger.warning("STP_BPDU", "BPDU payload too short on port " + std::to_string(ingress_port_id));
         return;
@@ -259,9 +259,9 @@ std::vector<Packet> StpManager::generate_bpdus(BufferPool& buffer_pool, SwitchLo
                     logger.error("STP_BPDU_GEN", "Buffer allocation failed for BPDU on port " + std::to_string(port_id));
                     continue;
                 }
-                pb->size = total_bpdu_size;
-                memset(pb->data, 0, total_bpdu_size);
-                EthernetHeader* eth_hdr = reinterpret_cast<EthernetHeader*>(pb->data);
+                pb->set_data_len(total_bpdu_size);
+                memset(pb->get_data_start_ptr(), 0, total_bpdu_size);
+                EthernetHeader* eth_hdr = reinterpret_cast<EthernetHeader*>(pb->get_data_start_ptr());
                 uint8_t stp_dst_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00};
                 eth_hdr->dst_mac = MacAddress(stp_dst_mac_bytes);
                 uint8_t bridge_mac_bytes[6];
@@ -269,11 +269,11 @@ std::vector<Packet> StpManager::generate_bpdus(BufferPool& buffer_pool, SwitchLo
                 for(int i=0; i<6; ++i) bridge_mac_bytes[5-i] = (temp_mac >> (i*8)) & 0xFF;
                 eth_hdr->src_mac = MacAddress(bridge_mac_bytes);
                 eth_hdr->ethertype = htons(sizeof(LLCHeader) + CONFIG_BPDU_PAYLOAD_SIZE);
-                LLCHeader* llc_hdr = reinterpret_cast<LLCHeader*>(pb->data + sizeof(EthernetHeader));
+                LLCHeader* llc_hdr = reinterpret_cast<LLCHeader*>(pb->get_data_start_ptr() + sizeof(EthernetHeader));
                 llc_hdr->dsap = 0x42;
                 llc_hdr->ssap = 0x42;
                 llc_hdr->control = 0x03;
-                memcpy(pb->data + sizeof(EthernetHeader) + sizeof(LLCHeader), &bpdu_to_send_struct, CONFIG_BPDU_PAYLOAD_SIZE);
+                memcpy(pb->get_data_start_ptr() + sizeof(EthernetHeader) + sizeof(LLCHeader), &bpdu_to_send_struct, CONFIG_BPDU_PAYLOAD_SIZE);
                 bpdus_to_send.emplace_back(pb);
                 logger.info("STP_BPDU_GEN", "Generated BPDU on port " + std::to_string(port_id));
             }
@@ -487,18 +487,31 @@ void StpManager::run_stp_timers() {
     // This is a simplified representation. Real STP timer logic is more complex
     // and tied to BPDU reception and state transitions.
     // This function would typically be called periodically (e.g., every second).
-    // For now, it's a placeholder.
     for (auto& pair : port_stp_info_) {
         StpPortInfo& p_info = pair.second;
         if (p_info.state != PortState::DISABLED) {
-            p_info.message_age_timer_seconds++; // Increment even if not strictly per spec here
-            p_info.hello_timer_seconds++; // For BPDU generation timing
+            p_info.message_age_timer_seconds++;
+            p_info.hello_timer_seconds++;
+
             if (p_info.state == PortState::LISTENING || p_info.state == PortState::LEARNING) {
                 p_info.forward_delay_timer_seconds++;
+                if (p_info.forward_delay_timer_seconds >= bridge_config_.forward_delay_seconds) {
+                    if (p_info.state == PortState::LISTENING) {
+                        p_info.state = PortState::LEARNING;
+                        p_info.forward_delay_timer_seconds = 0;
+                        // Logging omitted here as run_stp_timers doesn't take a logger
+                        // if (logger) logger.info("STP_TIMER", "Port " + std::to_string(p_info.port_id_internal) + " LISTENING -> LEARNING");
+                    } else if (p_info.state == PortState::LEARNING) {
+                        p_info.state = PortState::FORWARDING;
+                        p_info.forward_delay_timer_seconds = 0;
+                        // Logging omitted here
+                        // if (logger) logger.info("STP_TIMER", "Port " + std::to_string(p_info.port_id_internal) + " LEARNING -> FORWARDING");
+                    }
+                }
             }
-
-            // TODO: Add logic for timer expiry actions (e.g., BPDU aging, state transitions)
-            // This would involve calling recalculate_stp_roles_and_states if significant timers expire.
+            // TODO: Add more logic for other timer expiry actions (e.g., BPDU aging based on message_age_timer_seconds)
+            // This might involve calling recalculate_stp_roles_and_states if significant timers expire,
+            // which would then require passing a logger to run_stp_timers or making logger a member.
         }
     }
 }

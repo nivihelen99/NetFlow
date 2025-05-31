@@ -10,12 +10,12 @@ namespace netflow {
 
 // Definition of apply_config moved here
 void ConfigManager::apply_config(const ConfigurationData& config_data_to_apply, netflow::Switch& target_switch) {
-    // if (logger_) logger_->info("CONFIG_APPLY", "Starting to apply configuration.");
+    if (logger_) logger_->info("ConfigApply", "Starting to apply configuration.");
 
     for (const auto& pair : config_data_to_apply) {
         const std::string& path = pair.first;
         const ConfigValue& value = pair.second;
-        // if (logger_) logger_->debug("CONFIG_APPLY", "Applying: " + path);
+        if (logger_) logger_->debug("ConfigApply", "Processing: " + path);
 
         std::string component, id_str, param;
         size_t pos1 = path.find('.');
@@ -29,12 +29,12 @@ void ConfigManager::apply_config(const ConfigurationData& config_data_to_apply, 
             if (path == "global.hostname") {
                 if (auto* str_val = std::get_if<std::string>(&value)) {
                     // target_switch.set_hostname(*str_val); // Switch would need this method
-                    std::cout << "[ConfigApply] Set global.hostname to " << *str_val << std::endl;
+                    if (logger_) logger_->info("ConfigApply", "Set global.hostname to " + *str_val);
                 } else {
-                    std::cerr << "[ConfigApply] Error: Invalid type for global.hostname" << std::endl;
+                    if (logger_) logger_->error("ConfigApply", "Invalid type for global.hostname");
                 }
             } else {
-                 std::cerr << "[ConfigApply] Warning: Unrecognized path " << path << std::endl;
+                 if (logger_) logger_->warning("ConfigApply", "Unrecognized path " + path);
             }
             continue;
         }
@@ -49,34 +49,34 @@ void ConfigManager::apply_config(const ConfigurationData& config_data_to_apply, 
                 if (param == "speed_mbps") {
                     if (auto* val_ptr = std::get_if<uint32_t>(&value)) { port_cfg.speed_mbps = *val_ptr; config_changed = true; }
                     else if (auto* val_ptr_int = std::get_if<int>(&value)) { port_cfg.speed_mbps = static_cast<uint32_t>(*val_ptr_int); config_changed = true; }
-                    else { std::cerr << "[ConfigApply] Error: Invalid type for port." << port_id << ".speed_mbps" << std::endl; }
+                    else { if (logger_) logger_->error("ConfigApply", "Invalid type for port." + id_str + ".speed_mbps"); }
                 } else if (param == "admin_up") {
                     if (auto* val_ptr = std::get_if<bool>(&value)) { port_cfg.admin_up = *val_ptr; config_changed = true; }
-                    else { std::cerr << "[ConfigApply] Error: Invalid type for port." << port_id << ".admin_up" << std::endl; }
+                    else { if (logger_) logger_->error("ConfigApply", "Invalid type for port." + id_str + ".admin_up"); }
                 } else if (param == "mtu") {
                     if (auto* val_ptr = std::get_if<uint32_t>(&value)) { port_cfg.mtu = *val_ptr; config_changed = true; }
                      else if (auto* val_ptr_int = std::get_if<int>(&value)) { port_cfg.mtu = static_cast<uint32_t>(*val_ptr_int); config_changed = true; }
-                    else { std::cerr << "[ConfigApply] Error: Invalid type for port." << port_id << ".mtu" << std::endl; }
+                    else { if (logger_) logger_->error("ConfigApply", "Invalid type for port." + id_str + ".mtu"); }
                 }
                 else {
-                    std::cerr << "[ConfigApply] Warning: Unrecognized param " << param << " for port " << id_str << std::endl;
+                    if (logger_) logger_->warning("ConfigApply", "Unrecognized param " + param + " for port " + id_str);
                 }
 
                 if (config_changed) {
                     target_switch.interface_manager_.configure_port(port_id, port_cfg);
-                    std::cout << "[ConfigApply] Applied port." << id_str << "." << param << std::endl;
+                    if (logger_) logger_->info("ConfigApply", "Applied port." + id_str + "." + param);
                 }
             } else {
-                 std::cerr << "[ConfigApply] Error: Invalid port ID " << id_str << std::endl;
+                 if (logger_) logger_->error("ConfigApply", "Invalid port ID " + id_str);
             }
         } else if (component == "vlan") {
-            std::cout << "[ConfigApply] VLAN config for " << id_str << " (placeholder)." << std::endl;
+            if (logger_) logger_->info("ConfigApply", "VLAN config for " + id_str + " (placeholder).");
         }
         else {
-            std::cerr << "[ConfigApply] Warning: Unrecognized component " << component << std::endl;
+            if (logger_) logger_->warning("ConfigApply", "Unrecognized component " + component);
         }
     }
-    // if (logger_) logger_->info("CONFIG_APPLY", "Configuration application finished."); // This line should be within the method
+    if (logger_) logger_->info("ConfigApply", "Configuration application finished.");
 }
 
 } // namespace netflow

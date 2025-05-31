@@ -5,7 +5,7 @@
 // Example packet handler function (optional)
 void handle_cpu_packet(netflow::Packet& pkt, uint32_t ingress_port) {
     std::cout << "[CPU Handler] Received packet on port " << ingress_port
-              << " (size: " << pkt.get_buffer()->size << " bytes)." << std::endl;
+              << " (size: " << pkt.get_buffer()->get_data_length() << " bytes)." << std::endl;
     // Potentially inspect the packet further
     // netflow::EthernetHeader* eth = pkt.ethernet();
     // if (eth) {
@@ -307,8 +307,8 @@ int main(int argc, char* argv[]) {
             0x00, 0x00,                         // Checksum (placeholder)
             0x00, 0x00                          // Urgent Pointer
         };
-        memcpy(pb1->data, dummy_frame, sizeof(dummy_frame));
-        pb1->size = sizeof(dummy_frame); // Actual data size
+        memcpy(pb1->get_data_start_ptr(), dummy_frame, sizeof(dummy_frame));
+        pb1->set_data_len(sizeof(dummy_frame)); // Actual data size
 
         std::cout << "\nSimulating packet (matching HTTP rule) ingress on Port 0 (Access VLAN 10):" << std::endl;
         sw.process_received_packet(0, pb1); // Ingress on port 0
@@ -325,8 +325,8 @@ int main(int argc, char* argv[]) {
             0x42, 0x42, 0x03, // LLC DSAP, SSAP, Control
             // ... Rest of BPDU data (highly simplified)
         };
-        memcpy(pb2->data, bpdu_frame, sizeof(bpdu_frame));
-        pb2->size = sizeof(bpdu_frame);
+        memcpy(pb2->get_data_start_ptr(), bpdu_frame, sizeof(bpdu_frame));
+        pb2->set_data_len(sizeof(bpdu_frame));
         std::cout << "\nSimulating BPDU packet ingress on Port 1 (Trunk, Link Up):" << std::endl;
         // Ensure port 1 is admin up for this test (already done by configure_port)
         // sw.interface_manager_.simulate_port_link_up(1); // Already done above

@@ -114,7 +114,7 @@ public:
             logger_.error("FORWARDING", "Egress port " + std::to_string(egress_port) + " out of range.");
             return;
         }
-        logger_.debug("FORWARDING_QUEUE", "Packet (size " + std::to_string(pkt.get_buffer()->size)
+        logger_.debug("FORWARDING_QUEUE", "Packet (size " + std::to_string(pkt.get_buffer()->get_data_length())
                   + ") conceptually passed to hardware for transmission on port " + std::to_string(egress_port));
     }
 
@@ -163,7 +163,7 @@ public:
             }
 
             logger_.debug("FLOOD_TARGET", "Conceptually flooding to port " + std::to_string(actual_flood_egress_port) + ". Egress processing & QoS for flood is simplified/skipped.");
-            interface_manager_._increment_tx_stats(actual_flood_egress_port, pkt.get_buffer()->size);
+            interface_manager_._increment_tx_stats(actual_flood_egress_port, pkt.get_buffer()->get_data_length());
             flooded_count++;
         }
         if (flooded_count == 0 && num_ports_ > 1 && ingress_port < num_ports_) {
@@ -187,8 +187,8 @@ public:
             raw_buffer->decrement_ref();
             return;
         }
-        interface_manager_._increment_rx_stats(ingress_port_id, raw_buffer->size);
-        logger_.debug("PROCESS_PACKET", "RX on port " + std::to_string(ingress_port_id) + ", size " + std::to_string(raw_buffer->size));
+        interface_manager_._increment_rx_stats(ingress_port_id, raw_buffer->get_data_length());
+        logger_.debug("PROCESS_PACKET", "RX on port " + std::to_string(ingress_port_id) + ", size " + std::to_string(raw_buffer->get_data_length()));
 
         Packet pkt(raw_buffer);
 
@@ -197,7 +197,7 @@ public:
 
         if (acl_action == AclActionType::DENY) {
             logger_.log_packet_drop(pkt, ingress_port_id, "ACL DENY rule");
-            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
             return;
         }
         if (acl_action == AclActionType::REDIRECT) {
@@ -205,7 +205,7 @@ public:
             uint8_t queue_id_redirect = qos_manager_.classify_packet_to_queue(pkt, redirect_port_id_acl);
             qos_manager_.enqueue_packet(pkt, redirect_port_id_acl, queue_id_redirect);
             logger_.debug("QOS", "Redirected packet enqueued to port " + std::to_string(redirect_port_id_acl) + " queue " + std::to_string(static_cast<int>(queue_id_redirect)));
-            interface_manager_._increment_tx_stats(redirect_port_id_acl, pkt.get_buffer()->size);
+            interface_manager_._increment_tx_stats(redirect_port_id_acl, pkt.get_buffer()->get_data_length());
             return;
         }
 
@@ -225,7 +225,7 @@ public:
         PacketAction vlan_action = vlan_manager.process_ingress(pkt, ingress_port_id);
         if (vlan_action == PacketAction::DROP) {
             logger_.log_packet_drop(pkt, ingress_port_id, "Ingress VLAN processing");
-            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
             return;
         }
 
@@ -243,7 +243,7 @@ public:
         if (current_stp_state == StpManager::PortState::BLOCKING ||
             current_stp_state == StpManager::PortState::LISTENING) {
             logger_.log_packet_drop(pkt, ingress_port_id, "STP state " + stp_manager.port_state_to_string(current_stp_state));
-            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
             return;
         }
 
@@ -262,7 +262,7 @@ public:
                 uint32_t egress_port = egress_port_opt.value();
                 if (egress_port == ingress_port_id) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "Destination MAC is on ingress port (reflection)");
-                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
                     return;
                 }
 
@@ -272,13 +272,13 @@ public:
                     logger_.debug("LACP", "LAG ID " + std::to_string(egress_port) + " resolved to physical port " + std::to_string(final_egress_port) + " for packet.");
                     if ((final_egress_port == 0 && egress_port != 0) || !interface_manager_.is_port_link_up(final_egress_port)) {
                         logger_.log_packet_drop(pkt, ingress_port_id, "LACP LAG " + std::to_string(egress_port) + " has no active/valid/up members for egress (selected: " + std::to_string(final_egress_port) + ").");
-                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
                         return;
                     }
                 } else {
                     if(!interface_manager_.is_port_link_up(final_egress_port)){
                         logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " link is down.");
-                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
                         return;
                     }
                 }
@@ -286,13 +286,13 @@ public:
                 StpManager::PortState egress_stp_state = stp_manager.get_port_stp_state(final_egress_port);
                 if (egress_stp_state != StpManager::PortState::FORWARDING) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " not in STP forwarding state (" + stp_manager.port_state_to_string(egress_stp_state) + ")");
-                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
                     return;
                 }
 
                 if (!vlan_manager.should_forward(ingress_port_id, final_egress_port, vlan_for_lookup)) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "VLAN " + std::to_string(vlan_for_lookup) + " not allowed between port " + std::to_string(ingress_port_id) + " and final egress " + std::to_string(final_egress_port));
-                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+                    interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
                     return;
                 }
 
@@ -300,14 +300,14 @@ public:
                 uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, final_egress_port);
                 qos_manager_.enqueue_packet(pkt, final_egress_port, queue_id);
                 logger_.debug("QOS", "Packet enqueued to port " + std::to_string(final_egress_port) + " queue " + std::to_string(static_cast<int>(queue_id)));
-                interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->size);
+                interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->get_data_length());
             } else {
                 logger_.info("FDB", "Destination MAC unknown. Flooding packet from ingress port " + std::to_string(ingress_port_id) + " on VLAN " + std::to_string(vlan_for_lookup));
                 flood_packet(pkt, ingress_port_id);
             }
         } else {
             logger_.log_packet_drop(pkt, ingress_port_id, "Not Ethernet or no destination MAC");
-            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
+            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
         }
     }
 
