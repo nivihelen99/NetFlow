@@ -105,7 +105,7 @@ int main() {
     netflow::ForwardingDatabase fdb_manager;
     netflow::StpManager stp_manager(NUM_PORTS_EXAMPLE, SWITCH_BASE_MAC_EXAMPLE, DEFAULT_STP_PRIORITY_EXAMPLE);
     netflow::LacpManager lacp_manager(SWITCH_BASE_MAC_EXAMPLE, DEFAULT_LACP_SYSTEM_PRIORITY_EXAMPLE);
-    netflow::RoutingManager routing_manager(interface_manager); // RoutingManager might need InterfaceManager
+    netflow::RoutingManager routing_manager; // RoutingManager might need InterfaceManager
 
     // Pre-configure some interfaces for demonstration
     for (uint32_t i = 0; i < NUM_PORTS_EXAMPLE; ++i) {
@@ -117,7 +117,6 @@ int main() {
         p_config.full_duplex = true;
         p_config.auto_negotiation = true;
         interface_manager.configure_port(i, p_config);
-        interface_manager.set_port_link_status(i, true); // Simulate link up
 
         // Default VLAN config (Port 0 in access vlan 1, others default)
         if (i == 0) {
