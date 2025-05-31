@@ -6,165 +6,117 @@
 #include <vector>
 #include <map>
 #include <optional> // For get_port_state potentially returning optional or a default
+#include "netflow++/logger.hpp"      // For SwitchLogger
+#include "netflow++/buffer_pool.hpp" // For BufferPool in generate_bpdus
+
+// Forward declare Packet if it's only used as a const ref in public API here
+// class Packet;
+// Forward declare BufferPool if it's only used as a ref in public API here // This is now redundant
+
 
 namespace netflow {
 
-// Forward declaration for BPDU structure if it were detailed
-// struct BpduData;
+// Definitions from the version of stp_manager.hpp that was consistent with stp_manager.cpp
+namespace StpDefaults {
+    const uint8_t PROTOCOL_ID = 0x00;
+    const uint8_t VERSION_ID_STP = 0x00;
+    const uint8_t BPDU_TYPE_CONFIG = 0x00;
+    const uint8_t BPDU_TYPE_TCN = 0x80;
+    // STP Multicast MAC: 01:80:C2:00:00:00
+    const uint8_t STP_MULTICAST_MAC_BYTES[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00};
+}
+
+struct ReceivedBpduInfo {
+    uint64_t root_id = 0xFFFFFFFFFFFFFFFFULL;
+    uint32_t root_path_cost = 0xFFFFFFFF;
+    uint64_t sender_bridge_id = 0xFFFFFFFFFFFFFFFFULL;
+    uint16_t sender_port_id = 0xFFFF; // STP Port ID (Prio+Num)
+    uint16_t message_age = 0;    // In 1/256th of a second
+    uint16_t max_age = 20 * 256;        // Default 20s
+    uint16_t hello_time = 2 * 256;     // Default 2s
+    uint16_t forward_delay = 15 * 256;  // Default 15s
+    bool tc_flag = false;
+    bool tca_flag = false;
+
+    ReceivedBpduInfo() = default;
+
+    bool is_superior_to(const ReceivedBpduInfo& other, uint64_t self_bridge_id) const;
+};
+
+// Forward declare ConfigBpdu for StpPortInfo and BridgeConfig
+struct ConfigBpdu;
+
 
 class StpManager {
 public:
+    enum class PortRole {
+        UNKNOWN, ROOT, DESIGNATED, ALTERNATE, BACKUP, DISABLED
+    };
+
     enum class PortState {
-        UNKNOWN,  // Default state, or if port is not managed by STP
-        DISABLED, // Port is administratively down or STP disabled it
-        BLOCKING, // Port does not forward traffic, but receives BPDUs
-        LISTENING, // Transitional state: not forwarding, not learning MACs, processing BPDUs
-        LEARNING,  // Transitional state: not forwarding, but learning MACs, processing BPDUs
-        FORWARDING // Port forwards traffic and processes BPDUs
+        UNKNOWN, DISABLED, BLOCKING, LISTENING, LEARNING, FORWARDING
+    };
+
+    struct StpPortInfo {
+        uint32_t port_id_internal;
+        uint16_t stp_port_id_field; // STP Port ID (Prio + PortNum)
+        PortRole role = PortRole::DISABLED;
+        PortState state = PortState::DISABLED;
+        uint32_t path_cost_to_segment = 19;
+
+        uint64_t designated_bridge_id_for_segment = 0;
+        uint16_t designated_port_id_for_segment = 0;
+        uint32_t path_cost_from_designated_bridge_to_root = 0xFFFFFFFF;
+
+        uint16_t message_age_timer_seconds = 0;
+        uint16_t forward_delay_timer_seconds = 0;
+        uint16_t hello_timer_seconds = 0;
+
+        ReceivedBpduInfo received_bpdu;
+        bool new_bpdu_received_flag = false;
+        uint8_t port_priority = 128;
+
+        StpPortInfo(uint32_t id = 0);
+        void update_stp_port_id_field();
+        bool has_valid_bpdu_info(uint16_t max_age_limit_seconds) const;
+        uint32_t get_total_path_cost_to_root_via_port() const;
     };
 
     struct BridgeConfig {
-        uint64_t bridge_id = 0xFFFFFFFFFFFFFFFF; // Lower is better. Typically MAC + priority.
-        uint32_t hello_time_seconds = 2;       // Time between sending BPDUs
-        uint32_t forward_delay_seconds = 15;   // Delay for Listening and Learning states
-        uint32_t max_age_seconds = 20;         // Max age of received BPDU info before discarding
+        uint64_t bridge_mac_address = 0x000000000000ULL;
+        uint16_t bridge_priority = 0x8000;
+        uint64_t bridge_id_value;
 
-        // Default constructor is fine
-        BridgeConfig() = default;
+        uint32_t hello_time_seconds = 2;
+        uint32_t forward_delay_seconds = 15;
+        uint32_t max_age_seconds = 20;
 
-        BridgeConfig(uint64_t id, uint32_t hello = 2, uint32_t fwd_delay = 15, uint32_t age = 20)
-            : bridge_id(id), hello_time_seconds(hello), forward_delay_seconds(fwd_delay), max_age_seconds(age) {}
+        ReceivedBpduInfo our_bpdu_info;
+        std::optional<uint32_t> root_port_internal_id;
+
+        BridgeConfig(uint64_t mac = 0x000000000001ULL, uint16_t priority = 0x8000,
+                     uint32_t hello = 2, uint32_t fwd_delay = 15, uint32_t age = 20);
+        void update_bridge_id_value();
+        bool is_root_bridge() const;
     };
 
-    StpManager() : bridge_config_() {
-        // Default bridge config will be used unless set_bridge_config is called.
-    }
+    StpManager(uint32_t num_ports, uint64_t switch_mac_address, uint16_t switch_priority);
 
-    explicit StpManager(const BridgeConfig& initial_config) : bridge_config_(initial_config) {}
+    void set_bridge_mac_address_and_reinit(uint64_t mac);
+    void set_bridge_priority_and_reinit(uint16_t priority);
+    const BridgeConfig& get_bridge_config() const;
+    void admin_set_port_state(uint32_t port_id, bool enable); // To enable/disable port for STP
+    PortState get_port_stp_state(uint32_t port_id) const;
+    PortRole get_port_stp_role(uint32_t port_id) const;
 
-    void set_bridge_config(const BridgeConfig& config) {
-        bridge_config_ = config;
-        // TODO: STP logic might need to be re-evaluated if bridge ID or timers change.
-        // For example, might need to trigger a new root bridge election process.
-    }
+    bool should_forward(uint32_t port_id) const;
+    bool should_learn(uint32_t port_id) const;
 
-    const BridgeConfig& get_bridge_config() const {
-        return bridge_config_;
-    }
+    void process_bpdu(const Packet& bpdu_packet, uint32_t ingress_port_id, SwitchLogger& logger);
+    std::vector<Packet> generate_bpdus(BufferPool& buffer_pool, SwitchLogger& logger);
+    void run_stp_timers();
 
-    void set_port_state(uint32_t port_id, PortState state) {
-        port_states_[port_id] = state;
-        // TODO: Add logging or event generation for state changes.
-    }
-
-    PortState get_port_state(uint32_t port_id) const {
-        auto it = port_states_.find(port_id);
-        if (it != port_states_.end()) {
-            return it->second;
-        }
-        // Default state for unconfigured/unknown ports.
-        // Could be DISABLED or BLOCKING depending on desired default behavior.
-        return PortState::UNKNOWN;
-    }
-
-    // Determines if a port should forward user traffic based on its STP state.
-    bool should_forward(uint32_t port_id) const {
-        return get_port_state(port_id) == PortState::FORWARDING;
-    }
-
-    // Determines if a port should learn MAC addresses.
-    bool should_learn(uint32_t port_id) const {
-        PortState state = get_port_state(port_id);
-        return state == PortState::LEARNING || state == PortState::FORWARDING;
-    }
-
-    // Placeholder for processing an incoming BPDU (Bridge Protocol Data Unit).
-    // The actual STP logic (Root Bridge election, Port Role calculation, State transitions) is complex.
-    void process_bpdu(const Packet& bpdu_packet, uint32_t ingress_port_id) {
-        // 1. Decode BPDU from bpdu_packet.data()
-        //    - Check if it's a Configuration BPDU or TCN BPDU.
-        //    - Extract fields: Root ID, Root Path Cost, Sender Bridge ID, Port ID, Message Age, Max Age, Hello Time, Forward Delay.
-        //
-        // 2. Update port's BPDU information based on the received BPDU and current port/bridge state.
-        //
-        // 3. Run STP state machine for the port:
-        //    - Compare received BPDU with port's current information.
-        //    - Potentially update Root Bridge, Root Port, Designated Ports.
-        //    - Transition port states (e.g., from BLOCKING to LISTENING if it becomes a Root Port or Designated Port).
-        //
-        // Example pseudo-logic:
-        // if (get_port_state(ingress_port_id) == PortState::DISABLED) return;
-        // ParsedBpduInfo received_bpdu = parse_bpdu(bpdu_packet);
-        // PortInfo& port_info = get_port_stp_info(ingress_port_id);
-        //
-        // if (is_superior_bpdu(received_bpdu, port_info.best_bpdu_received)) {
-        //    port_info.best_bpdu_received = received_bpdu;
-        //    port_info.message_age_timer.reset(); // Reset message age timer for this BPDU
-        //    recalculate_stp(); // This would involve the full STP algorithm
-        // }
-        //
-        // This is a highly simplified placeholder. Real STP is event-driven and timer-based.
-    }
-
-    // Placeholder for generating BPDUs to be sent out on designated ports.
-    // BPDUs are typically generated based on the bridge's current understanding of the STP topology
-    // (e.g., its own Bridge ID, Root ID, Root Path Cost).
-    std::vector<Packet> generate_bpdus() {
-        std::vector<Packet> bpdus_to_send;
-        // For each port:
-        // if (is_designated_port(port_id) && get_port_state(port_id) != PortState::DISABLED && get_port_state(port_id) != PortState::BLOCKING) {
-        //    // And if hello_timer for this port has expired
-        //
-        //    // 1. Construct BPDU payload:
-        //    //    Set Root ID (current known root or self if root)
-        //    //    Set Root Path Cost (cost to reach root or 0 if root)
-        //    //    Set Sender Bridge ID (our bridge_config_.bridge_id)
-        //    //    Set Port ID (our port_id, possibly with priority)
-        //    //    Set Message Age (0 for BPDUs originated by Root Bridge, incremented otherwise)
-        //    //    Set Max Age, Hello Time, Forward Delay from bridge_config_ or root's BPDU.
-        //
-        //    // 2. Create a PacketBuffer for the BPDU.
-        //    PacketBuffer* pb = buffer_pool_->allocate_buffer(BPDU_SIZE); // Assuming a buffer pool is accessible
-        //    if(pb) {
-        //        // Fill pb->data with BPDU payload
-        //        // Construct Ethernet header (typically to multicast 01:80:C2:00:00:00)
-        //        Packet bpdu_pkt(pb);
-        //        // Set MAC addresses, ethertype for BPDU (e.g. LLC encapsulation)
-        //        bpdus_to_send.push_back(bpdu_pkt); // This Packet constructor would need to handle ref counting
-        //                                         // Or return vector of PacketBuffer* to be wrapped by caller
-        //    }
-        // }
-        return bpdus_to_send; // Placeholder, returns empty vector
-    }
-
-    // Call this periodically based on timers (e.g., every second)
-    void run_stp_timers_and_logic() {
-        // For each port:
-        // - Decrement message_age_timer if it has received a BPDU. If it expires, age out the BPDU info.
-        // - Decrement forward_delay_timer if in LISTENING or LEARNING state. Transition state if expired.
-        // - Check hello_timer for designated ports to generate BPDUs.
-        //
-        // If any BPDU info aged out or state changed, might need to recalculate_stp().
-        // This is where the core STP decision logic would be invoked.
-    }
-
-
-private:
-    BridgeConfig bridge_config_;
-    std::map<uint32_t, PortState> port_states_;
-    // More STP related per-port information would be needed for actual implementation:
-    // e.g. std::map<uint32_t, PortStpInfo> port_stp_details_;
-    // where PortStpInfo contains:
-    //  - Role (Root, Designated, Alternate, Backup, Disabled)
-    //  - Received BPDU info (Root ID, Cost, Sender BID, etc.)
-    //  - Timers (message age, forward delay)
-
-    // Access to a buffer pool would be needed for generate_bpdus
-    // BufferPool* buffer_pool_ = nullptr;
-    // public:
-    //  void set_buffer_pool(BufferPool* pool) { buffer_pool_ = pool; }
-
-public: // Helper for logging
+public: // Helpers for logging - keep public
     std::string port_state_to_string(PortState state) const {
         switch (state) {
             case PortState::UNKNOWN:   return "UNKNOWN";
@@ -176,7 +128,45 @@ public: // Helper for logging
             default:                   return "INVALID_STATE";
         }
     }
+    std::string port_role_to_string(PortRole role) const;
+    std::map<uint32_t, std::pair<std::string, std::string>> get_all_ports_stp_info_summary() const;
+
+private:
+    void initialize_ports(uint32_t num_ports);
+    void recalculate_stp_roles_and_states(SwitchLogger& logger); // Added logger param
+
+    BridgeConfig bridge_config_;
+    std::map<uint32_t, StpPortInfo> port_stp_info_;
 };
+
+
+// Definition for ConfigBpdu struct (moved from being nested or assumed)
+// This should be consistent with the version used in stp_manager.cpp
+struct ConfigBpdu {
+    uint8_t protocol_id;
+    uint8_t version_id;
+    uint8_t bpdu_type;
+    uint8_t flags;
+    uint64_t root_id;
+    uint32_t root_path_cost;
+    uint64_t bridge_id;
+    uint16_t port_id;
+    uint16_t message_age;
+    uint16_t max_age;
+    uint16_t hello_time;
+    uint16_t forward_delay;
+
+    ConfigBpdu(); // Default constructor
+    void from_bpdu_info_for_sending(const ReceivedBpduInfo& source_info, uint64_t my_bridge_id, uint16_t my_port_id,
+                                    uint16_t effective_message_age, uint16_t root_max_age,
+                                    uint16_t root_hello_time, uint16_t root_forward_delay);
+    ReceivedBpduInfo to_received_bpdu_info() const;
+
+    static uint64_t htonll(uint64_t val);
+    static uint64_t ntohll(uint64_t val);
+};
+const size_t CONFIG_BPDU_PAYLOAD_SIZE = 34;
+
 
 } // namespace netflow
 

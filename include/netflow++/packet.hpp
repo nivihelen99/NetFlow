@@ -115,6 +115,15 @@ struct VlanHeader {
     }
 };
 
+// Definition for LLC Header
+struct LLCHeader {
+    uint8_t dsap;      // Destination Service Access Point
+    uint8_t ssap;      // Source Service Access Point
+    uint8_t control;   // Control field
+    // For STP BPDUs, DSAP and SSAP are often 0x42, Control is 0x03 (UI frame)
+    static constexpr size_t SIZE = 3;
+};
+
 // Placeholder for IPv4 Header
 struct IPv4Header {
     uint8_t version_ihl; // Version (4 bits) + Internet Header Length (4 bits)
@@ -185,32 +194,11 @@ public:
         }
     }
 
-    // Non-copyable
+    // Non-copyable, non-movable for simplicity for now
     Packet(const Packet&) = delete;
     Packet& operator=(const Packet&) = delete;
-
-    // Movable
-    Packet(Packet&& other) noexcept
-        : buffer_(other.buffer_),
-          current_offset_(other.current_offset_),
-          l2_header_size_(other.l2_header_size_) {
-        other.buffer_ = nullptr;
-        // other.current_offset_ is a size_t, simple copy is fine, no need to zero out
-        // other.l2_header_size_ is a size_t, simple copy is fine, no need to zero out
-    }
-
-    Packet& operator=(Packet&& other) noexcept {
-        if (this != &other) {
-            if (buffer_) {
-                buffer_->decrement_ref();
-            }
-            buffer_ = other.buffer_;
-            other.buffer_ = nullptr;
-            current_offset_ = other.current_offset_;
-            l2_header_size_ = other.l2_header_size_;
-        }
-        return *this;
-    }
+    Packet(Packet&&) = delete;
+    Packet& operator=(Packet&&) = delete;
 
     PacketBuffer* get_buffer() const { return buffer_; }
 
