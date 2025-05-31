@@ -3,7 +3,7 @@
 
 #include "netflow++/packet.hpp" // For IpAddress and MacAddress
 #include <cstdint>
-#include <vector>
+#include <vector>   // Required for std::vector
 #include <map>
 #include <functional> // For std::function
 #include <string>     // Potentially for port names in the future
@@ -11,6 +11,16 @@
 #include <optional>   // For std::optional
 
 namespace netflow {
+
+// Structure to hold IP configuration for an interface
+struct InterfaceIpConfig {
+    IpAddress address;      // The IP address itself (network byte order)
+    IpAddress subnet_mask;  // The subnet mask (network byte order)
+
+    InterfaceIpConfig(IpAddress addr, IpAddress mask) : address(addr), subnet_mask(mask) {}
+    // Default constructor might be useful for std::vector or std::optional initialization
+    InterfaceIpConfig() : address(0), subnet_mask(0) {}
+};
 
 class InterfaceManager {
 public:
@@ -33,11 +43,28 @@ public:
         bool full_duplex = true;        // True for full-duplex, false for half-duplex
         bool auto_negotiation = true;   // True if auto-negotiation is enabled
         uint32_t mtu = 1500;            // Maximum Transmission Unit in bytes (excluding L2 header for IP MTU)
+        MacAddress mac_address;         // MAC address of the interface
+        // IP configurations for this interface (L3 properties)
+        std::vector<InterfaceIpConfig> ip_configurations;
 
-        PortConfig() = default; // All members initialized by default member initializers
+        PortConfig() : mac_address() {} // Initialize MAC address (e.g. to all zeros)
     };
 
     InterfaceManager();
+
+    // IP Configuration Methods
+    void add_ip_address(uint32_t interface_id, const IpAddress& address, const IpAddress& subnet_mask);
+    void remove_ip_address(uint32_t interface_id, const IpAddress& address, const IpAddress& subnet_mask);
+    std::vector<InterfaceIpConfig> get_interface_ip_configs(uint32_t interface_id) const;
+    bool is_my_ip(const IpAddress& ip) const; // Checks if IP belongs to any interface
+    std::optional<uint32_t> find_interface_for_ip(const IpAddress& ip) const; // Finds interface ID for a given local IP
+    std::optional<MacAddress> get_mac_for_ip(const IpAddress& ip) const; // Gets MAC for a local IP
+
+    // Stubs to be replaced or properly implemented
+    bool is_ip_local_to_interface(uint32_t interface_id, const IpAddress& ip) const;
+    std::optional<MacAddress> get_interface_mac(uint32_t interface_id) const;
+    std::optional<IpAddress> get_interface_ip(uint32_t interface_id) const; // Gets the primary IP of an interface
+
 
     // Configures a port with the given settings.
     // If the port doesn't exist, it will be created.
@@ -74,58 +101,31 @@ public:
     // Simulates a port's link going down and invokes registered callbacks.
     void simulate_port_link_down(uint32_t port_id);
 
-    // --- Stubs for ArpProcessor and IcmpProcessor dependencies ---
+    // Method to get all configured port/interface IDs
     std::vector<uint32_t> get_all_interface_ids() const {
         std::vector<uint32_t> ids;
         for(const auto& pair : port_configs_) {
             ids.push_back(pair.first);
         }
-        return ids; // Returns configured port IDs, or empty if none
+        return ids;
     }
 
-    bool is_ip_local_to_interface(IpAddress ip, uint32_t port_id) const {
-        // Placeholder stub: In a real implementation, this would check if 'ip'
-        // is configured on the interface associated with 'port_id'.
-        // For now, assume no IP is local to any interface to avoid unintended ARP replies.
-        (void)ip; (void)port_id; // Suppress unused parameter warnings
-        return false;
-    }
-
-    std::optional<MacAddress> get_interface_mac(uint32_t port_id) const {
-        // Placeholder stub: Real implementation would fetch MAC from interface config.
-        // Returning MAC 00:00:00:00:00:00 for now if port is valid.
-        // This is a very basic stub and likely not correct for actual operation.
-        if (port_configs_.count(port_id)) {
-            // This should ideally come from a per-interface MAC address configuration
-            // For now, returning a dummy MAC. A proper implementation is needed.
-            // static const uint8_t dummy_mac_bytes[] = {0x00,0x00,0x00,0x00,0x00,0x01}; // Example dummy
-            // return MacAddress(dummy_mac_bytes);
-            return std::nullopt; // Safer to return nullopt if not properly implemented
-        }
-        (void)port_id;
-        return std::nullopt;
-    }
-
+    // Method to check if a port ID is valid/configured
     bool is_port_valid(uint32_t port_id) const {
-        // Placeholder stub: Checks if port_id is known (configured).
         return port_configs_.count(port_id) > 0;
     }
 
-    std::optional<IpAddress> get_interface_ip(uint32_t port_id) const {
-        // Placeholder stub: Real implementation would fetch IP from interface config.
-        // For now, returning no IP.
-        // This needs to be properly implemented to return the interface's IP address
-        // (likely in network byte order).
-        (void)port_id;
-        return std::nullopt;
-    }
-
+    // Placeholder for L3 interface identification - can be refined
     std::vector<uint32_t> get_all_l3_interface_ids() const {
-        // Placeholder stub: Assumes all configured interfaces could be L3 capable.
-        // A real implementation would distinguish L2/L3 interfaces.
-        return get_all_interface_ids();
+        std::vector<uint32_t> l3_ids;
+        for(const auto& pair : port_configs_) {
+            // Assuming an interface is L3 if it has any IP configuration
+            if(!pair.second.ip_configurations.empty()) {
+                l3_ids.push_back(pair.first);
+            }
+        }
+        return l3_ids;
     }
-    // --- End Stubs ---
 
 
 public: // Changed from protected to public

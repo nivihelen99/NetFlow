@@ -68,31 +68,21 @@ void ArpProcessor::process_arp_packet(Packet& packet, uint32_t ingress_port) {
         std::cout << "ARP Request: Who has " << target_ip_net << "? Tell " << sender_ip_net << std::endl;
 
         // Check if the target IP is one of our interface IPs
-        // This requires InterfaceManager to provide this lookup capability.
-        // Placeholder: Assume interface_manager_.get_interface_ip_config(target_ip_net)
-        // returns std::optional<InterfaceConfig> where InterfaceConfig has {ip, mac, port}.
+        if (interface_manager_.is_my_ip(target_ip_net)) {
+            std::optional<MacAddress> my_mac_for_target_ip = interface_manager_.get_mac_for_ip(target_ip_net);
 
-        std::optional<MacAddress> my_mac_for_target_ip;
-        std::optional<uint32_t> interface_port_with_target_ip;
-
-        // Iterate through all interfaces to find if target_ip_net matches any of our IPs
-        // This is a simplified model. A real InterfaceManager would be more efficient.
-        auto all_interfaces = interface_manager_.get_all_interface_ids(); // Assuming this method exists
-        for (uint32_t port_id : all_interfaces) {
-            if (interface_manager_.is_ip_local_to_interface(target_ip_net, port_id)) { // Assuming this method exists
-                my_mac_for_target_ip = interface_manager_.get_interface_mac(port_id);
-                interface_port_with_target_ip = port_id; // The IP is on this port
-                break;
+            if (my_mac_for_target_ip) {
+                std::cout << "ARP Request is for one of our interfaces (IP: " << target_ip_net
+                          << "). Sending ARP Reply." << std::endl;
+                // The target_ip_net from the request is our IP.
+                // The sender_ip_net and sender_mac from the request become the target for our reply.
+                send_arp_reply(sender_ip_net, sender_mac, /*our_ip=*/target_ip_net, *my_mac_for_target_ip, ingress_port);
+            } else {
+                std::cerr << "ARP Request is for our IP " << target_ip_net << " but could not get MAC for it." << std::endl;
             }
-        }
-
-        if (my_mac_for_target_ip) {
-            std::cout << "ARP Request is for one of our interfaces. Sending ARP Reply." << std::endl;
-            // The target_ip_net from the request is our IP.
-            // The sender_ip_net and sender_mac from the request become the target for our reply.
-            send_arp_reply(sender_ip_net, sender_mac, /*our_ip=*/target_ip_net, *my_mac_for_target_ip, ingress_port);
         } else {
-            std::cout << "ARP Request is not for us. Ignoring (or forward if acting as proxy ARP)." << std::endl;
+            std::cout << "ARP Request is not for us (target_ip: " << target_ip_net
+                      << "). Ignoring (or forward if acting as proxy ARP)." << std::endl;
         }
 
     } else if (opcode == ARP_OPCODE_REPLY) {
@@ -150,27 +140,32 @@ void ArpProcessor::send_arp_request(IpAddress target_ip, uint32_t egress_port_hi
     // Fallback or more complex logic if hint isn't enough:
     // E.g., find an interface that can route to target_ip, or a default L3 interface.
     // For now, if the hint didn't provide a source IP/MAC, we can't send.
-    if (!source_ip || !source_mac) {
-        std::cerr << "send_arp_request: Could not determine source IP/MAC for target " << target_ip
-                  << " using port hint " << egress_port_hint << ". Cannot send ARP request." << std::endl;
-        // Try to find any valid L3 interface if hint fails
-        // This is a simplified fallback
-        auto all_l3_ports = interface_manager_.get_all_l3_interface_ids(); // Assumed method
-        for (uint32_t port_id : all_l3_ports) {
-            source_ip = interface_manager_.get_interface_ip(port_id);
-            source_mac = interface_manager_.get_interface_mac(port_id);
+    // Try to find any valid L3 interface if hint fails or is not provided.
+    if (!source_ip.has_value() || !source_mac.has_value()) {
+        std::cout << "send_arp_request: Could not determine source IP/MAC from port hint " << egress_port_hint
+                  << ". Attempting to find a suitable L3 interface." << std::endl;
+        auto all_l3_ports = interface_manager_.get_all_l3_interface_ids();
+        if (!all_l3_ports.empty()) {
+            // Prefer the first L3 interface found, or one that's on the same subnet if subnet info is available for target_ip
+            // For simplicity, using the first one.
+            uint32_t fallback_port_id = all_l3_ports[0];
+            source_ip = interface_manager_.get_interface_ip(fallback_port_id);
+            source_mac = interface_manager_.get_interface_mac(fallback_port_id);
             if (source_ip && source_mac) {
-                actual_egress_port = port_id;
-                std::cout << "send_arp_request: Using fallback interface port " << actual_egress_port << std::endl;
-                break;
+                actual_egress_port = fallback_port_id;
+                std::cout << "send_arp_request: Using fallback L3 interface port " << actual_egress_port
+                          << " with IP " << source_ip.value() << " and MAC provided." << std::endl;
+            } else {
+                 std::cout << "send_arp_request: Fallback L3 interface port " << fallback_port_id
+                           << " did not provide valid IP/MAC." << std::endl;
             }
         }
     }
 
-    if (source_ip && source_mac && actual_egress_port != 0) {
-        construct_and_send_arp_request(*source_ip, *source_mac, target_ip, actual_egress_port);
+    if (source_ip.has_value() && source_mac.has_value() && actual_egress_port != 0) {
+        construct_and_send_arp_request(source_ip.value(), source_mac.value(), target_ip, actual_egress_port);
     } else {
-        std::cerr << "send_arp_request: Failed to find a suitable source interface for ARP request to " << target_ip << std::endl;
+        std::cerr << "send_arp_request: Failed to find a suitable source IP/MAC for ARP request to " << target_ip << std::endl;
     }
 }
 

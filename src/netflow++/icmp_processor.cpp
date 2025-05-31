@@ -45,34 +45,17 @@ void IcmpProcessor::process_icmp_packet(Packet& packet, uint32_t ingress_port) {
 
         // The destination IP of the packet is ip_hdr->dst_ip
         // Check if this dst_ip belongs to any of our interfaces
-        bool is_for_us = false;
-        uint32_t interface_port_for_reply = 0; // Port associated with our IP
-
-        // Iterate through all interfaces to find if target_ip_net matches any of our IPs
-        // This is a simplified model. A real InterfaceManager would be more efficient.
-        auto all_interfaces = interface_manager_.get_all_interface_ids(); // Assuming this method exists
-        for (uint32_t port_id : all_interfaces) {
-            // is_ip_local_to_interface should take IP in network byte order
-            if (interface_manager_.is_ip_local_to_interface(ip_hdr->dst_ip, port_id)) {
-                is_for_us = true;
-                interface_port_for_reply = port_id;
-                break;
-            }
-        }
-
-
-        if (is_for_us) {
-            std::cout << "ICMP Echo Request is for us (IP: " << ip_hdr->dst_ip
-                      << " on interface port " << interface_port_for_reply << ")." << std::endl;
+        if (interface_manager_.is_my_ip(ip_hdr->dst_ip)) {
+            std::cout << "ICMP Echo Request is for us (IP: " << ip_hdr->dst_ip << ")." << std::endl;
 
             // Determine MAC addresses for the reply
             // New source MAC is the MAC of our interface that has ip_hdr->dst_ip
-            std::optional<MacAddress> our_mac_opt = interface_manager_.get_interface_mac(interface_port_for_reply);
+            std::optional<MacAddress> our_mac_opt = interface_manager_.get_mac_for_ip(ip_hdr->dst_ip);
             if (!our_mac_opt) {
-                std::cerr << "ICMP Processor: Could not get MAC for our interface port " << interface_port_for_reply << std::endl;
+                std::cerr << "ICMP Processor: Could not get MAC for our IP " << ip_hdr->dst_ip << std::endl;
                 return;
             }
-            MacAddress new_src_mac = *our_mac_opt;
+            MacAddress new_src_mac = our_mac_opt.value();
             MacAddress new_dst_mac = eth_hdr->src_mac; // Reply goes back to original sender's MAC
 
             // IP addresses for the reply
