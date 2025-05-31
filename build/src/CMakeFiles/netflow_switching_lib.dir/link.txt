@@ -1,2 +1,0 @@
-/usr/bin/ar qc libnetflow_switching_lib.a CMakeFiles/netflow_switching_lib.dir/netflow++/config_manager.cpp.o CMakeFiles/netflow_switching_lib.dir/netflow++/stp_manager.cpp.o CMakeFiles/netflow_switching_lib.dir/netflow++/lacp_manager.cpp.o
-/usr/bin/ranlib libnetflow_switching_lib.a
