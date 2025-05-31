@@ -11,13 +11,14 @@ target_include_directories(netflow_port_lib INTERFACE ${CMAKE_SOURCE_DIR}/includ
 
 # --- NetFlow Switching Library ---
 # This library will contain compiled components related to switching.
-# FDB and VlanManager are now header-only. ConfigManager has a .cpp part.
 add_library(netflow_switching_lib STATIC
-    # switching/fdb.cpp             # Removed as ForwardingDatabase is header-only
-    # switching/vlan_manager.cpp    # Removed as VlanManager is header-only
     netflow++/config_manager.cpp
     netflow++/stp_manager.cpp
     netflow++/lacp_manager.cpp # lacp_manager.cpp should also be here from previous work
+    netflow++/forwarding_database.cpp
+    netflow++/interface_manager.cpp
+    netflow++/packet_classifier.cpp
+    netflow++/vlan_manager.cpp
 )
 
 # Make sure the libraries can find their own headers if they were in src,

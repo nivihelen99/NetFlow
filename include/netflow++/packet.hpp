@@ -558,57 +558,201 @@ public:
     // } // End of old placeholder
     // The actual implementation starts below:
 
-    void update_checksums() { // This is the single, correct definition
-        IPv4Header* ip = ipv4(); // This correctly sets current_offset_ to the start of IPv4 header.
-        if (ip) {
-            // Store original offset to restore it later if other checksums need it.
-            // size_t original_offset = current_offset_;
+    void update_checksums() {
+        if (!buffer_) return;
 
-            // The ipv4() call already positioned current_offset_ at the start of the IPv4 header.
-            // We need the pointer to the header itself.
-            // The current_offset_ for checksum calculation should be the start of the IP header.
-            // The ipv4() method sets current_offset_ to l2_header_size_ then advances it by IP header length.
-            // For checksum, we need the start of IP header.
-            IPv4Header* ip_for_checksum = get_header<IPv4Header>(l2_header_size_);
-            if (!ip_for_checksum) return;
+        // Determine L2 header size first. Call ethernet() to ensure l2_header_size_ is set.
+        // We don't strictly need the eth_hdr pointer here unless we check ethertype directly,
+        // but calling ethernet() initializes l2_header_size_ which is crucial.
+        ethernet(); // This sets l2_header_size_ correctly, considering VLAN.
+        size_t current_l2_header_size = l2_header_size_; // Use a local copy
 
+        IPv4Header* ip4_hdr = get_header<IPv4Header>(current_l2_header_size);
+        IPv6Header* ip6_hdr = nullptr;
+        uint8_t l3_protocol = 0;
+        size_t l3_header_length = 0;
+        size_t l4_offset = 0;
 
-            ip_for_checksum->header_checksum = 0;
-            size_t ip_header_len_bytes = ip_for_checksum->get_header_length();
-            uint16_t* words = reinterpret_cast<uint16_t*>(ip_for_checksum);
-            uint32_t sum = 0;
+        // Check for IPv4
+        if (ip4_hdr && ( (ip4_hdr->version_ihl & 0xF0) >> 4 ) == 4) { // Basic validation for IPv4
+            l3_protocol = ip4_hdr->protocol;
+            l3_header_length = ip4_hdr->get_header_length();
+            l4_offset = current_l2_header_size + l3_header_length;
 
-            for (size_t i = 0; i < ip_header_len_bytes / 2; ++i) {
-                sum += ntohs(words[i]); // Sum in host byte order
+            // IPv4 Header Checksum
+            ip4_hdr->header_checksum = 0; // Zero out checksum field
+            ip4_hdr->header_checksum = calculate_checksum(reinterpret_cast<const uint8_t*>(ip4_hdr), l3_header_length);
+        } else {
+            // If not IPv4, try IPv6
+            ip4_hdr = nullptr; // Not a valid IPv4 packet for our purposes
+            ip6_hdr = get_header<IPv6Header>(current_l2_header_size);
+            if (ip6_hdr && ( (ntohl(ip6_hdr->version_tc_flowlabel) & 0xF0000000) >> 28 ) == 6) { // Basic validation for IPv6
+                l3_protocol = ip6_hdr->next_header;
+                l3_header_length = IPv6Header::SIZE; // IPv6 header has fixed size
+                l4_offset = current_l2_header_size + l3_header_length;
+            } else {
+                ip6_hdr = nullptr; // Not a valid IPv6 packet
+                return; // Not IPv4 or IPv6, nothing more to do
             }
-
-            // If header length is odd, there's one last byte to consider.
-            // This case should ideally not happen for a valid IPv4 header if get_header_length() is correct (multiple of 4 bytes).
-            // However, being robust:
-            if (ip_header_len_bytes % 2 != 0) {
-                 // This part is tricky as IPv4 header length is in 32-bit words.
-                 // An odd number of bytes for checksum calculation usually means something is wrong,
-                 // or it's part of a payload checksum (not the case here).
-                 // For IPv4 header, length is (ihl * 4) bytes, always even.
-                 // So, we can probably ignore this case for IPv4 header checksum.
-            }
-
-            while (sum >> 16) { // Add carry
-                sum = (sum & 0xFFFF) + (sum >> 16);
-            }
-
-            ip_for_checksum->header_checksum = htons(static_cast<uint16_t>(~sum));
-
-            // current_offset_ = original_offset; // Restore offset if needed
-            // After ipv4() call, current_offset_ is already advanced past IP header.
-            // No need to restore unless other checksums (TCP/UDP) need to re-parse from L3 start.
-            // For now, this is the only checksum.
         }
-        // Similar logic for TCP/UDP checksums which also involve pseudo-headers.
+
+        TcpHeader* tcp_hdr = nullptr;
+        UdpHeader* udp_hdr = nullptr;
+        const uint8_t* l4_payload_ptr = nullptr;
+        size_t l4_payload_len = 0;
+
+        if (l3_protocol == 6) { // TCP
+            tcp_hdr = get_header<TcpHeader>(l4_offset);
+            if (tcp_hdr) {
+                size_t tcp_header_len = tcp_hdr->get_header_length();
+                uint16_t tcp_segment_total_len; // TCP Header + TCP Data
+
+                if (ip4_hdr) {
+                    // Total length of IP packet (L3 header + L3 payload) minus IP header length
+                    if (ntohs(ip4_hdr->total_length) < l3_header_length) return; // Invalid IP total length
+                    tcp_segment_total_len = ntohs(ip4_hdr->total_length) - l3_header_length;
+                } else if (ip6_hdr) {
+                    // IPv6 payload_length is exactly the TCP header + TCP data length
+                    tcp_segment_total_len = ntohs(ip6_hdr->payload_length);
+                } else { return; } // Should not happen
+
+                if (tcp_segment_total_len < tcp_header_len) return; // Invalid TCP segment length
+
+                l4_payload_len = tcp_segment_total_len - tcp_header_len;
+                l4_payload_ptr = buffer_->get_data_start_ptr() + l4_offset + tcp_header_len;
+
+                // Boundary check for payload: ensure payload defined by IP/TCP headers fits in buffer's data length
+                if ((l4_offset + tcp_header_len + l4_payload_len) > buffer_->get_data_length()) {
+                    // Calculated payload extends beyond the actual data in the buffer.
+                    // This indicates a malformed packet or inconsistent lengths.
+                    return;
+                }
+
+                // TCP Checksum calculation
+                tcp_hdr->checksum = 0;
+
+                std::vector<uint8_t> pseudo_header_plus_tcp;
+                // Max pseudo header size (IPv6: 40B) + TCP segment total length
+                pseudo_header_plus_tcp.reserve(40 + tcp_segment_total_len);
+
+                if (ip4_hdr) {
+                    // IPv4 Pseudo Header
+                    pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), reinterpret_cast<uint8_t*>(&ip4_hdr->src_ip), reinterpret_cast<uint8_t*>(&ip4_hdr->src_ip) + 4);
+                    pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), reinterpret_cast<uint8_t*>(&ip4_hdr->dst_ip), reinterpret_cast<uint8_t*>(&ip4_hdr->dst_ip) + 4);
+                    pseudo_header_plus_tcp.push_back(0); // Zero
+                    pseudo_header_plus_tcp.push_back(ip4_hdr->protocol); // Protocol
+                    uint16_t tcp_len_be = htons(tcp_segment_total_len); // Use corrected total length for TCP segment
+                    pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), reinterpret_cast<uint8_t*>(&tcp_len_be), reinterpret_cast<uint8_t*>(&tcp_len_be) + 2);
+                } else if (ip6_hdr) {
+                    // IPv6 Pseudo Header
+                    pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), &ip6_hdr->src_ip[0], &ip6_hdr->src_ip[0] + 16);
+                    pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), &ip6_hdr->dst_ip[0], &ip6_hdr->dst_ip[0] + 16);
+                    uint32_t tcp_len_be32 = htonl(tcp_segment_total_len); // Use corrected total length for TCP segment
+                    pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), reinterpret_cast<uint8_t*>(&tcp_len_be32), reinterpret_cast<uint8_t*>(&tcp_len_be32) + 4);
+                    pseudo_header_plus_tcp.push_back(0); // Zeros
+                    pseudo_header_plus_tcp.push_back(0);
+                    pseudo_header_plus_tcp.push_back(0);
+                    pseudo_header_plus_tcp.push_back(ip6_hdr->next_header); // Next Header
+                }
+
+                // Append TCP header and payload
+                pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), reinterpret_cast<uint8_t*>(tcp_hdr), reinterpret_cast<uint8_t*>(tcp_hdr) + tcp_header_len);
+                if (l4_payload_len > 0 && l4_payload_ptr) {
+                     pseudo_header_plus_tcp.insert(pseudo_header_plus_tcp.end(), l4_payload_ptr, l4_payload_ptr + l4_payload_len);
+                }
+                tcp_hdr->checksum = calculate_checksum(pseudo_header_plus_tcp.data(), pseudo_header_plus_tcp.size());
+            }
+        } else if (l3_protocol == 17) { // UDP
+            udp_hdr = get_header<UdpHeader>(l4_offset);
+            if (udp_hdr) {
+                size_t udp_header_len = UdpHeader::SIZE; // Fixed size
+                uint16_t udp_total_len_from_header = ntohs(udp_hdr->length); // Includes UDP header and payload
+
+                if (udp_total_len_from_header < udp_header_len) return; // Invalid UDP length
+                l4_payload_len = udp_total_len_from_header - udp_header_len;
+                l4_payload_ptr = buffer_->get_data_start_ptr() + l4_offset + udp_header_len;
+
+                // Boundary check for payload: ensure payload defined by UDP header fits in buffer's data length
+                if ((l4_offset + udp_header_len + l4_payload_len) > buffer_->get_data_length()) {
+                    // Calculated payload extends beyond the actual data in the buffer.
+                    return;
+                }
+
+                // UDP Checksum calculation
+                udp_hdr->checksum = 0;
+
+                std::vector<uint8_t> pseudo_header_plus_udp;
+                // Max pseudo header (IPv6: 40B) + UDP total length from header
+                pseudo_header_plus_udp.reserve(40 + udp_total_len_from_header);
+
+                if (ip4_hdr) {
+                    // IPv4 Pseudo Header
+                    pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), reinterpret_cast<uint8_t*>(&ip4_hdr->src_ip), reinterpret_cast<uint8_t*>(&ip4_hdr->src_ip) + 4);
+                    pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), reinterpret_cast<uint8_t*>(&ip4_hdr->dst_ip), reinterpret_cast<uint8_t*>(&ip4_hdr->dst_ip) + 4);
+                    pseudo_header_plus_udp.push_back(0); // Zero
+                    pseudo_header_plus_udp.push_back(ip4_hdr->protocol); // Protocol
+                    uint16_t udp_len_be = htons(udp_total_len_from_header); // Use UDP length from UDP header
+                    pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), reinterpret_cast<uint8_t*>(&udp_len_be), reinterpret_cast<uint8_t*>(&udp_len_be) + 2);
+                } else if (ip6_hdr) {
+                    // IPv6 Pseudo Header
+                    pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), &ip6_hdr->src_ip[0], &ip6_hdr->src_ip[0] + 16);
+                    pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), &ip6_hdr->dst_ip[0], &ip6_hdr->dst_ip[0] + 16);
+                    uint32_t udp_len_be32 = htonl(udp_total_len_from_header); // Upper-layer packet length
+                    pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), reinterpret_cast<uint8_t*>(&udp_len_be32), reinterpret_cast<uint8_t*>(&udp_len_be32) + 4);
+                    pseudo_header_plus_udp.push_back(0); // Zeros
+                    pseudo_header_plus_udp.push_back(0);
+                    pseudo_header_plus_udp.push_back(0);
+                    pseudo_header_plus_udp.push_back(ip6_hdr->next_header); // Next Header
+                }
+
+                // Append UDP header and payload
+                pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), reinterpret_cast<uint8_t*>(udp_hdr), reinterpret_cast<uint8_t*>(udp_hdr) + udp_header_len);
+                if (l4_payload_len > 0 && l4_payload_ptr) {
+                     pseudo_header_plus_udp.insert(pseudo_header_plus_udp.end(), l4_payload_ptr, l4_payload_ptr + l4_payload_len);
+                }
+
+                uint16_t calculated_udp_checksum = calculate_checksum(pseudo_header_plus_udp.data(), pseudo_header_plus_udp.size());
+
+                // For UDP over IPv4, if checksum is 0, it should be transmitted as 0xFFFF.
+                // For UDP over IPv6, checksum is mandatory and if 0, transmitted as 0xFFFF.
+                if (calculated_udp_checksum == 0) {
+                    udp_hdr->checksum = 0xFFFF;
+                } else {
+                    udp_hdr->checksum = calculated_udp_checksum;
+                }
+                // If UDP over IPv4 and checksum is not computed (optional), it can be zero.
+                // Here we always compute it. If it's IPv4 and the original packet had a zero checksum
+                // (meaning it was not computed by the sender), this will now add a checksum.
+                // This is generally fine and often recommended.
+            }
+        }
     }
-    // Ensure no other definition of update_checksums() exists above this point in the class.
 
 private:
+    // Generic checksum calculation (RFC 1071)
+    // Calculates the checksum for the given data.
+    // Returns the checksum in network byte order.
+    static uint16_t calculate_checksum(const uint8_t* data, size_t len) {
+        uint32_t sum = 0;
+        const uint16_t* ptr = reinterpret_cast<const uint16_t*>(data);
+
+        while (len > 1) {
+            sum += ntohs(*ptr++); // Sum in host byte order
+            len -= 2;
+        }
+
+        // If there's an odd byte left, pad it with zero for checksum calculation
+        if (len > 0) {
+            sum += ntohs(static_cast<uint16_t>(*reinterpret_cast<const uint8_t*>(ptr)) << 8);
+        }
+
+        while (sum >> 16) {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+
+        return htons(static_cast<uint16_t>(~sum));
+    }
+
     PacketBuffer* buffer_;
     mutable size_t current_offset_; // Tracks the current position while parsing headers sequentially
     mutable size_t l2_header_size_; // Stores the size of L2 headers (Ethernet + potentially VLAN)

@@ -74,13 +74,9 @@ public:
                 buf->reset_offsets_and_len(required_headroom, 0);
 
 
-                // allocated_buffers_debug_.push_back(buf); // Track leased buffer
-                // Avoid re-adding if it was already in allocated_buffers_debug_ from its first allocation.
-                // The purpose of allocated_buffers_debug_ needs to be clear:
-                // 1. All buffers ever created? (Then don't remove on free, don't re-add here)
-                // 2. Only buffers currently leased out? (Then add here, remove on free_buffer when returned to pool)
-                // Assuming option 2 for now for better "active lease" tracking.
-                // However, to prevent duplicates if free_buffer didn't remove it properly:
+                // Track leased buffer.
+                // Add to allocated_buffers_debug_ if not already present (it shouldn't be if logic is correct).
+                // This list tracks buffers currently "leased out".
                 auto alloc_it = std::find(allocated_buffers_debug_.begin(), allocated_buffers_debug_.end(), buf);
                 if (alloc_it == allocated_buffers_debug_.end()) {
                     allocated_buffers_debug_.push_back(buf);
@@ -103,34 +99,27 @@ public:
             return;
         }
 
-        // The user of the Packet (which uses PacketBuffer) calls Packet's destructor,
-        // which calls buffer_->decrement_ref().
-        // If that decrement_ref() call (which is PacketBuffer::decrement_ref)
-        // causes the ref_count to become zero (returns true), then the Packet knows
-        // it held the last reference, and it should then notify the pool
-        // by calling BufferPool::free_buffer(buffer_).
-        // So, by the time this function is called, buffer->decrement_ref() returning true
-        // has already happened. The buffer's ref_count is 0.
+        // This function is called when a user/owner of a PacketBuffer reference
+        // is done with it. It decrements the buffer's reference count.
+        // If the reference count drops to zero, the buffer is considered no longer
+        // in use externally and can be returned to the pool's available list.
+        // The PacketBuffer's decrement_ref() method returns true if the count reached zero.
 
-        // The instruction was "Call if (buffer->decrement_ref())". This implies this function
-        // is responsible for the final decrement. This is a common pattern.
-        // Let's assume the user calls pool.free_buffer(buf_ptr) INSTEAD of buf_ptr->decrement_ref()
-        // when they are completely done with the buffer from their perspective.
-
-        if (buffer->decrement_ref()) { // If ref_count becomes 0
+        if (buffer->decrement_ref()) { // If ref_count becomes 0 after decrement
             std::lock_guard<std::mutex> lock(mutex_);
             available_buffers_.push_back(buffer);
 
-            // If allocated_buffers_debug_ tracks leased buffers, remove it now.
+            // Remove from allocated_buffers_debug_ as it's no longer leased out.
+            // This list tracks buffers currently "leased out".
             auto it_alloc = std::find(allocated_buffers_debug_.begin(), allocated_buffers_debug_.end(), buffer);
             if (it_alloc != allocated_buffers_debug_.end()) {
                 allocated_buffers_debug_.erase(it_alloc);
             }
         }
-        // If decrement_ref() returned false, it means other references still exist,
-        // so the buffer is not yet ready to be pooled. This is a valid state.
-        // The buffer will be returned to the pool only when the last reference is released
-        // via a call to this free_buffer method that results in ref_count becoming 0.
+        // If decrement_ref() returned false, it means other references to this buffer
+        // still exist. The buffer remains in the allocated_buffers_debug_ list (if it was there)
+        // and is not added to available_buffers_ yet. It will be fully returned to the pool
+        // only when the last reference holder calls free_buffer(), causing the count to drop to zero.
     }
 
 
