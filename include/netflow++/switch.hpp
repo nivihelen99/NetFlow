@@ -177,7 +177,7 @@ public:
 
         // Allocate PacketBuffer
         size_t frame_size = sizeof(EthernetHeader) + payload.size();
-        PacketBuffer* pb = buffer_pool.allocate(frame_size);
+        PacketBuffer* pb = buffer_pool.allocate_buffer(frame_size);
         if (!pb) {
             logger_.error("SEND_CTRL_FRAME", "Failed to allocate PacketBuffer for control frame on port " + std::to_string(egress_port_id));
             return;
@@ -190,17 +190,17 @@ public:
         eth_hdr_data.ethertype = htons(ethertype);
 
         // Copy header and payload to buffer
-        uint8_t* buffer_ptr = pb->get_data_ptr_write();
+        uint8_t* buffer_ptr = pb->get_data_start_ptr();
         memcpy(buffer_ptr, &eth_hdr_data, sizeof(EthernetHeader));
         memcpy(buffer_ptr + sizeof(EthernetHeader), payload.data(), payload.size());
-        pb->set_data_length(frame_size);
+        pb->set_data_len(frame_size);
 
         // Create a Packet object for QoS and enqueuing (consistent with send_control_plane_packet)
         Packet pkt(pb); // Packet constructor should increment_ref on pb
 
         // QoS and Enqueue (similar to send_control_plane_packet)
         // Control plane packets might get higher priority.
-        uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port_id, true /*is_control_plane*/);
+        uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port_id);
         qos_manager_.enqueue_packet(pkt, egress_port_id, queue_id);
 
         logger_.debug("SEND_CTRL_FRAME", "Control frame (EthType: 0x" + logger_.to_hex_string(ethertype) +

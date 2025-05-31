@@ -146,11 +146,12 @@ struct LldpNeighborInfo {
         // For Interface Name, Alias, Locally Assigned, etc. it's often just a string
         if (port_id_subtype == PORT_ID_SUBTYPE_INTERFACE_ALIAS ||
             port_id_subtype == PORT_ID_SUBTYPE_INTERFACE_NAME ||
-            port_id_subtype == PORT_ID_SUBTYPE_LOCALLY_ASSIGNED ||
-            port_id_subtype == PORT_ID_SUBTYPE_PORT_DESCRIPTION) { // Port description is not a port ID subtype but often string
+            port_id_subtype == PORT_ID_SUBTYPE_LOCALLY_ASSIGNED) {
              return std::string(port_id_raw.begin(), port_id_raw.end());
         }
-        // For other subtypes, return raw bytes as a simple string or implement specific formatting
+        // For other subtypes like PORT_ID_SUBTYPE_NETWORK_ADDRESS, or if none of the above match,
+        // it might be binary or a specific format. For now, return raw as string or hex for unhandled.
+        // A more robust implementation might try to format network address if subtype is NETWORK_ADDRESS.
         return std::string(port_id_raw.begin(), port_id_raw.end());
     }
 };

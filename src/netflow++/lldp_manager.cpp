@@ -1,6 +1,7 @@
 #include "netflow++/lldp_manager.hpp"
 #include "netflow++/packet.hpp" // For MacAddress, and Packet structure if used directly
 #include "netflow++/interface_manager.hpp" // For InterfaceManager methods
+#include "netflow++/switch.hpp"          // For Switch class definition
 
 #include <arpa/inet.h> // For htons, ntohs
 #include <algorithm>   // For std::find_if, std::remove_if
@@ -54,16 +55,22 @@ std::vector<uint8_t> LldpManager::build_lldpdu(uint32_t port_id, const LldpPortC
     std::vector<uint8_t> pdu;
 
     // 1. Chassis ID TLV
-    MacAddress chassis_mac = interface_manager_.get_port_mac(port_id); // Assuming base MAC or port MAC
+    auto chassis_mac_opt = interface_manager_.get_interface_mac(port_id);
+    if (!chassis_mac_opt) {
+        // std::cerr << "LLDP: Could not get MAC for chassis ID on port " << port_id << std::endl;
+        return {}; // Cannot build PDU without chassis ID
+    }
+    MacAddress chassis_mac = chassis_mac_opt.value();
     std::vector<uint8_t> chassis_id_value;
     chassis_id_value.push_back(CHASSIS_ID_SUBTYPE_MAC_ADDRESS);
-    chassis_id_value.insert(chassis_id_value.end(), chassis_mac.octets.begin(), chassis_mac.octets.end());
+    chassis_id_value.insert(chassis_id_value.end(), std::begin(chassis_mac.bytes), std::end(chassis_mac.bytes));
     add_tlv_to_pdu(pdu, TLV_TYPE_CHASSIS_ID, chassis_id_value);
 
     // 2. Port ID TLV
-    std::string port_name_str = interface_manager_.get_port_name(port_id);
+    // Using port number as string for Port ID if name is not available.
+    std::string port_name_str = std::string("Port ") + std::to_string(port_id);
     std::vector<uint8_t> port_id_value;
-    port_id_value.push_back(PORT_ID_SUBTYPE_INTERFACE_NAME);
+    port_id_value.push_back(PORT_ID_SUBTYPE_INTERFACE_NAME); // Or PORT_ID_SUBTYPE_LOCALLY_ASSIGNED
     port_id_value.insert(port_id_value.end(), port_name_str.begin(), port_name_str.end());
     add_tlv_to_pdu(pdu, TLV_TYPE_PORT_ID, port_id_value);
 
@@ -249,8 +256,27 @@ void LldpManager::process_lldp_frame(const Packet& packet, uint32_t ingress_port
 
     // Simpler assumption: packet.get_payload_data() gives start of LLDPDU
     // This requires the Packet object to have parsed up to the Ethernet payload.
-    const uint8_t* lldpdu_data = packet.get_payload_data();
-    size_t lldpdu_len = packet.get_payload_length();
+    // const uint8_t* lldpdu_data = packet.get_payload_data();
+    // size_t lldpdu_len = packet.get_payload_length();
+
+    EthernetHeader* eth = packet.ethernet();
+    if (!eth) {
+        // std::cerr << "LLDP: Could not get Ethernet header from packet on port " << ingress_port << std::endl;
+        return;
+    }
+    size_t l2_header_size = EthernetHeader::SIZE;
+    if (ntohs(eth->ethertype) == ETHERTYPE_VLAN) {
+        l2_header_size += VlanHeader::SIZE;
+    }
+
+    if (packet.get_buffer()->get_data_length() < l2_header_size) {
+        // std::cerr << "LLDP: Packet too short for L2 header on port " << ingress_port << std::endl;
+        return;
+    }
+
+    const uint8_t* lldpdu_data = packet.get_buffer()->get_data_start_ptr() + l2_header_size;
+    size_t lldpdu_len = packet.get_buffer()->get_data_length() - l2_header_size;
+
 
     if (!lldpdu_data || lldpdu_len == 0) {
         // std::cerr << "LLDP: No payload data in packet on port " << ingress_port << std::endl;
@@ -269,7 +295,7 @@ void LldpManager::send_lldp_frame(uint32_t port_id) {
             // std::cerr << "LLDP: Sending frame on disabled/unconfigured port " << port_id << std::endl;
             return;
         }
-        if (!interface_manager_.is_port_up(port_id)) {
+        if (!interface_manager_.is_port_link_up(port_id)) {
             // std::cerr << "LLDP: Port " << port_id << " is down, not sending LLDP frame." << std::endl;
             return;
         }
@@ -284,21 +310,15 @@ void LldpManager::send_lldp_frame(uint32_t port_id) {
     }
 
     // Actual sending mechanism:
-    // This assumes InterfaceManager has a method to send a raw frame.
-    // The source MAC should be the MAC of the egress port.
-    MacAddress src_mac = interface_manager_.get_port_mac(port_id);
-
-    // The send_frame function in InterfaceManager would encapsulate this PDU
-    // into an Ethernet frame with dst_mac=LLDP_MULTICAST_MAC, src_mac, ethertype=LLDP_ETHERTYPE.
-    // interface_manager_.send_frame(port_id, LLDP_MULTICAST_MAC, src_mac, LLDP_ETHERTYPE, pdu.data(), pdu.size());
-    // Instead, call Switch's method to send the control plane frame
     auto src_mac_opt = interface_manager_.get_interface_mac(port_id);
-    if (src_mac_opt) {
-        owner_switch_.send_control_plane_frame(port_id, LLDP_MULTICAST_MAC, src_mac_opt.value(), LLDP_ETHERTYPE, pdu);
-        // std::cout << "LLDP: Frame queued for sending via Switch on port " << port_id << " (Size: " << pdu.size() << " bytes)" << std::endl;
-    } else {
+    if (!src_mac_opt) {
         // std::cerr << "LLDP: Failed to get source MAC for port " << port_id << ", cannot send frame." << std::endl;
+        return;
     }
+    MacAddress lldp_multicast_mac_addr(LLDP_MULTICAST_MAC.data()); // Convert std::array to MacAddress
+    owner_switch_.send_control_plane_frame(port_id, lldp_multicast_mac_addr, src_mac_opt.value(), LLDP_ETHERTYPE, pdu);
+    // std::cout << "LLDP: Frame queued for sending via Switch on port " << port_id << " (Size: " << pdu.size() << " bytes)" << std::endl;
+    // Removed extra closing brace that was here
 }
 
 void LldpManager::configure_port(uint32_t port_id, bool enabled, uint32_t tx_interval, uint32_t ttl_multiplier) {
@@ -350,7 +370,7 @@ void LldpManager::handle_timer_tick() {
             LldpPortConfig& config = pair.second;
 
             if (config.enabled && now >= config.next_tx_time) {
-                if (interface_manager_.is_port_up(port_id)) { // Check if port is administratively/operationally up
+                if (interface_manager_.is_port_link_up(port_id)) { // Check if port is administratively/operationally up
                     ports_to_send.push_back(port_id);
                     config.next_tx_time = now + std::chrono::seconds(config.tx_interval_seconds);
                 } else {

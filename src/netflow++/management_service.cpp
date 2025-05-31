@@ -146,7 +146,13 @@ void ManagementService::register_cli_commands() {
                     if (specific_port_id.has_value()) {
                         oss << format_lldp_neighbors(lldp_manager_.get_neighbors(specific_port_id.value()), detail);
                     } else {
-                        oss << format_lldp_neighbors(lldp_manager_.get_all_neighbors_flat(), detail); // Assuming get_all_neighbors_flat() exists or adapt
+                        // Aggregate neighbors from all ports
+                        std::vector<LldpNeighborInfo> all_neighbors_flat;
+                        std::map<uint32_t, std::vector<LldpNeighborInfo>> all_neighbors_map = lldp_manager_.get_all_neighbors();
+                        for (const auto& pair : all_neighbors_map) {
+                            all_neighbors_flat.insert(all_neighbors_flat.end(), pair.second.begin(), pair.second.end());
+                        }
+                        oss << format_lldp_neighbors(all_neighbors_flat, detail);
                     }
                 } else if (args[1] == "interface") {
                     if (args.size() > 2) {

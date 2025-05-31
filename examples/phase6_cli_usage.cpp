@@ -14,6 +14,7 @@
 #include "netflow++/management_interface.hpp"
 #include "netflow++/management_service.hpp"
 #include "netflow++/packet.hpp" // For MacAddress
+#include "netflow++/switch.hpp" // For full Switch class definition
 
 // Example constants
 const uint32_t NUM_PORTS_EXAMPLE = 8;
@@ -107,6 +108,16 @@ int main() {
     netflow::LacpManager lacp_manager(SWITCH_BASE_MAC_EXAMPLE, DEFAULT_LACP_SYSTEM_PRIORITY_EXAMPLE);
     netflow::RoutingManager routing_manager; // RoutingManager might need InterfaceManager
 
+    // In a real application, Switch would own most managers. For this example, we create them separately.
+    // However, LldpManager needs a Switch reference. We'll create a minimal Switch instance.
+    // Note: This Switch instance is very basic and might not reflect full system behavior
+    // if other managers it owns internally are not fully configured or if it has complex startup.
+    // For the purpose of this CLI example, it primarily serves to provide the LldpManager.
+    netflow::Switch mock_switch_for_example(NUM_PORTS_EXAMPLE, SWITCH_BASE_MAC_EXAMPLE);
+    // LldpManager requires the Switch and InterfaceManager
+    netflow::LldpManager lldp_manager(mock_switch_for_example, interface_manager);
+
+
     // Pre-configure some interfaces for demonstration
     for (uint32_t i = 0; i < NUM_PORTS_EXAMPLE; ++i) {
         netflow::InterfaceManager::PortConfig p_config;
@@ -136,7 +147,8 @@ int main() {
         vlan_manager,
         fdb_manager,
         stp_manager,
-        lacp_manager
+        lacp_manager,
+        lldp_manager // Pass LldpManager to ManagementService
     );
 
     // 3. Register CLI commands
