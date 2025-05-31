@@ -96,8 +96,11 @@ struct LagConfig {
     std::vector<uint32_t> member_ports; // List of physical port IDs in this LAG
     LacpHashMode hash_mode = LacpHashMode::SRC_DST_IP_L4_PORT; // Hashing mode for load balancing
     bool active_mode = true;
-    uint16_t lacp_rate = 1;
+    uint16_t lacp_rate = 1; // 1 for fast (short timeout), 0 for slow (long timeout)
     uint16_t actor_admin_key = 0;
+
+    // New member for dynamic list of active ports
+    std::vector<uint32_t> active_distributing_members; // Ports in this LAG currently in COLLECTING_DISTRIBUTING state
 
     LagConfig() = default;
 };
@@ -124,12 +127,48 @@ struct LacpPortInfo {
     RxMachineState rx_state = RxMachineState::INITIALIZE;
     enum class PeriodicTxState { NO_PERIODIC, FAST_PERIODIC, SLOW_PERIODIC, PERIODIC_TX };
     PeriodicTxState periodic_tx_state = PeriodicTxState::NO_PERIODIC;
-    uint16_t port_priority_val = 128;
+    uint16_t port_priority_val = 128; // Default LACP port priority (IEEE 802.1AX Table 6-1)
+
+    // Event flags for state machines
+    bool pdu_received_event = false; // Set by process_lacpdu, consumed by RxMachine
+    bool current_while_timer_expired_event = false; // Set by timer logic (current_while_timer), consumed by RxMachine
+    bool short_timeout_timer_expired_event = false; // Set by timer logic (short_timeout_timer), consumed by PeriodicTxMachine
+    bool long_timeout_timer_expired_event = false;  // Set by timer logic (long_timeout_timer), consumed by PeriodicTxMachine
+    bool ntt_event = false; // Set by RxMachine or PeriodicTxMachine, consumed by generate_lacpdus & PeriodicTxMachine
+    bool wait_while_timer_expired_event = false; // Set by timer logic (aggregate_wait_timer), consumed by MuxMachine
+
+    // Mux Machine specific
+    uint16_t current_wait_while_timer_ticks = 0; // For Mux machine's WAITING state
+    bool selected_for_aggregation = false; // Set by Selection Logic, consumed by MuxMachine
+
+
+    // Assumed external conditions (can be managed by InterfaceManager or set directly for testing)
+    bool port_enabled = false; // Physical port operational status
+    bool lacp_enabled = false; // LACP protocol enabled on this port
+
+    // Temporary storage for the actor information from the last received PDU
+    // This is used by the RxMachine to compare and record partner info.
+    struct PduActorInfo {
+        uint64_t system_id = 0;
+        uint16_t key = 0;
+        uint16_t port_priority = 0;
+        uint16_t port_number = 0;
+        uint8_t state = 0;
+        bool valid = false; // Indicates if this struct holds valid data from a new PDU
+    } last_received_pdu_actor_info;
+
 
     LacpPortInfo(uint32_t phys_id = 0);
     void set_actor_state_flag(LacpStateFlag flag, bool set);
     bool get_actor_state_flag(LacpStateFlag flag) const;
+    void set_partner_state_flag(LacpStateFlag flag, bool set); // Added
+    bool get_partner_state_flag(LacpStateFlag flag) const;   // Added
 };
+
+// Timer constants (in terms of 1-second ticks for run_lacp_timers_and_statemachines)
+const uint16_t SHORT_TIMEOUT_TICKS = 3; // 3 seconds
+const uint16_t LONG_TIMEOUT_TICKS = 90; // 90 seconds
+const uint16_t AGGREGATE_WAIT_TIME_TICKS = 2; // 2 seconds, IEEE 802.1AX default for Aggregate Wait Time
 
 
 class LacpManager {
@@ -200,10 +239,33 @@ public:
     void initialize_lacp_port_info(uint32_t port_id, const LagConfig& lag_config);
     // Runs the LACP Receive state machine for a given port.
     void run_lacp_rx_machine(uint32_t port_id);
+    // Helper functions for RxMachine, to be defined in .cpp
+    void record_defaulted_partner(LacpPortInfo& port_info);
+    void record_pdu_partner_info(LacpPortInfo& port_info); // Uses port_info.last_received_pdu_actor_info
+    void update_default_selected_partner_info(LacpPortInfo& port_info, const LagConfig& lag_config); // May need lag_config
+    bool compare_pdu_with_partner_info(const LacpPortInfo::PduActorInfo& pdu_actor_info, const LacpPortInfo& port_info);
+    void set_current_while_timer(LacpPortInfo& port_info, bool is_short_timeout);
+    void update_ntt(LacpPortInfo& port_info);
+    bool partner_is_short_timeout(const LacpPortInfo& port_info); // Added for PeriodicTxMachine
+
+
     // Runs the LACP Periodic Transmission state machine for a given port.
     void run_lacp_periodic_tx_machine(uint32_t port_id);
     // Runs the LACP Mux state machine for a given port.
     void run_lacp_mux_machine(uint32_t port_id);
+    // Helper functions for MuxMachine (some might be simple enough to inline in SM)
+    void detach_mux_from_aggregator(uint32_t port_id, LacpPortInfo& port_info);
+    void attach_mux_to_aggregator(uint32_t port_id, LacpPortInfo& port_info);
+    void disable_collecting_distributing(LacpPortInfo& port_info);
+    void enable_collecting_distributing(LacpPortInfo& port_info);
+    bool check_port_ready(const LacpPortInfo& port_info);
+    void update_port_selection_status(uint32_t port_id, LacpPortInfo& port_info); // Placeholder for Selection Logic
+    bool check_aggregator_ready_for_port(const LacpPortInfo& port_info); // Checks if partner is ready for this port to join
+    bool check_partner_in_sync(const LacpPortInfo& port_info);
+    bool check_partner_in_sync_and_collecting(const LacpPortInfo& port_info);
+    void stop_wait_while_timer(LacpPortInfo& port_info);
+
+
     // Updates port selection logic (e.g., for an aggregator).
     void update_port_selection_logic(uint32_t port_id); // Or perhaps lag_id
 
