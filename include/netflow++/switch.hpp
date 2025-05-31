@@ -16,6 +16,9 @@
 #include "logger.hpp" // Ensure logger is included
 #include "config_manager.hpp" // Ensure ConfigManager is included
 #include "management_interface.hpp" // Ensure ManagementInterface is included
+#include "arp_processor.hpp" // Added for ARP processing
+#include "icmp_processor.hpp" // Added for ICMP processing
+#include "routing_manager.hpp" // Added for RoutingManager
 
 #include <cstdint>
 #include <functional> // For std::function
@@ -45,13 +48,21 @@ public:
     ConfigManager config_manager_;             // Added member
     ManagementInterface management_interface_; // Added member
     StpManager stp_manager;
+    // ARP and ICMP processors
+    ArpProcessor arp_processor_;
+    IcmpProcessor icmp_processor_;
+    RoutingManager routing_manager_; // Added RoutingManager member
     // LacpManager lacp_manager_; // Removed redundant declaration
 
     Switch(uint32_t num_ports, uint64_t switch_mac_address,
            uint16_t stp_default_priority = 32768, uint16_t lacp_default_priority = 32768) :
         num_ports_(num_ports),
+        interface_manager_(), // Ensure InterfaceManager is initialized if it has a default constructor
+        fdb(), // Initialize ForwardingDatabase if it has a default constructor or specific params
         stp_manager(num_ports, switch_mac_address, stp_default_priority),
         lacp_manager_(switch_mac_address, lacp_default_priority),
+        arp_processor_(interface_manager_, fdb, *this),      // Initialize ArpProcessor with fdb
+        icmp_processor_(interface_manager_, *this),     // Initialize IcmpProcessor
         flow_table_(1024),
         logger_(LogLevel::INFO) {
 
@@ -116,7 +127,40 @@ public:
         }
         logger_.debug("FORWARDING_QUEUE", "Packet (size " + std::to_string(pkt.get_buffer()->get_data_length())
                   + ") conceptually passed to hardware for transmission on port " + std::to_string(egress_port));
+        // This is a conceptual model. Real hardware would handle this.
+        // For simulation, we might enqueue to a QosManager or similar.
+        // qos_manager_.enqueue_packet(pkt, egress_port, 0); // Example: enqueue to default queue 0
+        interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->get_data_length());
+
     }
+
+    // Method for processors to send packets (e.g. ARP/ICMP replies)
+    // This bypasses FDB lookup and sends directly to the egress pipeline (QoS, VLAN egress)
+    void send_control_plane_packet(Packet& pkt, uint32_t egress_port) {
+        if (egress_port >= num_ports_) {
+            logger_.error("SEND_CONTROL_PACKET", "Egress port " + std::to_string(egress_port) + " out of range.");
+            // Decrement ref count as packet won't be sent by us
+            // pkt.get_buffer()->decrement_ref(); // Assuming pkt might be rvalue or we need to manage its lifecycle here
+            return;
+        }
+        if (!interface_manager_.is_port_link_up(egress_port)) {
+            logger_.warning("SEND_CONTROL_PACKET", "Egress port " + std::to_string(egress_port) + " link is down. Dropping control packet.");
+            // pkt.get_buffer()->decrement_ref();
+            return;
+        }
+
+        // Apply any necessary egress processing (like VLAN tagging if needed for control packets)
+        // For simplicity, assume control packets are ready to go.
+        // vlan_manager.process_egress(pkt, egress_port); // May not be needed or different rules for control plane
+
+        uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port); // Use high priority queue?
+        qos_manager_.enqueue_packet(pkt, egress_port, queue_id);
+        logger_.debug("SEND_CONTROL_PACKET", "Control plane packet enqueued to port " + std::to_string(egress_port) + " queue " + std::to_string(static_cast<int>(queue_id)));
+        // TX stats are incremented by the actual sending mechanism after dequeuing from QoS.
+        // For simulation here, if enqueue_packet doesn't lead to TX stats, uncomment below:
+        // interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->get_data_length());
+    }
+
 
     void flood_packet(Packet& pkt, uint32_t ingress_port) {
         logger_.debug("FLOOD", "Flooding packet from ingress port " + std::to_string(ingress_port));
@@ -176,6 +220,27 @@ public:
         logger_.info("SWITCH_LIFECYCLE", "Switch operational.");
     }
 
+    // --- Routing Management Methods ---
+    void add_static_route(const IpAddress& destination_network, const IpAddress& subnet_mask,
+                          const IpAddress& next_hop_ip, uint32_t egress_interface_id, int metric = 1) {
+        routing_manager_.add_static_route(destination_network, subnet_mask, next_hop_ip, egress_interface_id, metric);
+        // Optionally log route addition
+        logger_.info("ROUTING", "Static route added: " + logger_.ip_to_string(destination_network) + "/" + logger_.ip_to_string(subnet_mask) +
+                                 " via " + logger_.ip_to_string(next_hop_ip) + " iface " + std::to_string(egress_interface_id) +
+                                 " metric " + std::to_string(metric));
+    }
+
+    void remove_static_route(const IpAddress& destination_network, const IpAddress& subnet_mask) {
+        routing_manager_.remove_static_route(destination_network, subnet_mask);
+        // Optionally log route removal
+        logger_.info("ROUTING", "Attempted to remove static route for: " + logger_.ip_to_string(destination_network) + "/" + logger_.ip_to_string(subnet_mask));
+    }
+
+    std::vector<RouteEntry> get_routing_table() const {
+        return routing_manager_.get_routing_table();
+    }
+    // --- End Routing Management Methods ---
+
     void process_received_packet(uint32_t ingress_port_id, PacketBuffer* raw_buffer) {
         if (!raw_buffer) {
             logger_.error("PROCESS_PACKET", "Null PacketBuffer received on port " + std::to_string(ingress_port_id));
@@ -192,6 +257,9 @@ public:
 
         Packet pkt(raw_buffer);
 
+        // L0: Port specific physical layer checks (already done by is_port_link_up)
+
+        // L1/L2 Pre-processing: ACLs can act early
         uint32_t redirect_port_id_acl = 0;
         AclActionType acl_action = acl_manager_.evaluate(pkt, redirect_port_id_acl);
 
@@ -222,6 +290,7 @@ public:
             }
         }
 
+        // L2 Pre-processing: Ingress VLAN processing
         PacketAction vlan_action = vlan_manager.process_ingress(pkt, ingress_port_id);
         if (vlan_action == PacketAction::DROP) {
             logger_.log_packet_drop(pkt, ingress_port_id, "Ingress VLAN processing");
@@ -229,36 +298,180 @@ public:
             return;
         }
 
-        static const uint8_t bpdu_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00};
+        // L2 Control Plane: STP BPDUs, LACP, etc.
+        // Check for BPDUs (STP)
+        static const uint8_t bpdu_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00}; // STP/PAUSE
+        static const uint8_t lacp_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x02}; // LACP
         MacAddress bpdu_mac(bpdu_mac_bytes);
-        bool is_bpdu = (pkt.ethernet() && pkt.dst_mac() && pkt.dst_mac().value() == bpdu_mac);
+        MacAddress lacp_slow_mac(lacp_mac_bytes);
 
-        if (is_bpdu) {
-            logger_.debug("STP", "BPDU received on port " + std::to_string(ingress_port_id));
-            stp_manager.process_bpdu(pkt, ingress_port_id, logger_); // Added logger_ argument
-            return;
+        EthernetHeader* eth_hdr = pkt.ethernet(); // Get Ethernet header to check EtherType and Dest MAC
+
+        if (eth_hdr) {
+            if (eth_hdr->dst_mac == bpdu_mac) {
+                 logger_.debug("STP", "BPDU received on port " + std::to_string(ingress_port_id));
+                 stp_manager.process_bpdu(pkt, ingress_port_id, logger_);
+                 return; // BPDU processing typically ends here
+            }
+            // TODO: Add LACPDU handling if eth_hdr->dst_mac == lacp_slow_mac and ethertype is SLOW_PROTOCOL_ETHERTYPE
+            // if (eth_hdr->dst_mac == lacp_slow_mac && ntohs(eth_hdr->ethertype) == ETHERTYPE_SLOW_PROTOCOLS) {
+            //     logger_.debug("LACP", "LACPDU received on port " + std::to_string(ingress_port_id));
+            //     lacp_manager_.process_lacpdu(pkt, ingress_port_id);
+            //     return; // LACPDU processing ends here
+            // }
+
+            // L3 Control Plane (ARP, ICMP for the switch itself)
+            uint16_t ether_type = ntohs(eth_hdr->ethertype);
+            if (pkt.has_vlan()) { // If VLAN tagged, the "real" ethertype is after the VLAN header
+                VlanHeader* vlan_hdr = pkt.vlan();
+                if (vlan_hdr) {
+                    ether_type = ntohs(vlan_hdr->ethertype);
+                }
+            }
+
+
+            if (ether_type == ETHERTYPE_ARP) {
+                logger_.debug("ARP_DISPATCH", "ARP packet received on port " + std::to_string(ingress_port_id) + ". Dispatching to ArpProcessor.");
+                arp_processor_.process_arp_packet(pkt, ingress_port_id);
+                // ARP packets are typically not forwarded further by this switch path.
+                // They are either requests for the switch's own MAC, or replies to populate its cache.
+                return;
+            } else if (ether_type == ETHERTYPE_IPV4) {
+                IPv4Header* ip_hdr = pkt.ipv4(); // Gets IPv4 header based on ethertype
+                if (ip_hdr) {
+                    if (ip_hdr->protocol == IPPROTO_ICMP) {
+                        logger_.debug("ICMP_DISPATCH", "ICMP packet received on port " + std::to_string(ingress_port_id) + ". Dispatching to IcmpProcessor.");
+                        icmp_processor_.process_icmp_packet(pkt, ingress_port_id);
+                        return;
+                    }
+                    // >>> START L3 FORWARDING LOGIC HERE FOR OTHER IPV4 PACKETS <<<
+                    logger_.debug("L3_FORWARDING_START", "IPv4 packet (" + logger_.ip_to_string(ip_hdr->src_ip) + " -> " +
+                                                            logger_.ip_to_string(ip_hdr->dst_ip) + ") is candidate for L3 forwarding on port " + std::to_string(ingress_port_id));
+
+                    // 1. TTL Check and Decrement
+                    if (ip_hdr->ttl <= 1) { // Check before decrement if TTL is already 0 or 1
+                        logger_.info("PACKET_DROP_TTL", "TTL expired for packet from " + logger_.ip_to_string(ip_hdr->src_ip) + " to " + logger_.ip_to_string(ip_hdr->dst_ip));
+                        // icmp_processor_.send_time_exceeded(pkt, ingress_port_id); // Placeholder for ICMP Time Exceeded
+                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true); // Count as drop
+                        return;
+                    }
+                    ip_hdr->ttl--;
+                    // IPv4 checksum will need recalculation due to TTL change. pkt.update_checksums() will handle it later.
+
+                    // 2. Route Lookup
+                    std::optional<RouteEntry> route_entry_opt = routing_manager_.lookup_route(ip_hdr->dst_ip);
+
+                    if (route_entry_opt.has_value()) {
+                        const RouteEntry& route = route_entry_opt.value();
+                        logger_.debug("L3_ROUTE_FOUND", "Route found for " + logger_.ip_to_string(ip_hdr->dst_ip) +
+                                                            ": via " + logger_.ip_to_string(route.next_hop_ip) +
+                                                            " on interface " + std::to_string(route.egress_interface_id));
+
+                        IpAddress next_hop_to_arp_for = route.next_hop_ip;
+                        if (next_hop_to_arp_for == 0) { // 0.0.0.0 means directly connected route
+                            next_hop_to_arp_for = ip_hdr->dst_ip;
+                            logger_.debug("L3_ARP_TARGET", "Route is directly connected. ARP for destination IP: " + logger_.ip_to_string(next_hop_to_arp_for));
+                        } else {
+                            logger_.debug("L3_ARP_TARGET", "Route via gateway. ARP for next-hop IP: " + logger_.ip_to_string(next_hop_to_arp_for));
+                        }
+
+                        // 3. ARP Lookup for next-hop MAC
+                        std::optional<MacAddress> next_hop_mac_opt = arp_processor_.lookup_mac(next_hop_to_arp_for);
+
+                        if (next_hop_mac_opt.has_value()) {
+                            MacAddress resolved_next_hop_mac = next_hop_mac_opt.value();
+                            std::optional<MacAddress> egress_interface_mac_opt = interface_manager_.get_interface_mac(route.egress_interface_id);
+
+                            if (!egress_interface_mac_opt.has_value()) {
+                                logger_.error("L3_FORWARD_FAIL", "Egress interface " + std::to_string(route.egress_interface_id) + " has no MAC address. Dropping packet.");
+                                interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
+                                return;
+                            }
+                            MacAddress egress_mac = egress_interface_mac_opt.value();
+
+                            // 4. Rewrite Packet Headers (Ethernet)
+                            // Ensure eth_hdr is still valid (it should be, pkt object owns it)
+                            if (eth_hdr) {
+                                eth_hdr->dst_mac = resolved_next_hop_mac;
+                                eth_hdr->src_mac = egress_mac;
+
+                                // 5. Update Checksums (primarily IPv4 due to TTL change)
+                                pkt.update_checksums();
+
+                                logger_.info("L3_FORWARDING", "Forwarding packet from " + logger_.ip_to_string(ip_hdr->src_ip) + " to " + logger_.ip_to_string(ip_hdr->dst_ip) +
+                                                                 " out on port " + std::to_string(route.egress_interface_id) +
+                                                                 " to MAC " + logger_.mac_to_string(resolved_next_hop_mac) +
+                                                                 " from MAC " + logger_.mac_to_string(egress_mac));
+
+                                // 6. Send Packet
+                                // Use a general send mechanism that handles L2 processing like VLAN tagging on egress if necessary
+                                // and QoS. For now, using qos_manager_.enqueue_packet like known L2 unicasts.
+                                vlan_manager.process_egress(pkt, route.egress_interface_id); // Apply egress VLAN rules
+                                uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, route.egress_interface_id);
+                                qos_manager_.enqueue_packet(pkt, route.egress_interface_id, queue_id);
+                                // interface_manager_._increment_tx_stats(route.egress_interface_id, pkt.get_buffer()->get_data_length()); // qos_manager or physical layer should do this
+                                return;
+                            } else {
+                                logger_.error("L3_FORWARD_FAIL", "Ethernet header became null during L3 processing. Dropping packet.");
+                                interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
+                                return;
+                            }
+                        } else {
+                            logger_.info("L3_ARP_MISS", "Next-hop MAC for " + logger_.ip_to_string(next_hop_to_arp_for) +
+                                                             " not found in ARP cache. Sending ARP request. Dropping packet.");
+                            arp_processor_.send_arp_request(next_hop_to_arp_for, route.egress_interface_id);
+                            interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true); // Count as drop
+                            return;
+                        }
+                    } else {
+                        // 7. No Route Found
+                        logger_.info("PACKET_DROP_NO_ROUTE", "No route found for destination IP " + logger_.ip_to_string(ip_hdr->dst_ip) + ". Dropping packet.");
+                        // icmp_processor_.send_destination_unreachable(pkt, ingress_port_id, 0 /* Network Unreachable */); // Placeholder
+                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true); // Count as drop
+                        return;
+                    }
+                    // >>> END L3 FORWARDING LOGIC <<<
+                } else {
+                     logger_.error("PACKET_PROCESS_ERROR", "IPv4 header pointer is null after ethertype check. Dropping packet.");
+                     interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
+                     return;
+                }
+            }
+            // Add IPv6 handling here in future: else if (ether_type == ETHERTYPE_IPV6) { ... }
+             else if (eth_hdr) { // Log non-IP/ARP packets if an ethernet header was parsed
+                logger_.debug("L2_OTHER", "Non-IP/ARP L2 packet received. EtherType: 0x" + logger_.to_hex_string(ether_type) + ". Passing to L2 forwarding.");
+            }
+        } else if (raw_buffer) { // If eth_hdr is null, but we have a raw_buffer, it's a problem.
+            logger_.error("PACKET_PROCESS_ERROR", "Ethernet header is null for received packet. Dropping.");
+            interface_manager_._increment_rx_stats(ingress_port_id, raw_buffer->get_data_length(), true, true); // Error and drop
+            return; // pkt destructor will handle raw_buffer's ref count
         }
 
+
+        // L2 Data Plane Forwarding Logic (STP state checks, MAC learning, FDB lookup)
+        // STP check for data packets (BPDUs are handled above and bypass this)
         StpManager::PortState current_stp_state = stp_manager.get_port_stp_state(ingress_port_id);
         if (current_stp_state == StpManager::PortState::BLOCKING ||
-            current_stp_state == StpManager::PortState::LISTENING) {
-            logger_.log_packet_drop(pkt, ingress_port_id, "STP state " + stp_manager.port_state_to_string(current_stp_state));
+            current_stp_state == StpManager::PortState::LISTENING) { // Or Disabled
+            logger_.log_packet_drop(pkt, ingress_port_id, "STP state " + stp_manager.port_state_to_string(current_stp_state) + " (data packet)");
             interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
             return;
         }
 
-        if (stp_manager.should_learn(ingress_port_id)) {
-            if (pkt.ethernet() && pkt.src_mac().has_value()) {
+        // MAC Learning (if STP state allows)
+        if (stp_manager.should_learn(ingress_port_id)) { // Checks if port is in Learning or Forwarding state
+            if (eth_hdr && pkt.src_mac().has_value()) { // Ensure eth_hdr is valid
                 uint16_t vlan_for_learning = pkt.vlan_id().value_or(vlan_manager.get_port_config(ingress_port_id).value_or(VlanManager::PortConfig()).native_vlan);
                 fdb.learn_mac(pkt.src_mac().value(), ingress_port_id, vlan_for_learning);
             }
         }
 
-        if (pkt.ethernet() && pkt.dst_mac().has_value()) {
+        // FDB Lookup and Forwarding Decision
+        if (eth_hdr && pkt.dst_mac().has_value()) { // Ensure eth_hdr is valid
             uint16_t vlan_for_lookup = pkt.vlan_id().value_or(vlan_manager.get_port_config(ingress_port_id).value_or(VlanManager::PortConfig()).native_vlan);
             std::optional<uint32_t> egress_port_opt = fdb.lookup_port(pkt.dst_mac().value(), vlan_for_lookup);
 
-            if (egress_port_opt.has_value()) {
+            if (egress_port_opt.has_value()) { // Destination MAC known
                 uint32_t egress_port = egress_port_opt.value();
                 if (egress_port == ingress_port_id) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "Destination MAC is on ingress port (reflection)");
@@ -267,15 +480,17 @@ public:
                 }
 
                 uint32_t final_egress_port = egress_port;
+                // LACP Port Resolution
                 if (lacp_manager_.get_lag_config(egress_port).has_value()) {
                     final_egress_port = lacp_manager_.select_egress_port(egress_port, pkt);
                     logger_.debug("LACP", "LAG ID " + std::to_string(egress_port) + " resolved to physical port " + std::to_string(final_egress_port) + " for packet.");
                     if ((final_egress_port == 0 && egress_port != 0) || !interface_manager_.is_port_link_up(final_egress_port)) {
-                        logger_.log_packet_drop(pkt, ingress_port_id, "LACP LAG " + std::to_string(egress_port) + " has no active/valid/up members for egress (selected: " + std::to_string(final_egress_port) + ").");
-                        interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
+                        logger_.log_packet_drop(pkt, ingress_port_id, "LACP LAG " + std::to_string(egress_port) + " has no active/valid/up members for egress (selected: " + std::to_string(final_egress_port) + "). Flooding instead.");
+                        // Fallback to flooding if LACP selection fails but FDB entry existed for LAG
+                        flood_packet(pkt, ingress_port_id);
                         return;
                     }
-                } else {
+                } else { // Not a LAG, direct port
                     if(!interface_manager_.is_port_link_up(final_egress_port)){
                         logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " link is down.");
                         interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
@@ -283,6 +498,7 @@ public:
                     }
                 }
 
+                // STP check for egress port
                 StpManager::PortState egress_stp_state = stp_manager.get_port_stp_state(final_egress_port);
                 if (egress_stp_state != StpManager::PortState::FORWARDING) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " not in STP forwarding state (" + stp_manager.port_state_to_string(egress_stp_state) + ")");
@@ -290,23 +506,31 @@ public:
                     return;
                 }
 
+                // VLAN egress check
                 if (!vlan_manager.should_forward(ingress_port_id, final_egress_port, vlan_for_lookup)) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "VLAN " + std::to_string(vlan_for_lookup) + " not allowed between port " + std::to_string(ingress_port_id) + " and final egress " + std::to_string(final_egress_port));
                     interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
                     return;
                 }
 
+                // L2 Egress Processing (VLAN tagging)
                 vlan_manager.process_egress(pkt, final_egress_port);
+
+                // QoS and Enqueue
                 uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, final_egress_port);
                 qos_manager_.enqueue_packet(pkt, final_egress_port, queue_id);
                 logger_.debug("QOS", "Packet enqueued to port " + std::to_string(final_egress_port) + " queue " + std::to_string(static_cast<int>(queue_id)));
-                interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->get_data_length());
-            } else {
-                logger_.info("FDB", "Destination MAC unknown. Flooding packet from ingress port " + std::to_string(ingress_port_id) + " on VLAN " + std::to_string(vlan_for_lookup));
+                // Actual TX stats are handled by the component that dequeues and sends.
+                // interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->get_data_length());
+
+            } else { // Destination MAC unknown or is a broadcast/multicast MAC not handled by L2 control plane
+                // L3 processing (Routing) would happen here if it's an IP packet and dest MAC was the switch's router MAC
+                // For now, if not known L2 unicast, flood
+                logger_.info("FDB_MISS", "Destination MAC unknown or broadcast/multicast. Flooding packet from ingress port " + std::to_string(ingress_port_id) + " on VLAN " + std::to_string(vlan_for_lookup));
                 flood_packet(pkt, ingress_port_id);
             }
-        } else {
-            logger_.log_packet_drop(pkt, ingress_port_id, "Not Ethernet or no destination MAC");
+        } else { // Not Ethernet or no destination MAC (should be rare after initial parsing)
+            logger_.log_packet_drop(pkt, ingress_port_id, "Not Ethernet or no destination MAC (after L2 control plane processing)");
             interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->get_data_length(), false, true);
         }
     }

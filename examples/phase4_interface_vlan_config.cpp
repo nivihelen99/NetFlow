@@ -51,15 +51,27 @@ int main() {
     std::cout << "  Configured Port 1." << std::endl;
     if (auto cfg = if_manager.get_port_config(1)) print_port_config(1, cfg.value()); else std::cout << "Port 1 config not found!\n";
 
-    netflow::InterfaceManager::PortConfig p2_config = {true, 10000, true, true, 9000}; // Using aggregate initialization
+    netflow::InterfaceManager::PortConfig p2_config; // Default construct
+    p2_config.admin_up = true;
+    p2_config.speed_mbps = 10000;
+    p2_config.full_duplex = true;
+    p2_config.auto_negotiation = true;
+    p2_config.mtu = 9000;
+    // p2_config.mac_address remains default initialized
+    // p2_config.ip_configurations remains default initialized (empty)
     if_manager.configure_port(2, p2_config);
     std::cout << "  Configured Port 2." << std::endl;
     if (auto cfg = if_manager.get_port_config(2)) print_port_config(2, cfg.value()); else std::cout << "Port 2 config not found!\n";
 
     std::cout << "  Port 1 is admin up: " << (if_manager.is_port_admin_up(1) ? "Yes" : "No") << std::endl; // Changed to is_port_admin_up
     std::cout << "  Setting Port 2 admin state to down." << std::endl;
-    p2_config.admin_up = false; // Modify local copy
-    if_manager.configure_port(2, p2_config); // Re-configure
+    // To modify, get the config, change it, then re-configure
+    std::optional<netflow::InterfaceManager::PortConfig> p2_config_opt = if_manager.get_port_config(2);
+    if (p2_config_opt) {
+        netflow::InterfaceManager::PortConfig p2_modifiable_config = p2_config_opt.value();
+        p2_modifiable_config.admin_up = false; // Modify
+        if_manager.configure_port(2, p2_modifiable_config); // Re-configure
+    }
     if (auto cfg = if_manager.get_port_config(2)) print_port_config(2, cfg.value()); else std::cout << "Port 2 config not found!\n";
 
 
