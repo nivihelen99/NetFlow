@@ -19,6 +19,7 @@
 #include "arp_processor.hpp" // Added for ARP processing
 #include "icmp_processor.hpp" // Added for ICMP processing
 #include "routing_manager.hpp" // Added for RoutingManager
+#include "netflow++/lldp_manager.hpp" // Include LLDP Manager
 
 #include <cstdint>
 #include <functional> // For std::function
@@ -52,6 +53,7 @@ public:
     ArpProcessor arp_processor_;
     IcmpProcessor icmp_processor_;
     RoutingManager routing_manager_; // Added RoutingManager member
+    LldpManager lldp_manager_;      // Add LldpManager member
     // LacpManager lacp_manager_; // Removed redundant declaration
 
     Switch(uint32_t num_ports, uint64_t switch_mac_address,
@@ -61,6 +63,7 @@ public:
         fdb(), // Initialize ForwardingDatabase if it has a default constructor or specific params
         stp_manager(num_ports, switch_mac_address, stp_default_priority),
         lacp_manager_(switch_mac_address, lacp_default_priority),
+        lldp_manager_(*this, interface_manager_), // Initialize LldpManager
         arp_processor_(interface_manager_, fdb, *this),      // Initialize ArpProcessor with fdb
         icmp_processor_(interface_manager_, *this),     // Initialize IcmpProcessor
         flow_table_(1024),
@@ -161,6 +164,56 @@ public:
         // interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->get_data_length());
     }
 
+    // Method for managers to send control plane frames (raw data version)
+    void send_control_plane_frame(uint32_t egress_port_id, const MacAddress& dst_mac, const MacAddress& src_mac, uint16_t ethertype, const std::vector<uint8_t>& payload) {
+        if (egress_port_id >= num_ports_) {
+            logger_.error("SEND_CTRL_FRAME", "Egress port " + std::to_string(egress_port_id) + " out of range.");
+            return;
+        }
+        if (!interface_manager_.is_port_link_up(egress_port_id)) {
+            logger_.warning("SEND_CTRL_FRAME", "Egress port " + std::to_string(egress_port_id) + " link is down. Dropping control frame.");
+            return;
+        }
+
+        // Allocate PacketBuffer
+        size_t frame_size = sizeof(EthernetHeader) + payload.size();
+        PacketBuffer* pb = buffer_pool.allocate(frame_size);
+        if (!pb) {
+            logger_.error("SEND_CTRL_FRAME", "Failed to allocate PacketBuffer for control frame on port " + std::to_string(egress_port_id));
+            return;
+        }
+
+        // Construct Ethernet frame
+        EthernetHeader eth_hdr_data;
+        eth_hdr_data.dst_mac = dst_mac;
+        eth_hdr_data.src_mac = src_mac;
+        eth_hdr_data.ethertype = htons(ethertype);
+
+        // Copy header and payload to buffer
+        uint8_t* buffer_ptr = pb->get_data_ptr_write();
+        memcpy(buffer_ptr, &eth_hdr_data, sizeof(EthernetHeader));
+        memcpy(buffer_ptr + sizeof(EthernetHeader), payload.data(), payload.size());
+        pb->set_data_length(frame_size);
+
+        // Create a Packet object for QoS and enqueuing (consistent with send_control_plane_packet)
+        Packet pkt(pb); // Packet constructor should increment_ref on pb
+
+        // QoS and Enqueue (similar to send_control_plane_packet)
+        // Control plane packets might get higher priority.
+        uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port_id, true /*is_control_plane*/);
+        qos_manager_.enqueue_packet(pkt, egress_port_id, queue_id);
+
+        logger_.debug("SEND_CTRL_FRAME", "Control frame (EthType: 0x" + logger_.to_hex_string(ethertype) +
+                                       ", Size: " + std::to_string(frame_size) +
+                                       ") enqueued to port " + std::to_string(egress_port_id) +
+                                       " queue " + std::to_string(static_cast<int>(queue_id)));
+        // Note: Actual transmission and TX stats are handled by the QoS dequeuing mechanism or physical layer simulation.
+        // If PacketBuffer was allocated and pkt created, its destructor will handle pb's ref count.
+        // If allocation fails, or queuing fails and pkt is not fully passed on, pb must be released.
+        // qos_manager_.enqueue_packet should ideally take ownership or manage ref count.
+        // If pkt is not enqueued, pb->decrement_ref() would be needed here.
+    }
+
 
     void flood_packet(Packet& pkt, uint32_t ingress_port) {
         logger_.debug("FLOOD", "Flooding packet from ingress port " + std::to_string(ingress_port));
@@ -217,7 +270,18 @@ public:
 
     void start() {
         logger_.info("SWITCH_LIFECYCLE", "Switch starting...");
-        logger_.info("SWITCH_LIFECYCLE", "Switch operational.");
+        // TODO: Implement a proper main loop or periodic execution mechanism.
+        // For now, this is a placeholder. In a real system, you'd have threads
+        // for packet processing, background tasks, and manager timer ticks.
+        // Example:
+        // while (running_) {
+        //   process_packets_from_queues();
+        //   lldp_manager_.handle_timer_tick();
+        //   stp_manager.handle_timer_tick(logger_); // Assuming logger is passed or StpManager has its own
+        //   lacp_manager_.handle_timer_tick();
+        //   std::this_thread::sleep_for(std::chrono::milliseconds(100)); // Adjust tick interval
+        // }
+        logger_.info("SWITCH_LIFECYCLE", "Switch operational. (Note: Background tasks like LLDP/STP/LACP timers are conceptual in this 'start' method).");
     }
 
     // --- Routing Management Methods ---
@@ -302,12 +366,29 @@ public:
         // Check for BPDUs (STP)
         static const uint8_t bpdu_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x00}; // STP/PAUSE
         static const uint8_t lacp_mac_bytes[] = {0x01, 0x80, 0xC2, 0x00, 0x00, 0x02}; // LACP
+        // LLDP_MULTICAST_MAC from lldp_defs.hpp: {0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e};
+        static const uint8_t lldp_mac_bytes[] = {0x01, 0x80, 0xc2, 0x00, 0x00, 0x0e};
+
         MacAddress bpdu_mac(bpdu_mac_bytes);
         MacAddress lacp_slow_mac(lacp_mac_bytes);
+        MacAddress lldp_mac(lldp_mac_bytes);
 
         EthernetHeader* eth_hdr = pkt.ethernet(); // Get Ethernet header to check EtherType and Dest MAC
 
         if (eth_hdr) {
+            // LLDP Check (EtherType 0x88CC or specific LLDP multicast MAC)
+            // Standard LLDP uses EtherType 0x88CC. Some systems might also check dst MAC.
+            // Cisco discovery protocol (CDP) and VLAN Trunking Protocol (VTP) also use 01:00:0c:cc:cc:cc
+            // LLDP uses 01:80:c2:00:00:0e (or :00 or :03)
+            if (ntohs(eth_hdr->ethertype) == LLDP_ETHERTYPE) {
+                // Could also check if eth_hdr->dst_mac == lldp_mac, but EtherType is primary
+                logger_.debug("LLDP_PROCESS", "LLDP frame (EtherType 0x88CC) received on port " + std::to_string(ingress_port_id));
+                lldp_manager_.process_lldp_frame(pkt, ingress_port_id);
+                // LLDP frames are typically consumed by the manager and not forwarded further.
+                // The Packet object's destructor handles buffer ref_count if process_lldp_frame doesn't take ownership.
+                return;
+            }
+
             if (eth_hdr->dst_mac == bpdu_mac) {
                  logger_.debug("STP", "BPDU received on port " + std::to_string(ingress_port_id));
                  stp_manager.process_bpdu(pkt, ingress_port_id, logger_);
