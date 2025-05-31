@@ -1020,168 +1020,6 @@ bool LacpPortInfo::get_partner_state_flag(LacpStateFlag flag) const {
 }
 
 
-// --- LacpManager::run_lacp_rx_machine ---
-void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
-    auto port_info_it = port_lacp_info_.find(port_id);
-    if (port_info_it == port_lacp_info_.end()) {
-        if (logger_) logger_->error("LACP", "RxMachine: Port " + std::to_string(port_id) + " not found in port_lacp_info_.");
-        return;
-    }
-    LacpPortInfo& port_info = port_info_it->second;
-    LacpPortInfo::RxMachineState current_state_for_log = port_info.rx_state; // For logging transition
-
-    // Retrieve associated LagConfig, needed for some decisions (e.g. admin partner values, though not used yet)
-    auto lag_id_opt = get_lag_for_port(port_id);
-    std::optional<LagConfig> lag_config_opt;
-    if(lag_id_opt.has_value()) {
-        lag_config_opt = get_lag_config(lag_id_opt.value());
-    }
-    // If no LAG config, some operations might need defaults or error handling.
-    // For now, assume lag_config_opt will be present if port is LACP enabled.
-
-
-    // Check external conditions once at the beginning
-    // These would ideally be fetched from an InterfaceManager or similar.
-    // For now, using the flags in LacpPortInfo which should be updated by management plane.
-    bool port_physically_enabled = port_info.port_enabled; // Assumed to be updated elsewhere
-    bool lacp_protocol_enabled = port_info.lacp_enabled; // Assumed to be updated elsewhere
-
-
-    switch (port_info.rx_state) {
-        case LacpPortInfo::RxMachineState::INITIALIZE:
-            // This state is typically entered once.
-            // Set partner to passive, long timeout, not agg, not sync, defaulted, expired.
-            port_info.partner_state_val = 0;
-            port_info.set_partner_state_flag(LacpStateFlag::LACP_ACTIVITY, false);
-            port_info.set_partner_state_flag(LacpStateFlag::LACP_TIMEOUT, false); // Long timeout
-            port_info.set_partner_state_flag(LacpStateFlag::AGGREGATION, false);
-            port_info.set_partner_state_flag(LacpStateFlag::SYNCHRONIZATION, false);
-            port_info.set_partner_state_flag(LacpStateFlag::COLLECTING, false);
-            port_info.set_partner_state_flag(LacpStateFlag::DISTRIBUTING, false);
-            port_info.set_partner_state_flag(LacpStateFlag::DEFAULTED, true);
-            port_info.set_partner_state_flag(LacpStateFlag::EXPIRED, true);
-
-            port_info.partner_system_id_val = 0;
-            port_info.partner_port_id_val = 0;
-            port_info.partner_key_val = 0;
-
-            port_info.set_actor_state_flag(LacpStateFlag::EXPIRED, false); // Actor's own state is not expired
-            port_info.rx_state = LacpPortInfo::RxMachineState::PORT_DISABLED;
-            break;
-
-        case LacpPortInfo::RxMachineState::PORT_DISABLED:
-            if (!port_physically_enabled || !lacp_protocol_enabled) {
-                // Remain in this state or go to LACP_DISABLED if appropriate
-                // The standard suggests: port_moved and !lacp_enabled leads to LACP_DISABLED
-                // and begin leads to PORT_DISABLED. If !port_enabled, it should stay here.
-                // For now, if lacp becomes disabled, go to LACP_DISABLED state.
-                if (!lacp_protocol_enabled && port_physically_enabled) { // LACP specifically disabled
-                     port_info.rx_state = LacpPortInfo::RxMachineState::LACP_DISABLED;
-                } else { // Port itself is down, or both down.
-                    // Action: record defaulted partner, actor expired = false
-                    // This seems to be covered by LACP_DISABLED actions as per diagram.
-                    // Let's ensure partner is defaulted.
-                    record_defaulted_partner(port_info); // Resets partner, sets EXPIRED and DEFAULTED
-                    port_info.set_actor_state_flag(LacpStateFlag::EXPIRED, false);
-                    port_info.current_while_timer_ticks = 0; // Stop timer
-                }
-            } else { // Port enabled and LACP enabled
-                port_info.rx_state = LacpPortInfo::RxMachineState::EXPIRED;
-            }
-            break;
-
-        case LacpPortInfo::RxMachineState::LACP_DISABLED:
-            // Actions in LACP_DISABLED state
-            record_defaulted_partner(port_info);
-            port_info.set_actor_state_flag(LacpStateFlag::EXPIRED, false);
-            port_info.current_while_timer_ticks = 0; // Stop timer
-
-            if (port_physically_enabled && lacp_protocol_enabled) { // LACP becomes re-enabled
-                port_info.rx_state = LacpPortInfo::RxMachineState::EXPIRED;
-            }
-            // Else, stay in LACP_DISABLED
-            break;
-
-        case LacpPortInfo::RxMachineState::EXPIRED:
-            port_info.set_partner_state_flag(LacpStateFlag::SYNCHRONIZATION, false);
-            port_info.set_partner_state_flag(LacpStateFlag::EXPIRED, true);
-            port_info.current_while_timer_ticks = 0; // Stop timer (timer already expired to get here or was stopped)
-
-            if (port_info.pdu_received_event) {
-                port_info.pdu_received_event = false; // Consume event
-                update_ntt(port_info);
-                record_pdu_partner_info(port_info); // Uses last_received_pdu_actor_info
-                // Set timer based on LACP_TIMEOUT flag from partner's state (now in port_info.partner_state_val)
-                set_current_while_timer(port_info, port_info.get_partner_state_flag(LacpStateFlag::LACP_TIMEOUT));
-                port_info.set_actor_state_flag(LacpStateFlag::EXPIRED, false); // Our info is current from partner's view
-                port_info.rx_state = LacpPortInfo::RxMachineState::CURRENT;
-            } else if (!port_physically_enabled || !lacp_protocol_enabled) {
-                port_info.rx_state = LacpPortInfo::RxMachineState::PORT_DISABLED;
-            }
-            // Else, stay in EXPIRED
-            break;
-
-        case LacpPortInfo::RxMachineState::DEFAULTED:
-            if (!lag_config_opt.has_value()) {
-                 if(logger_) logger_->error("LACP", "RxMachine: Port " + std::to_string(port_id) + " in DEFAULTED state but no LAG config found.");
-                 record_defaulted_partner(port_info); // Fallback to system defaults
-            } else {
-                 update_default_selected_partner_info(port_info, lag_config_opt.value());
-            }
-            port_info.set_partner_state_flag(LacpStateFlag::EXPIRED, false); // Per state diagram for DEFAULTED
-
-            if (port_info.pdu_received_event) {
-                port_info.pdu_received_event = false; // Consume event
-                update_ntt(port_info);
-                record_pdu_partner_info(port_info);
-                set_current_while_timer(port_info, port_info.get_partner_state_flag(LacpStateFlag::LACP_TIMEOUT));
-                port_info.rx_state = LacpPortInfo::RxMachineState::CURRENT;
-            } else if (!port_physically_enabled || !lacp_protocol_enabled) {
-                port_info.rx_state = LacpPortInfo::RxMachineState::PORT_DISABLED;
-            }
-            // Else, stay in DEFAULTED
-            break;
-
-        case LacpPortInfo::RxMachineState::CURRENT:
-            if (port_info.current_while_timer_expired_event) {
-                port_info.current_while_timer_expired_event = false; // Consume event
-                record_defaulted_partner(port_info); // This sets EXPIRED = true for partner
-                // port_info.set_partner_state_flag(LacpStateFlag::EXPIRED, true); // Redundant due to above
-                port_info.rx_state = LacpPortInfo::RxMachineState::EXPIRED;
-            } else if (port_info.pdu_received_event) {
-                port_info.pdu_received_event = false; // Consume event
-                update_ntt(port_info);
-                // Compare PDU's actor info (stored in last_received_pdu_actor_info) with current partner info
-                if (compare_pdu_with_partner_info(port_info.last_received_pdu_actor_info, port_info)) {
-                    record_pdu_partner_info(port_info); // Updates partner info from last_received_pdu_actor_info
-                }
-                // Reset timer based on (potentially updated) partner's LACP_TIMEOUT state
-                set_current_while_timer(port_info, port_info.get_partner_state_flag(LacpStateFlag::LACP_TIMEOUT));
-            } else if (!port_physically_enabled || !lacp_protocol_enabled) {
-                record_defaulted_partner(port_info); // Transition to PORT_DISABLED implies partner is lost/defaulted
-                port_info.rx_state = LacpPortInfo::RxMachineState::PORT_DISABLED;
-            }
-            // Else, stay in CURRENT
-            break;
-    }
-
-    if (logger_ && port_info.rx_state != current_state_for_log) {
-        logger_->info("LACP", "Port " + std::to_string(port_id) + ": RxMachine transitioned from " +
-                               // TODO: Convert enum to string for logging
-                               std::to_string(static_cast<int>(current_state_for_log)) + " to " +
-                               std::to_string(static_cast<int>(port_info.rx_state)));
-    }
-
-    // Ensure pdu_received_event is consumed if not explicitly handled by a transition
-    // This is important if a state doesn't have a direct transition on pdu_received_event
-    // but the event occurred. However, standard state machine implies events are only consumed on transitions.
-    // For safety, if it's still true and wasn't used, perhaps log or clear.
-    if(port_info.pdu_received_event && logger_){
-        logger_->debug("LACP", "Port " + std::to_string(port_id) + ": pdu_received_event was set but not consumed by RxMachine state " + std::to_string(static_cast<int>(port_info.rx_state)));
-        // port_info.pdu_received_event = false; // Optionally clear if it should always be consumed per call
-    }
-
-}
 // --- Helper function for PeriodicTxMachine ---
 bool LacpManager::partner_is_short_timeout(const LacpPortInfo& port_info) {
     // Partner desires short timeout if their LACP_TIMEOUT flag is set.
@@ -1522,7 +1360,6 @@ void LacpManager::stop_wait_while_timer(LacpPortInfo& port_info){
     port_info.wait_while_timer_expired_event = false; // Clear any pending event
 }
 
-#ifdef DUPLICATED
 // --- LacpManager::run_lacp_mux_machine ---
 void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
     auto port_info_it = port_lacp_info_.find(port_id);
@@ -1531,7 +1368,7 @@ void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
         return;
     }
     LacpPortInfo& port_info = port_info_it->second;
-    MuxMachineState current_mux_state_for_log = port_info.mux_state;
+    LacpPortInfo::MuxMachineState current_mux_state_for_log = port_info.mux_state;
 
     // Update selection status at the beginning of each run for this port
     update_port_selection_status(port_id, port_info);
@@ -1628,7 +1465,5 @@ void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
                                std::to_string(static_cast<int>(port_info.mux_state)));
     }
 }
-
-#endif
 
 } // namespace netflow
