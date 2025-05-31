@@ -207,18 +207,31 @@ void LacpManager::delete_lag(uint32_t lag_id) {
     // ... (Implementation as before) ...
 }
 
+#include <cstdint> // For uint64_t in mac_to_uint64
+
+// Helper function to convert MacAddress to uint64_t for hashing
+uint64_t mac_to_uint64(const netflow::MacAddress& mac) {
+    uint64_t val = 0;
+    for (int i = 0; i < 6; ++i) {
+        val = (val << 8) | mac.bytes[i];
+    }
+    return val;
+}
+
 // Helper function for hashing MAC address
-uint32_t hash_mac(uint64_t mac) {
+uint32_t hash_mac(uint64_t mac_val) {
     // Simple XOR hash for MAC address
     uint32_t hash = 0;
-    hash ^= (mac >> 32) & 0xFFFFFFFF;
-    hash ^= mac & 0xFFFFFFFF;
+    hash ^= (mac_val >> 32) & 0xFFFFFFFF;
+    hash ^= mac_val & 0xFFFFFFFF;
     return hash;
 }
 
 // Helper function for hashing IP address (assuming IPv4 for now)
-uint32_t hash_ip(uint32_t ip) {
-    return ip; // IP addresses are already good hash values
+// For IPv6, a different or extended hashing mechanism would be needed if hashing the full 128-bit address.
+// For simplicity, if IPv6 is encountered, we might hash only a portion or use other packet fields.
+uint32_t hash_ip(uint32_t ip) { // Remains suitable for IPv4 addresses
+    return ip;
 }
 
 // Helper function for hashing L4 port
@@ -246,84 +259,89 @@ uint32_t LacpManager::select_egress_port(uint32_t lag_id, const Packet& pkt) con
 
     // 4. Implement hashing logic
     uint32_t hash_value = 0;
-    const EthernetHeader& eth_header = pkt.get_ethernet_header();
 
-    // Check if packet is IP or ARP to access network/transport headers safely
-    bool is_ip = eth_header.ethertype == ETHERTYPE_IP;
-    // bool is_ipv6 = eth_header.ethertype == ETHERTYPE_IPV6; // Future
-    // bool is_arp = eth_header.ethertype == ETHERTYPE_ARP; // Future, if ARP fields are needed for hashing
-
-    const IpHeader* ip_header = nullptr;
-    if (is_ip && pkt.get_payload().size() >= sizeof(IpHeader)) { // Ensure there's enough data for IP header
-        ip_header = reinterpret_cast<const IpHeader*>(pkt.get_payload().data());
+    const netflow::EthernetHeader* eth_header = pkt.ethernet();
+    if (!eth_header) {
+        if (logger_) logger_->error("LACP", "select_egress_port: Failed to get Ethernet header for LAG " + std::to_string(lag_id));
+        // Fallback: hash based on a simple counter or return first active port if no L2 info
+        // For now, returning 0 as it indicates an issue.
+        return 0;
     }
 
-    const TcpHeader* tcp_header = nullptr;
-    const UdpHeader* udp_header = nullptr;
-    if (ip_header) { // Only try to get L4 headers if IP header is present
-        if (ip_header->protocol == IP_PROTOCOL_TCP && (pkt.get_payload().size() >= (ip_header->ihl * 4) + sizeof(TcpHeader))) {
-            tcp_header = reinterpret_cast<const TcpHeader*>(pkt.get_payload().data() + (ip_header->ihl * 4));
-        } else if (ip_header->protocol == IP_PROTOCOL_UDP && (pkt.get_payload().size() >= (ip_header->ihl * 4) + sizeof(UdpHeader))) {
-            udp_header = reinterpret_cast<const UdpHeader*>(pkt.get_payload().data() + (ip_header->ihl * 4));
-        }
+    const netflow::IPv4Header* ipv4_header = pkt.ipv4(); // Automatically handles VLAN if present
+    const netflow::IPv6Header* ipv6_header = nullptr; // Initialize to nullptr
+    if (!ipv4_header) { // Only check for IPv6 if not IPv4
+        ipv6_header = pkt.ipv6();
     }
 
+    const netflow::TcpHeader* tcp_header = pkt.tcp();
+    const netflow::UdpHeader* udp_header = pkt.udp();
+
+    uint64_t src_mac_val = mac_to_uint64(eth_header->src_mac);
+    uint64_t dst_mac_val = mac_to_uint64(eth_header->dst_mac);
 
     switch (lag_config.hash_mode) {
         case LacpHashMode::SRC_MAC:
-            hash_value = hash_mac(eth_header.src_mac);
+            hash_value = hash_mac(src_mac_val);
             break;
         case LacpHashMode::DST_MAC:
-            hash_value = hash_mac(eth_header.dst_mac);
+            hash_value = hash_mac(dst_mac_val);
             break;
         case LacpHashMode::SRC_DST_MAC:
-            hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac);
+            hash_value = hash_mac(src_mac_val) ^ hash_mac(dst_mac_val);
             break;
         case LacpHashMode::SRC_IP:
-            if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip));
-            else hash_value = hash_mac(eth_header.src_mac); // Fallback for non-IP
+            if (ipv4_header) hash_value = hash_ip(ntohl(ipv4_header->src_ip));
+            // else if (ipv6_header) { /* Add IPv6 src IP hashing if needed */ }
+            else hash_value = hash_mac(src_mac_val); // Fallback
             break;
         case LacpHashMode::DST_IP:
-            if (ip_header) hash_value = hash_ip(ntohl(ip_header->dst_ip));
-            else hash_value = hash_mac(eth_header.dst_mac); // Fallback for non-IP
+            if (ipv4_header) hash_value = hash_ip(ntohl(ipv4_header->dst_ip));
+            // else if (ipv6_header) { /* Add IPv6 dst IP hashing if needed */ }
+            else hash_value = hash_mac(dst_mac_val); // Fallback
             break;
         case LacpHashMode::SRC_DST_IP:
-            if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip)) ^ hash_ip(ntohl(ip_header->dst_ip));
-            else hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac); // Fallback
+            if (ipv4_header) hash_value = hash_ip(ntohl(ipv4_header->src_ip)) ^ hash_ip(ntohl(ipv4_header->dst_ip));
+            // else if (ipv6_header) { /* Add IPv6 src/dst IP hashing */ }
+            else hash_value = hash_mac(src_mac_val) ^ hash_mac(dst_mac_val); // Fallback
             break;
         case LacpHashMode::SRC_PORT:
             if (tcp_header) hash_value = hash_l4_port(ntohs(tcp_header->src_port));
             else if (udp_header) hash_value = hash_l4_port(ntohs(udp_header->src_port));
-            else if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip)); // Fallback to IP
-            else hash_value = hash_mac(eth_header.src_mac); // Fallback to MAC
+            else if (ipv4_header) hash_value = hash_ip(ntohl(ipv4_header->src_ip)); // Fallback
+            // else if (ipv6_header) { /* Fallback for IPv6 */ }
+            else hash_value = hash_mac(src_mac_val); // Fallback
             break;
         case LacpHashMode::DST_PORT:
             if (tcp_header) hash_value = hash_l4_port(ntohs(tcp_header->dst_port));
             else if (udp_header) hash_value = hash_l4_port(ntohs(udp_header->dst_port));
-            else if (ip_header) hash_value = hash_ip(ntohl(ip_header->dst_ip)); // Fallback to IP
-            else hash_value = hash_mac(eth_header.dst_mac); // Fallback to MAC
+            else if (ipv4_header) hash_value = hash_ip(ntohl(ipv4_header->dst_ip)); // Fallback
+            // else if (ipv6_header) { /* Fallback for IPv6 */ }
+            else hash_value = hash_mac(dst_mac_val); // Fallback
             break;
         case LacpHashMode::SRC_DST_PORT:
             if (tcp_header) hash_value = hash_l4_port(ntohs(tcp_header->src_port)) ^ hash_l4_port(ntohs(tcp_header->dst_port));
             else if (udp_header) hash_value = hash_l4_port(ntohs(udp_header->src_port)) ^ hash_l4_port(ntohs(udp_header->dst_port));
-            else if (ip_header) hash_value = hash_ip(ntohl(ip_header->src_ip)) ^ hash_ip(ntohl(ip_header->dst_ip)); // Fallback
-            else hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac); // Fallback
+            else if (ipv4_header) hash_value = hash_ip(ntohl(ipv4_header->src_ip)) ^ hash_ip(ntohl(ipv4_header->dst_ip)); // Fallback
+            // else if (ipv6_header) { /* Fallback for IPv6 */ }
+            else hash_value = hash_mac(src_mac_val) ^ hash_mac(dst_mac_val); // Fallback
             break;
         case LacpHashMode::SRC_DST_IP_L4_PORT: // 5-tuple
-            if (ip_header) {
-                hash_value = hash_ip(ntohl(ip_header->src_ip)) ^ hash_ip(ntohl(ip_header->dst_ip)) ^ static_cast<uint32_t>(ip_header->protocol);
+            if (ipv4_header) {
+                hash_value = hash_ip(ntohl(ipv4_header->src_ip)) ^ hash_ip(ntohl(ipv4_header->dst_ip)) ^ static_cast<uint32_t>(ipv4_header->protocol);
                 if (tcp_header) {
                     hash_value ^= hash_l4_port(ntohs(tcp_header->src_port)) ^ hash_l4_port(ntohs(tcp_header->dst_port));
                 } else if (udp_header) {
                     hash_value ^= hash_l4_port(ntohs(udp_header->src_port)) ^ hash_l4_port(ntohs(udp_header->dst_port));
                 }
-            } else { // Fallback for non-IP
-                 hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac);
+            }
+            // else if (ipv6_header) { /* Full 5-tuple for IPv6 */ }
+            else { // Fallback for non-IP
+                 hash_value = hash_mac(src_mac_val) ^ hash_mac(dst_mac_val);
             }
             break;
         default:
-            // Default to L2 hash if mode is unknown or not implemented
-            hash_value = hash_mac(eth_header.src_mac) ^ hash_mac(eth_header.dst_mac);
+            hash_value = hash_mac(src_mac_val) ^ hash_mac(dst_mac_val);
             if (logger_) logger_->warning("LACP", "select_egress_port: Unknown hash mode " + std::to_string(static_cast<int>(lag_config.hash_mode)) + ", defaulting to SRC_DST_MAC.");
             break;
     }
@@ -333,10 +351,10 @@ uint32_t LacpManager::select_egress_port(uint32_t lag_id, const Packet& pkt) con
     uint32_t selected_port_index = hash_value % active_members.size();
     uint32_t selected_port_id = active_members[selected_port_index];
 
-    // 6. Log the selected port (optional)
-    if (logger_ && logger_->get_level() <= LogLevel::DEBUG) { // Only log if debug level or lower
+    // 6. Log the selected port (simplified logging)
+    if (logger_) {
         logger_->debug("LACP", "select_egress_port: LAG ID " + std::to_string(lag_id) +
-                                ", Hash Mode: " + std::to_string(static_cast<int>(lag_config.hash_mode)) +
+                                // ", Hash Mode: " + std::to_string(static_cast<int>(lag_config.hash_mode)) + // Causing issues if enum not printable
                                 ", Hash Value: " + std::to_string(hash_value) +
                                 ", Selected Port Index: " + std::to_string(selected_port_index) +
                                 ", Selected Port ID: " + std::to_string(selected_port_id) +
