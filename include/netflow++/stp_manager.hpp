@@ -7,12 +7,11 @@
 #include <map>
 #include <optional> // For get_port_state potentially returning optional or a default
 #include "netflow++/logger.hpp"      // For SwitchLogger
-#include "netflow++/packet_buffer.hpp" // For BufferPool in generate_bpdus
+#include "netflow++/buffer_pool.hpp" // For BufferPool in generate_bpdus
 
 // Forward declare Packet if it's only used as a const ref in public API here
 // class Packet;
-// Forward declare BufferPool if it's only used as a ref in public API here
-// class BufferPool;
+// Forward declare BufferPool if it's only used as a ref in public API here // This is now redundant
 
 
 namespace netflow {

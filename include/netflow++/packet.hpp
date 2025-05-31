@@ -115,6 +115,15 @@ struct VlanHeader {
     }
 };
 
+// Definition for LLC Header
+struct LLCHeader {
+    uint8_t dsap;      // Destination Service Access Point
+    uint8_t ssap;      // Source Service Access Point
+    uint8_t control;   // Control field
+    // For STP BPDUs, DSAP and SSAP are often 0x42, Control is 0x03 (UI frame)
+    static constexpr size_t SIZE = 3;
+};
+
 // Placeholder for IPv4 Header
 struct IPv4Header {
     uint8_t version_ihl; // Version (4 bits) + Internet Header Length (4 bits)
