@@ -30,7 +30,7 @@ public:
     BufferPool buffer_pool;
     ForwardingDatabase fdb;
     VlanManager vlan_manager;
-    StpManager stp_manager;
+    // StpManager stp_manager; // Initialized in constructor
     InterfaceManager interface_manager_;
     PacketClassifier packet_classifier_;
 
@@ -44,30 +44,44 @@ public:
     SwitchLogger logger_;
     ConfigManager config_manager_;             // Added member
     ManagementInterface management_interface_; // Added member
+    StpManager stp_manager;
+    // LacpManager lacp_manager_; // Removed redundant declaration
 
-    Switch(uint32_t num_ports) :
+    Switch(uint32_t num_ports, uint64_t switch_mac_address,
+           uint16_t stp_default_priority = 32768, uint16_t lacp_default_priority = 32768) :
         num_ports_(num_ports),
+        stp_manager(num_ports, switch_mac_address, stp_default_priority),
+        lacp_manager_(switch_mac_address, lacp_default_priority),
         flow_table_(1024),
-        logger_(LogLevel::INFO) { // Default log level INFO, can be changed by config or main.cpp
+        logger_(LogLevel::INFO) {
 
-        logger_.info("SWITCH_LIFECYCLE", "Switch class constructing for " + std::to_string(num_ports_) + " ports.");
+        // Convert uint64_t MAC to MacAddress for logging
+        uint8_t temp_mac_bytes[6];
+        temp_mac_bytes[0] = (switch_mac_address >> 40) & 0xFF;
+        temp_mac_bytes[1] = (switch_mac_address >> 32) & 0xFF;
+        temp_mac_bytes[2] = (switch_mac_address >> 24) & 0xFF;
+        temp_mac_bytes[3] = (switch_mac_address >> 16) & 0xFF;
+        temp_mac_bytes[4] = (switch_mac_address >> 8) & 0xFF;
+        temp_mac_bytes[5] = (switch_mac_address >> 0) & 0xFF;
+        MacAddress mac_addr_for_log(temp_mac_bytes);
+
+        logger_.info("SWITCH_LIFECYCLE", "Switch constructing for " + std::to_string(num_ports_) + " ports. MAC: " + logger_.mac_to_string(mac_addr_for_log));
         fdb.set_logger(&logger_);
-        // config_manager_.set_logger(&logger_); // If ConfigManager had a set_logger method
+        // config_manager_.set_logger(&logger_);
 
         logger_.info("CONFIG", "Loading default configuration (default_switch_config.json)...");
         if (config_manager_.load_config("default_switch_config.json")) {
             logger_.info("CONFIG", "Default configuration loaded. Applying now...");
-            config_manager_.apply_config(config_manager_.get_current_config_data(), *this);
+            config_manager_.apply_config(config_manager_.get_current_config_data(), *this); // Reverted to two-argument call
         } else {
             logger_.warning("CONFIG", "Failed to load default_switch_config.json. Using empty/hardcoded defaults.");
         }
 
         logger_.info("SWITCH_INIT", "Initializing per-port defaults (may be overridden by loaded config)...");
+        // STP and LACP managers now initialize their port states internally.
+        // The main loop here should focus on InterfaceManager admin states.
         for (uint32_t i = 0; i < num_ports_; ++i) {
-             if(stp_manager.get_port_state(i) == StpManager::PortState::UNKNOWN) {
-                 stp_manager.set_port_state(i, StpManager::PortState::BLOCKING);
-                 logger_.debug("STP_INIT", "Port " + std::to_string(i) + " STP state set to BLOCKING (default).");
-            }
+            // Example: ensure all ports are admin up by default, link state can be simulated or dynamic
             if (!interface_manager_.get_port_config(i).has_value()) {
                 InterfaceManager::PortConfig default_if_config;
                 default_if_config.admin_up = false;
@@ -138,7 +152,7 @@ public:
                 logger_.debug("LACP", "Flood: LAG ID " + std::to_string(i) + " resolved to physical port " + std::to_string(actual_flood_egress_port));
             }
 
-            StpManager::PortState flood_egress_stp_state = stp_manager.get_port_state(actual_flood_egress_port);
+            StpManager::PortState flood_egress_stp_state = stp_manager.get_port_stp_state(actual_flood_egress_port);
             if (flood_egress_stp_state != StpManager::PortState::FORWARDING) {
                 logger_.debug("FLOOD_SKIP", "Port " + std::to_string(actual_flood_egress_port) + " not in STP forwarding state (" + stp_manager.port_state_to_string(flood_egress_stp_state) + ")");
                 continue;
@@ -221,11 +235,11 @@ public:
 
         if (is_bpdu) {
             logger_.debug("STP", "BPDU received on port " + std::to_string(ingress_port_id));
-            stp_manager.process_bpdu(pkt, ingress_port_id);
+            stp_manager.process_bpdu(pkt, ingress_port_id, logger_); // Added logger_ argument
             return;
         }
 
-        StpManager::PortState current_stp_state = stp_manager.get_port_state(ingress_port_id);
+        StpManager::PortState current_stp_state = stp_manager.get_port_stp_state(ingress_port_id);
         if (current_stp_state == StpManager::PortState::BLOCKING ||
             current_stp_state == StpManager::PortState::LISTENING) {
             logger_.log_packet_drop(pkt, ingress_port_id, "STP state " + stp_manager.port_state_to_string(current_stp_state));
@@ -269,7 +283,7 @@ public:
                     }
                 }
 
-                StpManager::PortState egress_stp_state = stp_manager.get_port_state(final_egress_port);
+                StpManager::PortState egress_stp_state = stp_manager.get_port_stp_state(final_egress_port);
                 if (egress_stp_state != StpManager::PortState::FORWARDING) {
                     logger_.log_packet_drop(pkt, ingress_port_id, "Egress port " + std::to_string(final_egress_port) + " not in STP forwarding state (" + stp_manager.port_state_to_string(egress_stp_state) + ")");
                     interface_manager_._increment_rx_stats(ingress_port_id, pkt.get_buffer()->size, false, true);
