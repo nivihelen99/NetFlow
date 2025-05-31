@@ -309,88 +309,72 @@ public:
     }
 
     TcpHeader* tcp() const {
-        // current_offset_ is expected to be at the start of L3 by ipv4() or ipv6()
-        // We need to know L3 header size to find the start of L4.
-        // So, call ipv4() or ipv6() first, which sets current_offset_ to the start of L4.
-        size_t l3_start_offset = l2_header_size_;
-        size_t l3_header_length = 0;
+        // Ensure l2_header_size_ is up-to-date by calling ethernet()
+        // This is okay because ethernet() is const and idempotent for this purpose.
+        ethernet(); // Sets l2_header_size_ correctly, considering VLAN
 
-        IPv4Header* ip4 = get_header<IPv4Header>(l3_start_offset); // Try IPv4 first
-        if (ip4 && ntohs(get_header<EthernetHeader>(0)->ethertype) == 0x0800) { // Check ethertype for IPv4
-             if (ip4->protocol == 6) { // TCP_PROTOCOL
-                l3_header_length = ip4->get_header_length();
-                current_offset_ = l3_start_offset + l3_header_length;
-                TcpHeader* tcp_head = get_header<TcpHeader>(current_offset_);
-                if (tcp_head) current_offset_ += tcp_head->get_header_length();
+        uint16_t effective_ethertype = 0;
+        auto* eth_hdr_check = get_header<EthernetHeader>(0);
+        if (!eth_hdr_check) return nullptr; // No Ethernet header, cannot proceed
+
+        effective_ethertype = ntohs(eth_hdr_check->ethertype);
+        if (effective_ethertype == 0x8100) { // VLAN_ETHERTYPE
+            VlanHeader* vlan_hdr_check = get_header<VlanHeader>(EthernetHeader::SIZE);
+            if (!vlan_hdr_check) return nullptr; // Should not happen if ethertype is VLAN
+            effective_ethertype = ntohs(vlan_hdr_check->ethertype);
+        }
+
+        if (effective_ethertype == 0x0800) { // IPv4
+            IPv4Header* ip4 = get_header<IPv4Header>(l2_header_size_);
+            if (ip4 && ip4->protocol == 6) { // TCP_PROTOCOL
+                size_t l4_offset = l2_header_size_ + ip4->get_header_length();
+                TcpHeader* tcp_head = get_header<TcpHeader>(l4_offset);
+                // if (tcp_head) current_offset_ = l4_offset + tcp_head->get_header_length(); // Manage current_offset_ if needed
                 return tcp_head;
             }
-        } else {
-            IPv6Header* ip6 = get_header<IPv6Header>(l3_start_offset); // Try IPv6
-            // Need to check ethertype for IPv6 (via direct eth or vlan)
-            uint16_t effective_ethertype = 0;
-            auto* eth_check = get_header<EthernetHeader>(0);
-            if (eth_check) {
-                effective_ethertype = ntohs(eth_check->ethertype);
-                if (effective_ethertype == 0x8100) {
-                    auto* vlan_check = get_header<VlanHeader>(EthernetHeader::SIZE);
-                    if (vlan_check) effective_ethertype = ntohs(vlan_check->ethertype);
-                    else effective_ethertype = 0; // Safety
-                }
-            }
-
-            if (ip6 && effective_ethertype == 0x86DD) { // Check ethertype for IPv6
-                if (ip6->next_header == 6) { // TCP_PROTOCOL
-                    l3_header_length = IPv6Header::SIZE;
-                    current_offset_ = l3_start_offset + l3_header_length;
-                    TcpHeader* tcp_head = get_header<TcpHeader>(current_offset_);
-                    if (tcp_head) current_offset_ += tcp_head->get_header_length();
-                    return tcp_head;
-                }
+        } else if (effective_ethertype == 0x86DD) { // IPv6
+            IPv6Header* ip6 = get_header<IPv6Header>(l2_header_size_);
+            if (ip6 && ip6->next_header == 6) { // TCP_PROTOCOL
+                size_t l4_offset = l2_header_size_ + IPv6Header::SIZE; // IPv6 header size is fixed
+                TcpHeader* tcp_head = get_header<TcpHeader>(l4_offset);
+                // if (tcp_head) current_offset_ = l4_offset + tcp_head->get_header_length(); // Manage current_offset_
+                return tcp_head;
             }
         }
-        // Restore offset if not TCP or if L3 header was not found correctly
-        // current_offset_ = l3_start_offset; // This would be incorrect as ipv4/ipv6 might have advanced it.
-        // It's better to ensure current_offset_ is only advanced upon successful header retrieval.
         return nullptr;
     }
 
     UdpHeader* udp() const {
-        size_t l3_start_offset = l2_header_size_;
-        size_t l3_header_length = 0;
+        ethernet(); // Sets l2_header_size_ correctly
 
-        IPv4Header* ip4 = get_header<IPv4Header>(l3_start_offset); // Try IPv4 first
-        if (ip4 && ntohs(get_header<EthernetHeader>(0)->ethertype) == 0x0800) { // Check ethertype for IPv4
-            if (ip4->protocol == 17) { // UDP_PROTOCOL
-                l3_header_length = ip4->get_header_length();
-                current_offset_ = l3_start_offset + l3_header_length;
-                UdpHeader* udp_head = get_header<UdpHeader>(current_offset_);
-                if (udp_head) current_offset_ += UdpHeader::SIZE;
+        uint16_t effective_ethertype = 0;
+        auto* eth_hdr_check = get_header<EthernetHeader>(0);
+        if (!eth_hdr_check) return nullptr;
+
+        effective_ethertype = ntohs(eth_hdr_check->ethertype);
+        if (effective_ethertype == 0x8100) { // VLAN_ETHERTYPE
+            VlanHeader* vlan_hdr_check = get_header<VlanHeader>(EthernetHeader::SIZE);
+            if (!vlan_hdr_check) return nullptr;
+            effective_ethertype = ntohs(vlan_hdr_check->ethertype);
+        }
+
+        if (effective_ethertype == 0x0800) { // IPv4
+            IPv4Header* ip4 = get_header<IPv4Header>(l2_header_size_);
+            if (ip4 && ip4->protocol == 17) { // UDP_PROTOCOL
+                size_t l4_offset = l2_header_size_ + ip4->get_header_length();
+                UdpHeader* udp_head = get_header<UdpHeader>(l4_offset);
+                // if (udp_head) current_offset_ = l4_offset + UdpHeader::SIZE; // Manage current_offset_
                 return udp_head;
             }
-        } else {
-            IPv6Header* ip6 = get_header<IPv6Header>(l3_start_offset); // Try IPv6
-            uint16_t effective_ethertype = 0;
-            auto* eth_check = get_header<EthernetHeader>(0);
-            if (eth_check) {
-                effective_ethertype = ntohs(eth_check->ethertype);
-                if (effective_ethertype == 0x8100) { // VLAN
-                    auto* vlan_check = get_header<VlanHeader>(EthernetHeader::SIZE);
-                    if (vlan_check) effective_ethertype = ntohs(vlan_check->ethertype);
-                     else effective_ethertype = 0; // Safety
-                }
-            }
-
-            if (ip6 && effective_ethertype == 0x86DD) { // Check ethertype for IPv6
-                if (ip6->next_header == 17) { // UDP_PROTOCOL
-                    l3_header_length = IPv6Header::SIZE;
-                    current_offset_ = l3_start_offset + l3_header_length;
-                    UdpHeader* udp_head = get_header<UdpHeader>(current_offset_);
-                    if (udp_head) current_offset_ += UdpHeader::SIZE;
-                    return udp_head;
-                }
+        } else if (effective_ethertype == 0x86DD) { // IPv6
+            IPv6Header* ip6 = get_header<IPv6Header>(l2_header_size_);
+            if (ip6 && ip6->next_header == 17) { // UDP_PROTOCOL
+                size_t l4_offset = l2_header_size_ + IPv6Header::SIZE;
+                UdpHeader* udp_head = get_header<UdpHeader>(l4_offset);
+                // if (udp_head) current_offset_ = l4_offset + UdpHeader::SIZE; // Manage current_offset_
+                return udp_head;
             }
         }
-        // current_offset_ = l3_start_offset; // Similar to TCP, avoid incorrect reset.
         return nullptr;
     }
 

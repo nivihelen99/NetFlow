@@ -58,8 +58,10 @@ install(DIRECTORY include/netflow++ DESTINATION include)
 # --- Optional: Testing (using CTest) ---
 # CTest should only be enabled and tests added if BUILD_EXAMPLES is ON,
 # or if there are other tests (e.g. library unit tests)
+# Ensure BUILD_EXAMPLES is ON or make enable_testing() unconditional
+enable_testing()
+
 if(BUILD_EXAMPLES)
-    enable_testing()
     add_test(NAME ExampleTest1 COMMAND phase1_packet_usage)
     add_test(NAME ExampleTest2 COMMAND phase2_l2_parsing)
     add_test(NAME ExampleTest3 COMMAND phase3_fdb_usage)
@@ -67,6 +69,16 @@ if(BUILD_EXAMPLES)
     # (These are very basic tests, real tests would be in the 'tests' directory
     #  and use a testing framework like GTest or Catch2)
 endif()
+
+# --- Add GTest using FetchContent ---
+include(FetchContent)
+FetchContent_Declare(
+  googletest
+  URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+)
+# For Windows: Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
 
 # --- Add subdirectory for src files ---
 # This must be done before defining targets (like examples) that depend on libraries built in src.
@@ -82,7 +94,7 @@ install(TARGETS netflow_app DESTINATION bin) # Optional: install the app
 
 
 # --- Optional: Add subdirectory for tests ---
-# add_subdirectory(tests)
+add_subdirectory(tests)
 
 # --- Optional: Add subdirectory for benchmarks ---
 # add_subdirectory(benchmarks)

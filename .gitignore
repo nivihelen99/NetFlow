@@ -1,0 +1,21 @@
+# Ignore build artifacts
+build/
+
+# Ignore CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Ignore compiled executables and libraries if they are in the root or specific folders not covered by build/
+*.exe
+*.so
+*.dylib
+*.dll
+
+# Ignore Visual Studio Code specific files
+.vscode/
+
+# Ignore other common files
+*.log
+*.tmp
+*.swp
