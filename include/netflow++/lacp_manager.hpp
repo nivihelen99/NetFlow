@@ -10,69 +10,11 @@
 #include <iostream>  // For placeholder logging
 
 #include "packet.hpp" // For Packet class, used in select_egress_port and process_lacpdu
-#include "netflow++/logger.hpp" // For SwitchLogger, if used in future methods
 
 // Forward declare PacketClassifier if its FlowKey might be used directly for hashing inspiration
 // namespace netflow { class PacketClassifier; }
 
 namespace netflow {
-
-// LACP Constants (already present from previous merge, ensure they are kept if this block is fully replaced)
-namespace LacpDefaults {
-    const uint8_t LACP_SUBTYPE = 0x01;
-    const uint8_t LACP_VERSION = 0x01;
-    const uint64_t LACP_MULTICAST_MAC = 0x0180C2000002ULL;
-    const uint16_t LACP_ETHERTYPE = 0x8809;
-}
-
-// LacpStateFlag enum (already present from previous merge)
-enum LacpStateFlag : uint8_t {
-    LACP_ACTIVITY     = 0x01,
-    LACP_TIMEOUT      = 0x02,
-    AGGREGATION       = 0x04,
-    SYNCHRONIZATION   = 0x08,
-    COLLECTING        = 0x10,
-    DISTRIBUTING      = 0x20,
-    DEFAULTED         = 0x40,
-    EXPIRED           = 0x80
-};
-
-// Lacpdu struct (already present from previous merge)
-struct Lacpdu {
-    uint8_t subtype;
-    uint8_t version_number;
-    uint8_t tlv_type_actor;
-    uint8_t actor_info_length;
-    uint16_t actor_system_priority;
-    uint8_t actor_system_mac[6];
-    uint16_t actor_key;
-    uint16_t actor_port_priority;
-    uint16_t actor_port_number;
-    uint8_t actor_state;
-    uint8_t reserved_actor[3];
-    uint8_t tlv_type_partner;
-    uint8_t partner_info_length;
-    uint16_t partner_system_priority;
-    uint8_t partner_system_mac[6];
-    uint16_t partner_key;
-    uint16_t partner_port_priority;
-    uint16_t partner_port_number;
-    uint8_t partner_state;
-    uint8_t reserved_partner[3];
-    uint8_t tlv_type_collector;
-    uint8_t collector_info_length;
-    uint16_t collector_max_delay;
-    uint8_t reserved_collector[12];
-    uint8_t tlv_type_terminator;
-    uint8_t terminator_length;
-    uint8_t reserved_terminator[50];
-
-    Lacpdu(); // Assumes default constructor definition exists or will be added
-    uint64_t get_actor_system_id() const;
-    void set_actor_system_id(uint64_t system_id);
-};
-const size_t LACPDU_MIN_SIZE = 60;
-
 
 enum class LacpHashMode {
     SRC_MAC,
@@ -91,51 +33,24 @@ struct LagConfig {
     uint32_t lag_id = 0; // Unique identifier for the Link Aggregation Group
     std::vector<uint32_t> member_ports; // List of physical port IDs in this LAG
     LacpHashMode hash_mode = LacpHashMode::SRC_DST_IP_L4_PORT; // Hashing mode for load balancing
-    bool active_mode = true;
-    uint16_t lacp_rate = 1;
-    uint16_t actor_admin_key = 0;
+    bool active_mode = true;  // LACP mode: true for Active, false for Passive
+    // Other LACP parameters could be added here:
+    // uint16_t system_priority = 32768;
+    // MacAddress system_id_mac; // System's base MAC for LACP
+    // std::map<uint32_t, uint16_t> port_priorities; // port_id -> LACP port priority
 
     LagConfig() = default;
 };
 
-// LacpPortInfo struct (already present from previous merge)
-struct LacpPortInfo {
-    uint32_t port_id_physical;
-    uint64_t actor_system_id_val = 0;
-    uint16_t actor_port_id_val = 0;
-    uint16_t actor_key_val = 0;
-    uint8_t actor_state_val = 0;
-    uint64_t partner_system_id_val = 0;
-    uint16_t partner_port_id_val = 0;
-    uint16_t partner_key_val = 0;
-    uint8_t partner_state_val = 0;
-    bool is_active_member_of_lag = false;
-    uint32_t current_aggregator_id = 0;
-    uint16_t current_while_timer_ticks = 0;
-    uint16_t short_timeout_timer_ticks = 0;
-    uint16_t long_timeout_timer_ticks = 0;
-    enum class MuxMachineState { DETACHED, WAITING, ATTACHED, COLLECTING_DISTRIBUTING };
-    MuxMachineState mux_state = MuxMachineState::DETACHED;
-    enum class RxMachineState { INITIALIZE, PORT_DISABLED, LACP_DISABLED, EXPIRED, DEFAULTED, CURRENT };
-    RxMachineState rx_state = RxMachineState::INITIALIZE;
-    enum class PeriodicTxState { NO_PERIODIC, FAST_PERIODIC, SLOW_PERIODIC, PERIODIC_TX };
-    PeriodicTxState periodic_tx_state = PeriodicTxState::NO_PERIODIC;
-    uint16_t port_priority_val = 128;
-
-    LacpPortInfo(uint32_t phys_id = 0);
-    void set_actor_state_flag(LacpStateFlag flag, bool set);
-    bool get_actor_state_flag(LacpStateFlag flag) const;
-};
-
-
 class LacpManager {
 public:
-    // Constructor needs switch's base MAC and system priority for LACP System ID
-    LacpManager(uint64_t switch_base_mac, uint16_t system_priority = 32768);
+    LacpManager() = default;
 
     // Creates a new Link Aggregation Group (LAG).
-    bool create_lag(LagConfig& config) { // Pass by non-const ref to update its key if needed
-        if (config.lag_id == 0) {
+    // Returns true if successful, false if LAG ID already exists.
+    bool create_lag(const LagConfig& config) {
+        if (config.lag_id == 0) { // 0 might be an invalid/reserved LAG ID
+            // std::cerr << "Error: LAG ID 0 is invalid." << std::endl;
             return false;
         }
         if (lags_.count(config.lag_id)) {
@@ -320,13 +235,11 @@ public:
     }
 
 private:
-    uint64_t switch_mac_address_; // Base MAC for the switch
-    uint16_t lacp_system_priority_; // LACP system priority for the switch
-    uint64_t actor_system_id_;      // Combined system_priority + switch_mac_address
+    std::map<uint32_t, LagConfig> lags_; // lag_id -> LagConfig
+    std::map<uint32_t, uint32_t> port_to_lag_map_; // physical_port_id -> lag_id
 
-    std::map<uint32_t, LagConfig> lags_;
-    std::map<uint32_t, uint32_t> port_to_lag_map_;
-    std::map<uint32_t, LacpPortInfo> port_lacp_info_; // Stores LACP state per physical port
+    // For a more robust round-robin in select_egress_port (if it were non-const):
+    // mutable std::map<uint32_t, size_t> current_selection_index_;
 };
 
 } // namespace netflow
