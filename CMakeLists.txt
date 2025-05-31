@@ -42,8 +42,12 @@ if(BUILD_EXAMPLES)
     add_executable(phase5_l3_forwarding examples/phase5_l3_forwarding.cpp)
     target_link_libraries(phase5_l3_forwarding PRIVATE netflow_switching_lib) # Assuming switching_lib is enough
 
+    # Add the executable target for the phase6 example
+    add_executable(phase6_cli_usage examples/phase6_cli_usage.cpp)
+    target_link_libraries(phase6_cli_usage PRIVATE netflow_switching_lib)
+
     # --- Optional: Installation for examples (if BUILD_EXAMPLES is ON) ---
-    install(TARGETS phase1_packet_usage phase2_l2_parsing phase3_fdb_usage phase4_interface_vlan_config phase5_l3_forwarding DESTINATION bin)
+    install(TARGETS phase1_packet_usage phase2_l2_parsing phase3_fdb_usage phase4_interface_vlan_config phase5_l3_forwarding phase6_cli_usage DESTINATION bin)
 
 else()
     message(STATUS "Skipping build of examples.")
