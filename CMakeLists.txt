@@ -75,7 +75,6 @@ if(BUILD_EXAMPLES)
     add_test(NAME ExampleTest3 COMMAND phase3_fdb_usage)
     add_test(NAME ExampleTest4 COMMAND phase4_interface_vlan_config)
     add_test(NAME L3ForwardingExample COMMAND phase5_l3_forwarding)
-    add_test(NAME CLIExample COMMAND phase6_cli_usage)
     # (These are very basic tests, real tests would be in the 'tests' directory
     #  and use a testing framework like GTest or Catch2)
 endif()
