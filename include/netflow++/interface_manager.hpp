@@ -73,7 +73,7 @@ public:
     // Simulates a port's link going down and invokes registered callbacks.
     void simulate_port_link_down(uint32_t port_id);
 
-protected: // Changed from private for consistency with typical naming for such methods if they were to be accessed by derived classes, though not strictly necessary here.
+public: // Changed from protected to public
     // Helper to update RX stats (example, would be called by data plane)
     void _increment_rx_stats(uint32_t port_id, uint64_t bytes, bool is_error = false, bool is_drop = false);
 
