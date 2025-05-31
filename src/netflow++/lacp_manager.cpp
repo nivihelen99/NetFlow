@@ -498,7 +498,7 @@ std::vector<Packet> LacpManager::generate_lacpdus(BufferPool& buffer_pool) {
             // LACPDU_MIN_SIZE is a reasonable approximation, though actual size could be larger
             // if all reserved fields were used. The struct size is fixed though.
             size_t buffer_size = EthernetHeader::SIZE + sizeof(Lacpdu);
-            PacketBuffer* pb = buffer_pool.acquire_buffer(buffer_size);
+            PacketBuffer* pb = buffer_pool.allocate_buffer(buffer_size);
             if (!pb) {
                 if (logger_) logger_->error("LACP", "Failed to allocate buffer for LACPDU for port " + std::to_string(port_id));
                 continue; // Skip this PDU if no buffer
@@ -608,7 +608,7 @@ void LacpManager::run_lacp_timers_and_statemachines() {
         uint32_t port_id = it->first;
         LacpPortInfo& port_info = it->second;
 
-        if (logger_) logger_->trace("LACP", "Processing timers and SM for port " + std::to_string(port_id));
+        // if (logger_) logger_->trace("LACP", "Processing timers and SM for port " + std::to_string(port_id));
 
         // --- Timer Management ---
         // Current While Timer (Rx Machine)
@@ -775,7 +775,7 @@ void LacpManager::run_lacp_rx_machine(uint32_t port_id) {
         return;
     }
     LacpPortInfo& port_info = port_info_it->second;
-    RxMachineState current_state_for_log = port_info.rx_state; // For logging transition
+    LacpPortInfo::RxMachineState current_state_for_log = port_info.rx_state; // For logging transition
 
     // Retrieve associated LagConfig, needed for some decisions (e.g. admin partner values, though not used yet)
     auto lag_id_opt = get_lag_for_port(port_id);
@@ -1028,7 +1028,7 @@ void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
         return;
     }
     LacpPortInfo& port_info = port_info_it->second;
-    RxMachineState current_state_for_log = port_info.rx_state; // For logging transition
+    LacpPortInfo::RxMachineState current_state_for_log = port_info.rx_state; // For logging transition
 
     // Retrieve associated LagConfig, needed for some decisions (e.g. admin partner values, though not used yet)
     auto lag_id_opt = get_lag_for_port(port_id);
@@ -1207,7 +1207,7 @@ void LacpManager::run_lacp_periodic_tx_machine(uint32_t port_id) {
         return;
     }
     LacpPortInfo& port_info = port_info_it->second;
-    PeriodicTxState current_tx_state_for_log = port_info.periodic_tx_state;
+    LacpPortInfo::PeriodicTxState current_tx_state_for_log = port_info.periodic_tx_state;
 
     // Actions executed at the beginning of each state or on transition
     // Helper lambdas for starting/stopping timers might be cleaner if complex,
@@ -1522,7 +1522,7 @@ void LacpManager::stop_wait_while_timer(LacpPortInfo& port_info){
     port_info.wait_while_timer_expired_event = false; // Clear any pending event
 }
 
-
+#ifdef DUPLICATED
 // --- LacpManager::run_lacp_mux_machine ---
 void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
     auto port_info_it = port_lacp_info_.find(port_id);
@@ -1629,5 +1629,6 @@ void LacpManager::run_lacp_mux_machine(uint32_t port_id) {
     }
 }
 
+#endif
 
 } // namespace netflow
