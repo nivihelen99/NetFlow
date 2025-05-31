@@ -69,6 +69,7 @@ NetFlow++ adopts a component-based architecture, where distinct networking funct
     *   `flush_all()`: Clears the entire `entries_` vector.
 *   **Entry Retrieval:**
     *   `get_all_entries()`: Returns a const reference to the internal `entries_` vector, allowing external components to view the FDB state.
+    *   `remove_entry(mac, vlan_id)`: Finds and removes an FDB entry (static or dynamic) matching MAC and VLAN ID. Returns `true` if an entry was removed.
 
 ### 3.4. `VlanManager`
 
@@ -120,6 +121,10 @@ NetFlow++ adopts a component-based architecture, where distinct networking funct
     *   Processes received BPDUs: Compares them with current port/bridge information to update STP parameters, elect the Root Bridge, and determine port roles (Root Port, Designated Port, Blocking Port).
     *   Handles Topology Change Notification (TCN) BPDUs.
 *   **Timers:** Manages STP timers (Hello Time, Max Age, Forward Delay).
+*   **Configuration:**
+    *   `set_bridge_priority_and_reinit(priority)`: Sets the global bridge priority.
+    *   `set_port_path_cost(port_id, cost)`: Sets the STP path cost for a specific port.
+    *   `set_port_priority(port_id, priority)`: Sets the STP priority for a specific port.
 
 ### 5.2. `LacpManager`
 
@@ -128,6 +133,11 @@ NetFlow++ adopts a component-based architecture, where distinct networking funct
     *   Sends LACPDU packets containing Actor and Partner information (system ID, port priority, operational key, state flags).
     *   Processes received LACPDUs to synchronize state with link partners, select active member ports based on port priorities and consistent configurations.
 *   **Egress Port Selection:** Implements a hash function (based on configured L2/L3/L4 criteria) to select a physical member port for egress traffic destined for a LAG, ensuring load distribution.
+*   **Configuration:**
+    *   `set_actor_system_priority(priority)`: Sets the global LACP system priority.
+    *   `set_port_lacp_priority(port_id, priority)`: Sets the LACP priority for a specific port.
+    *   `create_lag(config)`: Creates a new LAG.
+    *   `configure_lag_setting(lag_id, modifier_fn)`: Modifies existing LAG settings (e.g., mode, rate).
 
 ### 5.3. `QosManager` (Conceptual)
 
@@ -162,7 +172,7 @@ NetFlow++ adopts a component-based architecture, where distinct networking funct
 *   **Registration:** Components (FDB, InterfaceManager, etc.) register their manageable attributes or callable functions with the ManagementInterface.
 *   **OID Mapping:** For SNMP-like access, it would map registered attributes to unique OIDs.
 *   **Endpoint Handling:** For REST APIs, it would map HTTP requests (e.g., GET /fdb/entries) to calls on the registered components.
-*   **CLI Dispatch:** For a CLI, it would parse commands and dispatch them to registered command handlers in the respective components.
+*   **CLI Dispatch:** For a CLI, it would parse commands and dispatch them to registered command handlers in the respective components. This is the primary focus of the current CLI implementation within `ManagementService`.
 
 ## 7. Data Flow (Example: L2 Forwarding)
 
@@ -303,3 +313,381 @@ The switch itself generates and processes certain L3 control plane packets using
         *   ICMP Header: Type and Code as specified (e.g., Type 11/Code 0 for Time Exceeded, Type 3/Code 0 for Net Unreachable, Type 3/Code 1 for Host Unreachable). Identifier and Sequence Number are zeroed.
         *   ICMP Payload: Includes the full IP header of the `original_packet` plus the first 8 bytes of the `original_packet`'s L4 payload.
     *   Sending: The ICMP error packet is sent via `Switch::send_control_plane_packet(icmp_error_packet, egress_port_for_error)`.
+
+## 9. Command Line Interface (CLI)
+
+### 9.1. CLI Usage Mechanism
+
+The Command Line Interface (CLI) provides a text-based mechanism for users to interact with and manage the NetFlow++ switch. It is facilitated by the `ManagementInterface` and `ManagementService` classes.
+
+1.  **Command Registration:**
+    *   The `ManagementService` instance, during its initialization (specifically within `register_cli_commands()`), registers various command strings (e.g., "show", "interface", "mac") with the `ManagementInterface`.
+    *   Each registered command is associated with a handler lambda function. This lambda captures `this` (pointing to the `ManagementService` instance) to access underlying managers (`InterfaceManager`, `VlanManager`, `FdbManager`, `StpManager`, `LacpManager`, `RoutingManager`).
+2.  **Input Processing:**
+    *   The main application loop (e.g., in `main.cpp`) reads a line of text from the user (e.g., `std::cin`).
+    *   The input line is passed to `ManagementInterface::handle_cli_command(const std::string& line)`.
+3.  **Command Parsing & Dispatch (`ManagementInterface`):**
+    *   `ManagementInterface` parses the input line into a command token and a vector of argument tokens. For example, "show interface 1 stats" becomes command "show" and arguments {"interface", "1", "stats"}.
+    *   It then looks up the primary command token (e.g., "show") in its map of registered command handlers.
+    *   If a handler is found, it's invoked with the vector of arguments.
+4.  **Command Execution (`ManagementService` lambda):**
+    *   The invoked lambda within `ManagementService` receives the arguments.
+    *   It performs further parsing of these arguments to determine the specific sub-commands and parameters.
+    *   It interacts with the appropriate manager components (`InterfaceManager`, `FdbManager`, etc.) to retrieve data (for `show` commands) or apply configurations (for configuration commands).
+    *   It constructs a response string (output or error message).
+5.  **Output Display:**
+    *   The string returned by the handler is then printed to the user's console (e.g., `std::cout`).
+
+**Example `main.cpp` Interaction Loop:**
+```cpp
+// Conceptual main.cpp
+#include "netflow++/management_interface.hpp"
+#include "netflow++/management_service.hpp"
+// ... other necessary includes for managers ...
+#include <iostream>
+#include <string>
+#include <vector>
+
+int main() {
+    // Initialization of managers (InterfaceManager, VlanManager, FdbManager, StpManager, LacpManager, RoutingManager)
+    // For example:
+    netflow::InterfaceManager im;
+    netflow::VlanManager vm;
+    netflow::ForwardingDatabase fdb;
+    // StpManager constructor might need parameters like number of ports, switch MAC, priority
+    // LacpManager constructor might need switch MAC, system priority
+    // For simplicity, assume they are default constructible or have params provided:
+    uint32_t num_ports = 32; // Example
+    uint64_t switch_mac = 0x001122334455; // Example
+    uint16_t default_stp_priority = 32768;
+    uint16_t default_lacp_priority = 32768;
+
+    netflow::StpManager stp(num_ports, switch_mac, default_stp_priority);
+    netflow::LacpManager lacp(switch_mac, default_lacp_priority);
+    netflow::RoutingManager rm(im); // Assuming RoutingManager needs InterfaceManager
+
+    netflow::ManagementInterface mi;
+    netflow::ManagementService ms(rm, im, mi, vm, fdb, stp, lacp);
+    ms.register_cli_commands(); // ManagementService registers its commands with ManagementInterface
+
+    std::string line;
+    std::cout << "NetFlow++ CLI. Type 'help' for a list of commands.\n";
+    while (true) {
+        std::cout << "> ";
+        if (!std::getline(std::cin, line)) {
+            break; // EOF or error
+        }
+        if (line == "exit" || line == "quit") {
+            break;
+        }
+        if (line.empty()) {
+            continue;
+        }
+
+        std::string output = mi.handle_cli_command(line);
+        std::cout << output << std::endl;
+    }
+    return 0;
+}
+```
+
+### 9.2. Implemented CLI Commands
+
+This section details the CLI commands available through the `ManagementService`.
+
+#### 9.2.1. Global Commands
+
+*   **`help`**
+    *   **Syntax:** `help`
+    *   **Description:** Displays a summary of available commands and their basic usage.
+    *   **Example:**
+        ```
+        > help
+        Available commands:
+          show <feature> [options]        : Display system information.
+        ... (etc.) ...
+        ```
+
+*   **`spanning-tree priority <priority>`**
+    *   **Syntax:** `spanning-tree priority <0-61440>`
+    *   **Description:** Sets the global bridge priority for Spanning Tree Protocol. The priority must be a multiple of 4096.
+    *   **Example:**
+        ```
+        > spanning-tree priority 4096
+        Spanning-tree bridge priority set to 4096.
+        ```
+
+*   **`lacp system-priority <priority>`**
+    *   **Syntax:** `lacp system-priority <0-65535>`
+    *   **Description:** Sets the global system priority for LACP.
+    *   **Example:**
+        ```
+        > lacp system-priority 30000
+        LACP system priority set to 30000.
+        ```
+
+#### 9.2.2. `show` Commands
+
+The `show` command is used to display system information.
+
+*   **`show interface [<interface_id>] [stats]`**
+    *   **Syntax:**
+        *   `show interface`
+        *   `show interface <interface_id>`
+        *   `show interface stats`
+        *   `show interface <interface_id> stats`
+    *   **Description:** Displays information about network interfaces.
+        *   Without arguments, shows details for all interfaces.
+        *   With `<interface_id>`, shows details for the specified interface.
+        *   With `stats`, shows only statistics (for all or a specific interface).
+    *   **Example:**
+        ```
+        > show interface 1
+        Interface 1:
+          Admin status: Up
+          Link status: Up
+          MTU: 1500
+          ... (etc.) ...
+        > show interface 1 stats
+        Interface 1:
+          Stats:
+            RX Packets: 1024, Bytes: 123456
+            ... (etc.) ...
+        ```
+
+*   **`show vlan [<vlan_id>]`**
+    *   **Syntax:**
+        *   `show vlan`
+        *   `show vlan <vlan_id>`
+    *   **Description:** Displays VLAN information and port membership.
+        *   Without arguments, lists all configured VLANs and their member ports with roles (access, trunk native, trunk allowed).
+        *   With `<vlan_id>`, shows port membership for the specified VLAN.
+    *   **Example:**
+        ```
+        > show vlan 10
+        VLAN 10:
+          Interface 1 (trunk, allowed)
+          Interface 2 (access)
+        ```
+
+*   **`show mac address-table [vlan <v_id>] [interface <p_id>] [mac <m_addr>] [type <static|dynamic>]`**
+    *   **Syntax:** `show mac address-table [vlan <vlan_id>] [interface <interface_id>] [mac <mac_address>] [type <static|dynamic>]`
+    *   **Description:** Displays MAC address table (FDB) entries. Output can be filtered by VLAN, interface, MAC address, or entry type.
+    *   **Output Format:**
+        ```
+        VLAN  MAC Address        Type    Ports
+        ----  -----------------  ------  -----
+        10    00:11:22:33:44:55  Dynamic Gi0/1
+        ```
+    *   **Example:**
+        ```
+        > show mac address-table vlan 10 type static
+        ```
+
+*   **`show spanning-tree [interface <interface_id>] [detail]`**
+    *   **Syntax:** `show spanning-tree [interface <interface_id>] [detail]`
+    *   **Description:** Displays Spanning Tree Protocol (STP) status.
+        *   Shows global bridge information (ID, Root ID, timers).
+        *   Lists port information (Role, State, Cost, Priority).
+        *   If `interface <interface_id>` is specified, shows information for that port only.
+        *   The `detail` keyword provides more verbose output for each port.
+    *   **Example:**
+        ```
+        > show spanning-tree
+        Bridge Information:
+          Bridge ID: 8000.001122334455
+          ...
+        Port Information:
+        Interface   Role        State       Cost    Priority
+        ------------------------------------------------------
+        Gi0/1       ROOT        FORWARDING  19      128
+        ...
+        ```
+
+*   **`show lacp [<lag_id>] [internal]`**
+    *   **Syntax:** `show lacp [<lag_id>] [internal]`
+    *   **Description:** Displays Link Aggregation Control Protocol (LACP) information.
+        *   Without arguments, shows a summary of all LAGs.
+        *   With `<lag_id>`, shows detailed configuration and status for the specified LAG, including member ports and active members.
+        *   With `internal`, also shows detailed LACP protocol information for each member port (Actor/Partner system IDs, keys, states, state machine states).
+    *   **Example:**
+        ```
+        > show lacp 1 internal
+        LAG ID: 1
+          Mode: Active
+          Rate: Fast
+          ...
+          LACP Internal Port Details:
+            Port   Pri  ActorSysID          AcKey AcState  PartnerSysID        PaKey PaState  RxState MuxState
+            Gi0/1  128  ...                 100   ASCD--   ...                 200   ASCD--   CURRENT COLL_DIST
+        ```
+
+*   **`show etherchannel [<lag_id>] summary`**
+    *   **Syntax:** `show etherchannel [<lag_id>] summary`
+    *   **Description:** Displays a summary of Link Aggregation Groups (Port-channels). Functionally similar to `show lacp [<lag_id>]` but without the `internal` option.
+    *   **Example:**
+        ```
+        > show etherchannel 1 summary
+        LAG ID: 1
+          Mode: Active
+          Rate: Fast
+          ...
+        ```
+
+#### 9.2.3. `clear` Commands
+
+The `clear` command is used to reset statistics or dynamic table entries.
+
+*   **`clear interface [<interface_id>] stats`**
+    *   **Syntax:**
+        *   `clear interface stats`
+        *   `clear interface <interface_id> stats`
+    *   **Description:** Clears interface statistics. For all interfaces or a specific one.
+    *   **Example:**
+        ```
+        > clear interface 1 stats
+        Statistics cleared for interface 1.
+        ```
+
+*   **`clear mac address-table dynamic [vlan <v_id>] [interface <p_id>] [mac <m_addr>]`**
+    *   **Syntax:** `clear mac address-table dynamic [vlan <vlan_id>] [interface <interface_id>] [mac <mac_address>]`
+    *   **Description:** Clears dynamic MAC address table entries. Can be filtered by VLAN, interface, or specific MAC address.
+    *   **Example:**
+        ```
+        > clear mac address-table dynamic vlan 10
+        Cleared 5 dynamic MAC address-table entries matching criteria: vlan 10.
+        ```
+
+#### 9.2.4. `interface <id>` Commands (Physical Interface Configuration)
+
+These commands configure physical interfaces (e.g., `interface Gi0/1`).
+
+*   **`shutdown` / `no shutdown`**
+    *   **Syntax:**
+        *   `interface <id> shutdown`
+        *   `interface <id> no shutdown`
+    *   **Description:** Administratively enables or disables the interface.
+    *   **Example:**
+        ```
+        > interface Gi0/1 shutdown
+        Interface Gi0/1 administratively set to down.
+        ```
+
+*   **`ip address <ip_address> <subnet_mask>` / `no ip address <ip_address> <subnet_mask>`**
+    *   **Syntax:**
+        *   `interface <id> ip address <ip_address> <subnet_mask>`
+        *   `interface <id> no ip address <ip_address> <subnet_mask>`
+    *   **Description:** Assigns or removes an IP address and subnet mask from the interface.
+    *   **Example:**
+        ```
+        > interface Gi0/1 ip address 192.168.1.1 255.255.255.0
+        IP address 192.168.1.1/255.255.255.0 added to interface Gi0/1.
+        ```
+
+*   **`mtu <value>`**
+    *   **Syntax:** `interface <id> mtu <64-9216>`
+    *   **Description:** Sets the Maximum Transmission Unit (MTU) for the interface.
+    *   **Example:**
+        ```
+        > interface Gi0/1 mtu 9000
+        MTU for interface Gi0/1 set to 9000.
+        ```
+
+*   **`speed <10|100|1000|auto>`**
+    *   **Syntax:** `interface <id> speed <10|100|1000|auto>`
+    *   **Description:** Configures the interface speed. Setting a specific speed disables auto-negotiation for speed.
+    *   **Example:**
+        ```
+        > interface Gi0/1 speed 1000
+        Speed for interface Gi0/1 configured to 1000.
+        ```
+
+*   **`duplex <half|full|auto>`**
+    *   **Syntax:** `interface <id> duplex <half|full|auto>`
+    *   **Description:** Configures the interface duplex mode. Setting a specific duplex disables auto-negotiation for duplex.
+    *   **Example:**
+        ```
+        > interface Gi0/1 duplex full
+        Duplex for interface Gi0/1 configured to full.
+        ```
+
+*   **VLAN (Switchport) Commands (within `interface <id>` context):**
+    *   **`switchport mode <access|trunk>`**
+        *   **Description:** Sets the VLAN mode of the interface.
+        *   **Example:** `> interface Gi0/1 switchport mode trunk`
+    *   **`switchport access vlan <vlan_id>`**
+        *   **Description:** Assigns the interface to an access VLAN. Only effective if in access mode.
+        *   **Example:** `> interface Gi0/1 switchport access vlan 100`
+    *   **`switchport trunk native vlan <vlan_id>`**
+        *   **Description:** Sets the native VLAN for a trunk interface.
+        *   **Example:** `> interface Gi0/1 switchport trunk native vlan 1`
+    *   **`switchport trunk allowed vlan <add|remove|all|none> [<vlan_list>]`**
+        *   **Description:** Configures allowed VLANs on a trunk interface. `<vlan_list>` is comma-separated (e.g., "10,20,30-35").
+        *   **Example:** `> interface Gi0/1 switchport trunk allowed vlan add 100,200`
+    *   **`switchport trunk tag-native <enable|disable>`**
+        *   **Description:** Enables or disables tagging of the native VLAN on trunk ports.
+        *   **Example:** `> interface Gi0/1 switchport trunk tag-native enable`
+
+*   **STP (Spanning Tree) Commands (within `interface <id>` context):**
+    *   **`spanning-tree cost <value>`**
+        *   **Description:** Sets the STP path cost for the interface (1-200,000,000).
+        *   **Example:** `> interface Gi0/1 spanning-tree cost 100`
+    *   **`spanning-tree port-priority <value>`**
+        *   **Description:** Sets the STP port priority (0-240, multiple of 16).
+        *   **Example:** `> interface Gi0/1 spanning-tree port-priority 112`
+
+*   **LACP (Link Aggregation) Commands (within `interface <id>` context):**
+    *   **`channel-group <lag_id> [mode <active|passive>]`**
+        *   **Description:** Assigns the physical interface to a Link Aggregation Group (Port-channel). Optionally sets the LACP mode for the LAG. If the LAG doesn't exist, it's created.
+        *   **Example:** `> interface Gi0/1 channel-group 1 mode active`
+    *   **`lacp port-priority <value>`**
+        *   **Description:** Sets the LACP port priority for the physical interface (0-65535).
+        *   **Example:** `> interface Gi0/1 lacp port-priority 100`
+
+#### 9.2.5. `interface port-channel <id>` Commands (LAG Configuration)
+
+These commands configure logical Port-channel interfaces.
+
+*   **`mode <active|passive>`**
+    *   **Syntax:** `interface port-channel <id> mode <active|passive>`
+    *   **Description:** Sets the LACP mode for the Port-channel interface (active or passive).
+    *   **Example:**
+        ```
+        > interface port-channel 1 mode active
+        Port-channel 1 mode set to active.
+        ```
+
+*   **`rate <fast|slow>`**
+    *   **Syntax:** `interface port-channel <id> rate <fast|slow>`
+    *   **Description:** Sets the LACP transmission rate for control packets (fast: 1s, slow: 30s).
+    *   **Example:**
+        ```
+        > interface port-channel 1 rate fast
+        Port-channel 1 rate set to fast.
+        ```
+    *   *(Note: Switchport commands like `switchport mode access/trunk` can also be applied to `interface port-channel <id>` to configure L2 properties of the LAG interface itself, e.g., making the LAG an access or trunk interface for VLANs.)*
+
+#### 9.2.6. `mac address-table` Commands
+
+*   **`mac address-table static <mac_address> vlan <vlan_id> interface <interface_id>`**
+    *   **Syntax:** `mac address-table static <mac_address> vlan <vlan_id> interface <interface_id>`
+    *   **Description:** Adds a static MAC address entry to the FDB.
+    *   **Example:**
+        ```
+        > mac address-table static 00:de:ad:be:ef:00 vlan 10 interface Gi0/2
+        Static MAC entry 00:de:ad:be:ef:00 for VLAN 10 on interface Gi0/2 added.
+        ```
+
+#### 9.2.7. `no` Commands
+
+The `no` command is used to negate or remove configurations.
+
+*   **`no mac address-table static <mac_address> vlan <vlan_id>`**
+    *   **Syntax:** `no mac address-table static <mac_address> vlan <vlan_id>`
+    *   **Description:** Removes a static MAC address entry from the FDB.
+    *   **Example:**
+        ```
+        > no mac address-table static 00:de:ad:be:ef:00 vlan 10
+        Static MAC entry 00:de:ad:be:ef:00 for VLAN 10 removed.
+        ```
+*   Other `no` commands typically mirror the configuration commands, e.g., `no interface <id> shutdown`.
