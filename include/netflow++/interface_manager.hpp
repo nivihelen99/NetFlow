@@ -1,6 +1,7 @@
 #ifndef NETFLOW_INTERFACE_MANAGER_HPP
 #define NETFLOW_INTERFACE_MANAGER_HPP
 
+#include "netflow++/packet.hpp" // For IpAddress and MacAddress
 #include <cstdint>
 #include <vector>
 #include <map>
@@ -72,6 +73,60 @@ public:
 
     // Simulates a port's link going down and invokes registered callbacks.
     void simulate_port_link_down(uint32_t port_id);
+
+    // --- Stubs for ArpProcessor and IcmpProcessor dependencies ---
+    std::vector<uint32_t> get_all_interface_ids() const {
+        std::vector<uint32_t> ids;
+        for(const auto& pair : port_configs_) {
+            ids.push_back(pair.first);
+        }
+        return ids; // Returns configured port IDs, or empty if none
+    }
+
+    bool is_ip_local_to_interface(IpAddress ip, uint32_t port_id) const {
+        // Placeholder stub: In a real implementation, this would check if 'ip'
+        // is configured on the interface associated with 'port_id'.
+        // For now, assume no IP is local to any interface to avoid unintended ARP replies.
+        (void)ip; (void)port_id; // Suppress unused parameter warnings
+        return false;
+    }
+
+    std::optional<MacAddress> get_interface_mac(uint32_t port_id) const {
+        // Placeholder stub: Real implementation would fetch MAC from interface config.
+        // Returning MAC 00:00:00:00:00:00 for now if port is valid.
+        // This is a very basic stub and likely not correct for actual operation.
+        if (port_configs_.count(port_id)) {
+            // This should ideally come from a per-interface MAC address configuration
+            // For now, returning a dummy MAC. A proper implementation is needed.
+            // static const uint8_t dummy_mac_bytes[] = {0x00,0x00,0x00,0x00,0x00,0x01}; // Example dummy
+            // return MacAddress(dummy_mac_bytes);
+            return std::nullopt; // Safer to return nullopt if not properly implemented
+        }
+        (void)port_id;
+        return std::nullopt;
+    }
+
+    bool is_port_valid(uint32_t port_id) const {
+        // Placeholder stub: Checks if port_id is known (configured).
+        return port_configs_.count(port_id) > 0;
+    }
+
+    std::optional<IpAddress> get_interface_ip(uint32_t port_id) const {
+        // Placeholder stub: Real implementation would fetch IP from interface config.
+        // For now, returning no IP.
+        // This needs to be properly implemented to return the interface's IP address
+        // (likely in network byte order).
+        (void)port_id;
+        return std::nullopt;
+    }
+
+    std::vector<uint32_t> get_all_l3_interface_ids() const {
+        // Placeholder stub: Assumes all configured interfaces could be L3 capable.
+        // A real implementation would distinguish L2/L3 interfaces.
+        return get_all_interface_ids();
+    }
+    // --- End Stubs ---
+
 
 public: // Changed from protected to public
     // Helper to update RX stats (example, would be called by data plane)
