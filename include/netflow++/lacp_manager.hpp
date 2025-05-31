@@ -5,6 +5,7 @@
 #include <vector>
 #include <map>
 #include <optional>
+#include <functional>
 #include <algorithm> // For std::sort, std::unique, std::remove
 #include <string>    // Potentially for names or logging
 #include <iostream>  // For placeholder logging
