@@ -19,45 +19,81 @@ public:
 
     // Destructor
     ~BufferPool() {
-        // TODO: Release all buffers in the pool
-        for (auto& buffer_ptr_vec : available_buffers_) {
-            for (PacketBuffer* buf : buffer_ptr_vec) {
-                 delete buf; // This might be problematic if decrement_ref is supposed to handle deletion
-            }
+        std::lock_guard<std::mutex> lock(mutex_); // Ensure thread safety during destruction
+        for (PacketBuffer* buf : available_buffers_) {
+            delete buf; // Delete all buffers currently in the pool
         }
-         for (PacketBuffer* buf : allocated_buffers_debug_) { // For debugging leaks
-            delete buf;
-        }
+        available_buffers_.clear();
+
+        // Regarding allocated_buffers_debug_:
+        // If this list is supposed to track all buffers *ever* created for leak detection,
+        // then it should not be cleared or deleted here, as some might be legitimately in use.
+        // However, if it tracks buffers currently "leased out", then at shutdown,
+        // any remaining buffers in allocated_buffers_debug_ that are NOT in available_buffers_
+        // (which we just cleared and deleted) could be considered leaks.
+        // For simplicity, this destructor will only clean available_buffers_.
+        // A more robust leak detection would require careful management of allocated_buffers_debug_
+        // throughout the lifecycle, ensuring buffers are removed when truly deleted (not just returned to pool).
+        // If a buffer from allocated_buffers_debug_ was already returned and deleted via available_buffers_,
+        // double deletion must be avoided.
+        // For now, let's assume allocated_buffers_debug_ might hold raw pointers that were
+        // also in available_buffers_. Since we deleted from available_buffers_,
+        // we should not delete them again from allocated_buffers_debug_ without careful checking.
+        // A simple approach: If a buffer is deleted, it should ideally be removed from ALL lists.
+        // Given PacketBuffer's new decrement_ref, the pool is the sole deleter of returned-to-pool buffers.
+
+        // Clear the debug list too, assuming its purpose is to track buffers that *were* allocated.
+        // If they are in available_buffers_, they are deleted. If they are still "out",
+        // then deleting them here would be incorrect as they might still be in use.
+        // This debug list needs a clearer ownership definition.
+        // For now, we assume that buffers in available_buffers_ are the only ones the pool owns and should delete.
+        // If allocated_buffers_debug_ is for external leak tracking, it should not delete.
+        // Let's remove deletion from allocated_buffers_debug_ in the destructor to be safe,
+        // as its items might be active or already deleted if they were in available_buffers_.
+        allocated_buffers_debug_.clear(); // Just clear the list, actual deletion handled for available_buffers_
     }
 
     // Allocates a PacketBuffer from the pool.
-    // For now, a simple allocation, but placeholders for more advanced features.
-    PacketBuffer* allocate_buffer(size_t size) {
+    PacketBuffer* allocate_buffer(size_t required_data_payload_size, size_t required_headroom = 32) {
         std::lock_guard<std::mutex> lock(mutex_);
 
-        // TODO: NUMA awareness - allocate from a pool associated with the current NUMA node.
-        // TODO: Configurable buffer sizes - find a pool that matches the requested size or can accommodate it.
-        // TODO: Huge page integration - allocate using huge pages if enabled and beneficial.
+        size_t required_total_capacity = required_data_payload_size + required_headroom;
 
-        // Simple strategy: if a buffer of suitable size is available, use it. Otherwise, allocate new.
-        // This is a very basic implementation. A real pool would likely have fixed-size blocks
-        // or more sophisticated management.
-        for (auto& buffer_ptr_vec : available_buffers_) {
-            for (auto it = buffer_ptr_vec.begin(); it != buffer_ptr_vec.end(); ++it) {
-                if ((*it)->size >= size) { // Found a suitable buffer
-                    PacketBuffer* buf = *it;
-                    buffer_ptr_vec.erase(it);
-                    buf->increment_ref(); // Should be 1 after allocation from pool
-                    allocated_buffers_debug_.push_back(buf); // For debugging
-                    return buf;
+        // Try to find a suitable buffer in the available list
+        for (auto it = available_buffers_.begin(); it != available_buffers_.end(); ++it) {
+            PacketBuffer* buf = *it;
+            if (buf->get_capacity() >= required_total_capacity) {
+                available_buffers_.erase(it); // Remove from pool
+
+                // Reset buffer for reuse
+                buf->ref_count.store(1, std::memory_order_relaxed); // Reset ref count
+                // buf->reset_offsets_and_len(required_headroom, 0); // Set headroom, data length to 0
+                // Or, if data_len should be payload size:
+                buf->reset_offsets_and_len(required_headroom, required_data_payload_size);
+                 // Let's set data_len to 0, user will set actual data length via Packet or directly.
+                buf->reset_offsets_and_len(required_headroom, 0);
+
+
+                // allocated_buffers_debug_.push_back(buf); // Track leased buffer
+                // Avoid re-adding if it was already in allocated_buffers_debug_ from its first allocation.
+                // The purpose of allocated_buffers_debug_ needs to be clear:
+                // 1. All buffers ever created? (Then don't remove on free, don't re-add here)
+                // 2. Only buffers currently leased out? (Then add here, remove on free_buffer when returned to pool)
+                // Assuming option 2 for now for better "active lease" tracking.
+                // However, to prevent duplicates if free_buffer didn't remove it properly:
+                auto alloc_it = std::find(allocated_buffers_debug_.begin(), allocated_buffers_debug_.end(), buf);
+                if (alloc_it == allocated_buffers_debug_.end()) {
+                    allocated_buffers_debug_.push_back(buf);
                 }
+                return buf;
             }
         }
 
         // If no suitable buffer is found, allocate a new one.
-        PacketBuffer* new_buffer = new PacketBuffer(size);
-        // new_buffer->ref_count should already be 1 from its constructor
-        allocated_buffers_debug_.push_back(new_buffer); // For debugging
+        // The capacity should be sufficient for payload and headroom.
+        PacketBuffer* new_buffer = new PacketBuffer(required_total_capacity, required_headroom, 0);
+        // ref_count is already 1 from PacketBuffer constructor.
+        allocated_buffers_debug_.push_back(new_buffer); // Track newly allocated buffer
         return new_buffer;
     }
 
@@ -67,113 +103,44 @@ public:
             return;
         }
 
-        // The buffer's ref_count should be decremented by the user before calling free_buffer.
-        // If ref_count reaches 0, it will delete itself.
-        // If we want the pool to manage deletion, then decrement_ref should not delete.
-        // For now, assume decrement_ref handles deletion if ref_count is 0.
-        // If the buffer is not deleted (i.e., ref_count > 0 after decrement),
-        // it means it's still in use elsewhere, which is an error if called via free_buffer.
-        // Or, if the pool is to take ownership back for reuse:
+        // The user of the Packet (which uses PacketBuffer) calls Packet's destructor,
+        // which calls buffer_->decrement_ref().
+        // If that decrement_ref() call (which is PacketBuffer::decrement_ref)
+        // causes the ref_count to become zero (returns true), then the Packet knows
+        // it held the last reference, and it should then notify the pool
+        // by calling BufferPool::free_buffer(buffer_).
+        // So, by the time this function is called, buffer->decrement_ref() returning true
+        // has already happened. The buffer's ref_count is 0.
 
-        bool should_return_to_pool = true;
-        // If decrement_ref deletes the buffer when count reaches 0,
-        // then we should not add it back to the pool.
-        // Let's adjust PacketBuffer's decrement_ref or BufferPool's logic.
-        // For this subtask, let's assume PacketBuffer's decrement_ref will delete.
-        // So, free_buffer is more of a hint that the user is done,
-        // and the buffer will self-delete when ref_count is 0.
+        // The instruction was "Call if (buffer->decrement_ref())". This implies this function
+        // is responsible for the final decrement. This is a common pattern.
+        // Let's assume the user calls pool.free_buffer(buf_ptr) INSTEAD of buf_ptr->decrement_ref()
+        // when they are completely done with the buffer from their perspective.
 
-        // If we want the pool to reclaim and reuse:
-        // buffer->ref_count = 0; // Or some internal pool state
-        // std::lock_guard<std::mutex> lock(mutex_);
-        // available_buffers_.push_back(buffer); // Add to appropriate list based on size etc.
-        // allocated_buffers_debug_.remove(buffer); // For debugging
+        if (buffer->decrement_ref()) { // If ref_count becomes 0
+            std::lock_guard<std::mutex> lock(mutex_);
+            available_buffers_.push_back(buffer);
 
-        // Current approach: User calls decrement_ref. If it hits 0, PacketBuffer deletes itself.
-        // This function might be used to signal the pool that a buffer *might* be available soon,
-        // or to handle cases where the buffer should explicitly be returned to the pool
-        // even if its ref_count isn't 0 (which would be unusual).
-
-        // For this iteration, let's simplify: free_buffer just ensures ref_count is decremented.
-        // The user should call this when they are done with their reference.
-        // If the buffer is part of a pool and its ref_count becomes 0, it means no one else
-        // is using it and it *could* be returned to a list of available buffers.
-
-        // Let's assume the user calls decrement_ref on the buffer.
-        // This function is then responsible for taking it back if it's still alive.
-        // This is a bit tricky with the current PacketBuffer design where decrement_ref deletes.
-
-        // Option 1: PacketBuffer::decrement_ref does NOT delete. BufferPool::free_buffer does.
-        // Option 2: PacketBuffer::decrement_ref DOES delete. BufferPool::free_buffer is more of a no-op or for stats.
-        // Let's stick to the provided PacketBuffer for now, so it self-deletes.
-        // This means free_buffer in the pool might not do much other than potentially some tracking.
-
-        // If PacketBuffer's decrement_ref handles deletion, this function's role changes.
-        // It might be called to indicate the user is done, and the pool can do internal bookkeeping.
-        // Or, the pool's "free_buffer" should be the one that calls "decrement_ref" and then
-        // if the buffer is not deleted, adds it to its internal free list.
-
-        std::lock_guard<std::mutex> lock(mutex_);
-        // Attempt to remove from debug list
-        auto it_alloc = std::find(allocated_buffers_debug_.begin(), allocated_buffers_debug_.end(), buffer);
-        if (it_alloc != allocated_buffers_debug_.end()) {
-            allocated_buffers_debug_.erase(it_alloc);
+            // If allocated_buffers_debug_ tracks leased buffers, remove it now.
+            auto it_alloc = std::find(allocated_buffers_debug_.begin(), allocated_buffers_debug_.end(), buffer);
+            if (it_alloc != allocated_buffers_debug_.end()) {
+                allocated_buffers_debug_.erase(it_alloc);
+            }
         }
-
-        // If PacketBuffer's decrement_ref doesn't delete, but returns true if ref_count is 0:
-        // if (buffer->decrement_ref_and_check_if_zero()) {
-        //      // Now add to a specific free list in available_buffers_
-        //      // For simplicity, just one list for now
-        //      bool found_list = false;
-        //      for(auto& buffer_vec : available_buffers_){
-        //          // Potentially check size to return to correct internal pool
-        //          buffer_vec.push_back(buffer);
-        //          found_list = true;
-        //          break;
-        //      }
-        //      if(!found_list){ // e.g. create a new vector for this size
-        //          available_buffers_.push_back({buffer});
-        //      }
-        // }
-        // Given current PacketBuffer, if decrement_ref() made ref_count 0, it's deleted.
-        // So, we cannot add it to available_buffers_.
-        // This function is more like "I am done with this buffer, pool, you may take note".
-        // The current PacketBuffer deletes itself, which is fine for non-pooled scenarios.
-        // For a pool, we'd typically want the pool to manage the lifecycle.
-
-        // Let's adjust so free_buffer is the one triggering potential deletion or reuse.
-        // We will call decrement_ref here. If it's still alive, we pool it.
-        // This requires PacketBuffer::decrement_ref to NOT delete itself.
-        // I will assume for now I cannot change packet_buffer.hpp in this step.
-        // So this free_buffer will be a bit conceptual.
-        // The user calls buffer->decrement_ref(). If it's 0, it's gone.
-        // If they call pool.free_buffer(buffer) afterwards, the buffer pointer is dangling.
-        // This design needs refinement if the pool is to actively manage reuse.
-
-        // For now, this function will assume the buffer is *not* yet deleted by a ref_count drop to zero.
-        // And the pool will take ownership if ref_count becomes 1 (owned only by pool).
-        // This is a common model for intrusive ref counting with a pool.
-        // However, PacketBuffer's decrement_ref already deletes.
-        // This means the BufferPool cannot easily reclaim it.
-
-        // Sticking to the current PacketBuffer: the pool cannot truly "free" and "reuse"
-        // in the traditional sense unless PacketBuffer's behavior changes.
-        // The pool can only allocate new ones or hand out ones it held onto without giving out.
-
-        // Given the constraints, this free_buffer might just be a placeholder or for debug.
-        // A true pool would require PacketBuffer.decrement_ref to not self-delete,
-        // or the pool to be the sole owner that hands out refs.
+        // If decrement_ref() returned false, it means other references still exist,
+        // so the buffer is not yet ready to be pooled. This is a valid state.
+        // The buffer will be returned to the pool only when the last reference is released
+        // via a call to this free_buffer method that results in ref_count becoming 0.
     }
 
 
 private:
     std::mutex mutex_;
-    // Placeholder for actual pool storage.
-    // Could be a list of free PacketBuffer pointers, perhaps segregated by size.
-    // std::vector<PacketBuffer*> available_buffers_;
-    std::vector<std::vector<PacketBuffer*>> available_buffers_; // Vector of vectors for different sizes perhaps
+    // Use std::list for available_buffers_ for efficient addition/removal.
+    std::list<PacketBuffer*> available_buffers_;
 
-    // For debugging purposes, to track allocated buffers by the pool
+    // For debugging purposes, to track allocated buffers by the pool.
+    // This list could track all buffers currently "leased out" by the pool.
     std::list<PacketBuffer*> allocated_buffers_debug_;
 
 

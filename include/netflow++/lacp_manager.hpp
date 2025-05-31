@@ -10,11 +10,14 @@
 #include <iostream>  // For placeholder logging
 
 #include "packet.hpp" // For Packet class, used in select_egress_port and process_lacpdu
-#include "netflow++/logger.hpp" // For SwitchLogger, if used in future methods
+#include "netflow++/logger.hpp" // For SwitchLogger
 #include "netflow++/buffer_pool.hpp" // For BufferPool, used in generate_lacpdus
 
 // Forward declare PacketClassifier if its FlowKey might be used directly for hashing inspiration
 // namespace netflow { class PacketClassifier; }
+namespace netflow {
+    class SwitchLogger; // Forward declare SwitchLogger
+}
 
 namespace netflow {
 
@@ -135,170 +138,39 @@ public:
     LacpManager(uint64_t switch_base_mac, uint16_t system_priority = 32768);
 
     // Creates a new Link Aggregation Group (LAG).
-    bool create_lag(LagConfig& config) { // Pass by non-const ref to update its key if needed
-        if (config.lag_id == 0) {
-            return false;
-        }
-        if (lags_.count(config.lag_id)) {
-            // std::cerr << "Error: LAG ID " << config.lag_id << " already exists." << std::endl;
-            return false;
-        }
-
-        // Check if any proposed member ports are already in other LAGs
-        for (uint32_t port_id : config.member_ports) {
-            if (port_to_lag_map_.count(port_id)) {
-                // std::cerr << "Error: Port " << port_id << " is already part of LAG "
-                //           << port_to_lag_map_[port_id] << "." << std::endl;
-                return false; // Strict: port cannot be in multiple LAGs initially
-            }
-        }
-
-        lags_[config.lag_id] = config;
-        // Sort and unique member_ports in the stored config
-        std::sort(lags_[config.lag_id].member_ports.begin(), lags_[config.lag_id].member_ports.end());
-        lags_[config.lag_id].member_ports.erase(
-            std::unique(lags_[config.lag_id].member_ports.begin(), lags_[config.lag_id].member_ports.end()),
-            lags_[config.lag_id].member_ports.end()
-        );
-
-        for (uint32_t port_id : lags_[config.lag_id].member_ports) {
-            port_to_lag_map_[port_id] = config.lag_id;
-        }
-        // std::cout << "LAG " << config.lag_id << " created." << std::endl;
-        return true;
-    }
+    // Definition moved to .cpp file
+    bool create_lag(LagConfig& config);
 
     // Adds a physical port to an existing LAG.
     // Returns true if successful.
-    bool add_port_to_lag(uint32_t lag_id, uint32_t port_id) {
-        auto lag_it = lags_.find(lag_id);
-        if (lag_it == lags_.end()) {
-            // std::cerr << "Error: LAG " << lag_id << " does not exist." << std::endl;
-            return false;
-        }
-
-        auto port_map_it = port_to_lag_map_.find(port_id);
-        if (port_map_it != port_to_lag_map_.end()) {
-            if (port_map_it->second == lag_id) {
-                return true; // Port already in this LAG
-            } else {
-                // std::cerr << "Error: Port " << port_id << " is already part of a different LAG ("
-                //           << port_map_it->second << ")." << std::endl;
-                return false; // Port already in a different LAG
-            }
-        }
-
-        lag_it->second.member_ports.push_back(port_id);
-        // Ensure no duplicates and maintain sorted order
-        std::sort(lag_it->second.member_ports.begin(), lag_it->second.member_ports.end());
-        lag_it->second.member_ports.erase(
-            std::unique(lag_it->second.member_ports.begin(), lag_it->second.member_ports.end()),
-            lag_it->second.member_ports.end()
-        );
-        port_to_lag_map_[port_id] = lag_id;
-        // std::cout << "Port " << port_id << " added to LAG " << lag_id << "." << std::endl;
-        return true;
-    }
+    // Definition moved to .cpp file
+    bool add_port_to_lag(uint32_t lag_id, uint32_t port_id);
 
     // Removes a physical port from a LAG.
     // Returns true if successful.
-    bool remove_port_from_lag(uint32_t lag_id, uint32_t port_id) {
-        auto lag_it = lags_.find(lag_id);
-        if (lag_it == lags_.end()) {
-            // std::cerr << "Warning: LAG " << lag_id << " not found for port removal." << std::endl;
-            return false;
-        }
-
-        auto port_map_it = port_to_lag_map_.find(port_id);
-        if (port_map_it == port_to_lag_map_.end() || port_map_it->second != lag_id) {
-            // std::cerr << "Warning: Port " << port_id << " is not part of LAG " << lag_id << "." << std::endl;
-            return false; // Port not in this LAG
-        }
-
-        auto& members = lag_it->second.member_ports;
-        members.erase(std::remove(members.begin(), members.end(), port_id), members.end());
-        port_to_lag_map_.erase(port_id);
-
-        // std::cout << "Port " << port_id << " removed from LAG " << lag_id << "." << std::endl;
-        if (members.empty()) {
-            // Optionally remove LAG if no members left, or leave it configured but inactive.
-            // For now, let's leave it, user can explicitly delete_lag.
-            // std::cout << "Warning: LAG " << lag_id << " has no more members." << std::endl;
-        }
-        return true;
-    }
+    // Definition moved to .cpp file
+    bool remove_port_from_lag(uint32_t lag_id, uint32_t port_id);
 
     // Deletes an entire LAG.
-    void delete_lag(uint32_t lag_id) {
-        auto lag_it = lags_.find(lag_id);
-        if (lag_it != lags_.end()) {
-            for (uint32_t port_id : lag_it->second.member_ports) {
-                port_to_lag_map_.erase(port_id);
-            }
-            lags_.erase(lag_id);
-            // std::cout << "LAG " << lag_id << " deleted." << std::endl;
-        }
-    }
+    // Definition moved to .cpp file
+    void delete_lag(uint32_t lag_id);
 
-    // Placeholder: Selects an egress port from a LAG based on packet hash.
-    // Actual hashing and selection is more complex and depends on active/selected members.
+    // Selects an egress port from a LAG based on packet hash.
     // Returns a physical port_id.
-    uint32_t select_egress_port(uint32_t lag_id, const Packet& pkt) const {
-        auto it = lags_.find(lag_id);
-        if (it == lags_.end() || it->second.member_ports.empty()) {
-            // std::cerr << "Error: Invalid LAG ID " << lag_id << " or no member ports for selection." << std::endl;
-            return 0; // 0 could signify an invalid port or "drop". Needs clear definition.
-                      // Or throw an exception for critical error.
-        }
+    // Definition moved to .cpp file
+    uint32_t select_egress_port(uint32_t lag_id, const Packet& pkt) const;
 
-        const LagConfig& lag_config = it->second;
-        const std::vector<uint32_t>& members = lag_config.member_ports;
-
-        // TODO: Implement actual hashing based on lag_config.hash_mode and packet (pkt)
-        // For now, simple round-robin or first port.
-        // Example using a very simple hash of some packet fields:
-        // PacketClassifier::FlowKey flow_key = some_classifier_instance.extract_flow_key(pkt);
-        // uint32_t hash = some_classifier_instance.hash_flow(flow_key);
-        // uint32_t member_index = hash % members.size();
-        // return members[member_index];
-
-        // Using a mutable index for simple round-robin (if LacpManager is not const for this method)
-        // Or, if it must be const, then hash is better.
-        // For this placeholder with const method:
-        if (!members.empty()) {
-             // Simplistic: hash source MAC to choose port (very basic)
-            uint32_t hash_val = 0;
-            if(pkt.src_mac().has_value()){
-                for(int i=0; i<6; ++i) hash_val += pkt.src_mac().value().bytes[i];
-            }
-            return members[hash_val % members.size()];
-        }
-
-        return members[0]; // Fallback to first available port if all else fails
-    }
-
-    // Placeholder: Actual LACPDU processing is complex (state machines, timers, etc.)
-    void process_lacpdu(const Packet& lacpdu_packet, uint32_t ingress_port_id) {
-        // 1. Decode LACPDU from lacpdu_packet.
-        // 2. Check if ingress_port_id is part of a LAG configured for LACP (active or passive).
-        // 3. Update actor/partner information for the port based on received LACPDU.
-        // 4. Run LACP state machines (Receive, Mux, Periodic, Churn Detection etc.).
-        //    This involves:
-        //    - Actor state updates (e.g., LACP_Activity, LACP_Timeout, Aggregation, Sync, Collecting, Distributing).
-        //    - Partner state updates.
-        //    - Port selection logic to determine which ports can be aggregated based on compatible actor/partner info.
-        //    - Attaching/detaching ports from the aggregator.
-        // std::cout << "Placeholder: Received LACPDU on port " << ingress_port_id
-        //           << ". (Size: " << lacpdu_packet.get_buffer()->size << ")" << std::endl;
-    }
+    // Processes an incoming LACPDU.
+    // Definition moved to .cpp file
+    void process_lacpdu(const Packet& lacpdu_packet, uint32_t ingress_port_id);
 
     // Checks if a physical port is part of any LAG.
-    bool is_port_in_lag(uint32_t port_id) const {
+    bool is_port_in_lag(uint32_t port_id) const { // Can remain inline
         return port_to_lag_map_.count(port_id);
     }
 
     // Gets the LAG ID for a given physical port, if it's part of one.
-    std::optional<uint32_t> get_lag_for_port(uint32_t port_id) const {
+    std::optional<uint32_t> get_lag_for_port(uint32_t port_id) const { // Can remain inline
         auto it = port_to_lag_map_.find(port_id);
         if (it != port_to_lag_map_.end()) {
             return it->second;
@@ -307,7 +179,7 @@ public:
     }
 
     // Retrieves the configuration for a specific LAG.
-    std::optional<LagConfig> get_lag_config(uint32_t lag_id) const {
+    std::optional<LagConfig> get_lag_config(uint32_t lag_id) const { // Can remain inline
         auto it = lags_.find(lag_id);
         if (it != lags_.end()) {
             return it->second;
@@ -316,18 +188,26 @@ public:
     }
 
     // Retrieves all configured LAGs
-    const std::map<uint32_t, LagConfig>& get_all_lags() const {
+    const std::map<uint32_t, LagConfig>& get_all_lags() const { // Can remain inline
         return lags_;
     }
 
-    // Methods that were defined in .cpp but not declared in .hpp
+    // Generates LACPDUs for transmission.
     std::vector<Packet> generate_lacpdus(BufferPool& buffer_pool);
+    // Runs LACP timers and state machines for all relevant ports.
     void run_lacp_timers_and_statemachines();
+    // Initializes LACP parameters for a port when it's added to a LAG or LACP is enabled.
     void initialize_lacp_port_info(uint32_t port_id, const LagConfig& lag_config);
+    // Runs the LACP Receive state machine for a given port.
     void run_lacp_rx_machine(uint32_t port_id);
+    // Runs the LACP Periodic Transmission state machine for a given port.
     void run_lacp_periodic_tx_machine(uint32_t port_id);
+    // Runs the LACP Mux state machine for a given port.
     void run_lacp_mux_machine(uint32_t port_id);
-    void update_port_selection_logic(uint32_t port_id);
+    // Updates port selection logic (e.g., for an aggregator).
+    void update_port_selection_logic(uint32_t port_id); // Or perhaps lag_id
+
+    void set_logger(SwitchLogger* logger);
 
 private:
     uint64_t switch_mac_address_; // Base MAC for the switch
@@ -337,6 +217,8 @@ private:
     std::map<uint32_t, LagConfig> lags_;
     std::map<uint32_t, uint32_t> port_to_lag_map_;
     std::map<uint32_t, LacpPortInfo> port_lacp_info_; // Stores LACP state per physical port
+
+    SwitchLogger* logger_ = nullptr; // Optional logger
 };
 
 } // namespace netflow

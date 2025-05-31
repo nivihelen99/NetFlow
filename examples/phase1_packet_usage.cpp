@@ -22,9 +22,10 @@ int main() {
     //    std::memcpy(pb->data, sample_data, sizeof(sample_data));
     //    pb->size = sizeof(sample_data); // Update actual data size if only partially filled
     // } else {
-    //    pb->size = buffer_len; // Default if not specifically filling
+    //    pb->set_data_len(buffer_len); // Default if not specifically filling
     // }
-    pb->size = buffer_len; // Assume buffer is conceptually "full" or size represents capacity for this example.
+    // To make the buffer conceptually "full" with data up to its capacity:
+    pb->set_data_len(buffer_len);
 
 
     // Create a Packet object using the PacketBuffer pointer.
@@ -46,7 +47,8 @@ int main() {
     // Demonstrate PacketBuffer usage via Packet
     netflow::PacketBuffer* retrieved_buffer = packet.get_buffer();
     if (retrieved_buffer) {
-        std::cout << "Packet buffer size: " << retrieved_buffer->size << " bytes." << std::endl;
+        std::cout << "Packet buffer data length: " << retrieved_buffer->get_data_length() << " bytes." << std::endl;
+        std::cout << "Packet buffer capacity: " << retrieved_buffer->get_capacity() << " bytes." << std::endl;
         std::cout << "Packet buffer ref_count: " << retrieved_buffer->ref_count.load() << std::endl;
     }
 

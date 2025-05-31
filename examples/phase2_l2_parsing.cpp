@@ -32,8 +32,8 @@ int main() {
     size_t raw_eth_frame_size = sizeof(raw_eth_frame);
 
     netflow::PacketBuffer* pb1_ptr = new netflow::PacketBuffer(raw_eth_frame_size);
-    std::memcpy(pb1_ptr->data, raw_eth_frame, raw_eth_frame_size);
-    // pb1_ptr->size is already raw_eth_frame_size from constructor, but if only partially filled, adjust here.
+    std::memcpy(pb1_ptr->get_data_start_ptr(), raw_eth_frame, raw_eth_frame_size);
+    pb1_ptr->set_data_len(raw_eth_frame_size); // Set the actual data length after copying
 
     netflow::Packet packet1(pb1_ptr);
 
@@ -68,7 +68,8 @@ int main() {
     size_t raw_vlan_frame_size = sizeof(raw_vlan_frame);
 
     netflow::PacketBuffer* pb2_ptr = new netflow::PacketBuffer(raw_vlan_frame_size);
-    std::memcpy(pb2_ptr->data, raw_vlan_frame, raw_vlan_frame_size);
+    std::memcpy(pb2_ptr->get_data_start_ptr(), raw_vlan_frame, raw_vlan_frame_size);
+    pb2_ptr->set_data_len(raw_vlan_frame_size); // Set the actual data length after copying
     netflow::Packet packet2(pb2_ptr);
 
     std::cout << "\n[Packet 2: VLAN-tagged Frame]" << std::endl;
@@ -104,7 +105,7 @@ int main() {
 
     // 3. Test push_vlan and pop_vlan on packet1
     std::cout << "\n[Modifying Packet 1: push_vlan then pop_vlan]" << std::endl;
-    if (packet1.get_buffer()) std::cout << "  Initial Packet 1 size: " << packet1.get_buffer()->size << std::endl;
+    if (packet1.get_buffer()) std::cout << "  Initial Packet 1 data length: " << packet1.get_buffer()->get_data_length() << std::endl;
     if (auto eth_hdr_p1 = packet1.ethernet()) {
          std::cout << "  Initial Packet 1 EtherType: 0x" << std::hex << std::setw(4) << std::setfill('0')
                    << ntohs(eth_hdr_p1->ethertype) << std::dec << std::endl;
@@ -126,7 +127,7 @@ int main() {
                        << ntohs(vh->ethertype) << std::dec << std::endl;
         }
     }
-    if (packet1.get_buffer()) std::cout << "    Packet 1 size: " << packet1.get_buffer()->size << std::endl;
+    if (packet1.get_buffer()) std::cout << "    Packet 1 data length: " << packet1.get_buffer()->get_data_length() << std::endl;
 
     packet1.pop_vlan();
     std::cout << "  After pop_vlan():" << std::endl;
@@ -135,7 +136,7 @@ int main() {
         std::cout << "    Outer EtherType: 0x" << std::hex << std::setw(4) << std::setfill('0')
                   << ntohs(eth_hdr_p1_pop->ethertype) << std::dec << std::endl;
     }
-    if (packet1.get_buffer()) std::cout << "    Packet 1 size: " << packet1.get_buffer()->size << std::endl;
+    if (packet1.get_buffer()) std::cout << "    Packet 1 data length: " << packet1.get_buffer()->get_data_length() << std::endl;
 
     // Clean up manually allocated PacketBuffers for this example
     pb1_ptr->decrement_ref(); // Packet1's destructor would have called it once

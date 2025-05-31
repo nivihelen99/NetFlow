@@ -219,18 +219,18 @@ public:
 
     template <typename HeaderType>
     HeaderType* get_header(size_t offset) const {
-        if (!buffer_ || offset + sizeof(HeaderType) > buffer_->size) {
+        if (!buffer_ || offset + sizeof(HeaderType) > buffer_->get_data_length()) {
             return nullptr; // or throw
         }
-        return reinterpret_cast<HeaderType*>(buffer_->data + offset);
+        return reinterpret_cast<HeaderType*>(buffer_->get_data_start_ptr() + offset);
     }
 
     template <typename HeaderType>
     HeaderType* get_header_at_current_offset() const {
-        if (!buffer_ || current_offset_ + sizeof(HeaderType) > buffer_->size) {
+        if (!buffer_ || current_offset_ + sizeof(HeaderType) > buffer_->get_data_length()) {
             return nullptr;
         }
-        HeaderType* header = reinterpret_cast<HeaderType*>(buffer_->data + current_offset_);
+        HeaderType* header = reinterpret_cast<HeaderType*>(buffer_->get_data_start_ptr() + current_offset_);
         // Cautiously advance offset ONLY if not a VLAN tag being parsed,
         // as VLAN is a special case for offset management.
         // A more robust parser would advance based on actual header lengths (e.g. IP options)
@@ -269,7 +269,7 @@ public:
     // to set up current_offset_ or determine the L2 framing size.
     IPv4Header* ipv4() const {
         // Determine offset after L2 headers
-        current_offset_ = l2_header_size_;
+        current_offset_ = l2_header_size_; // Set current_offset_ to start of L3
         auto* eth = get_header<EthernetHeader>(0);
         if (!eth) return nullptr;
 
@@ -282,14 +282,14 @@ public:
 
         if (effective_ethertype == 0x0800) { // IPV4_ETHERTYPE
              IPv4Header* ip_head = get_header<IPv4Header>(current_offset_);
-             // if (ip_head) current_offset_ += ip_head->get_header_length(); // Advance by actual IP header length
+             if (ip_head) current_offset_ += ip_head->get_header_length(); // Advance by actual IP header length
              return ip_head;
         }
         return nullptr;
     }
 
     IPv6Header* ipv6() const {
-        current_offset_ = l2_header_size_;
+        current_offset_ = l2_header_size_; // Set current_offset_ to start of L3
         auto* eth = get_header<EthernetHeader>(0);
         if (!eth) return nullptr;
 
@@ -302,63 +302,95 @@ public:
 
         if (effective_ethertype == 0x86DD) { // IPV6_ETHERTYPE
             IPv6Header* ip6_head = get_header<IPv6Header>(current_offset_);
-            // if (ip6_head) current_offset_ += IPv6Header::SIZE; // Advance by fixed IPv6 header size
+            if (ip6_head) current_offset_ += IPv6Header::SIZE; // Advance by fixed IPv6 header size
             return ip6_head;
         }
         return nullptr;
     }
 
     TcpHeader* tcp() const {
-        size_t previous_l4_offset = l2_header_size_; // Start after L2
-        IPv4Header* ip4 = ipv4(); // This sets current_offset_ based on L2 and checks ethertype
-        if (ip4) {
-            if (ip4->protocol == 6) { // TCP_PROTOCOL
-                // current_offset_ was already set by ipv4() to point to start of L3 header.
-                // Now advance by L3 header length.
-                current_offset_ = l2_header_size_ + ip4->get_header_length();
+        // current_offset_ is expected to be at the start of L3 by ipv4() or ipv6()
+        // We need to know L3 header size to find the start of L4.
+        // So, call ipv4() or ipv6() first, which sets current_offset_ to the start of L4.
+        size_t l3_start_offset = l2_header_size_;
+        size_t l3_header_length = 0;
+
+        IPv4Header* ip4 = get_header<IPv4Header>(l3_start_offset); // Try IPv4 first
+        if (ip4 && ntohs(get_header<EthernetHeader>(0)->ethertype) == 0x0800) { // Check ethertype for IPv4
+             if (ip4->protocol == 6) { // TCP_PROTOCOL
+                l3_header_length = ip4->get_header_length();
+                current_offset_ = l3_start_offset + l3_header_length;
                 TcpHeader* tcp_head = get_header<TcpHeader>(current_offset_);
-                // if (tcp_head) current_offset_ += tcp_head->get_header_length();
+                if (tcp_head) current_offset_ += tcp_head->get_header_length();
                 return tcp_head;
             }
         } else {
-            IPv6Header* ip6 = ipv6(); // This also sets current_offset_
-            if (ip6) {
+            IPv6Header* ip6 = get_header<IPv6Header>(l3_start_offset); // Try IPv6
+            // Need to check ethertype for IPv6 (via direct eth or vlan)
+            uint16_t effective_ethertype = 0;
+            auto* eth_check = get_header<EthernetHeader>(0);
+            if (eth_check) {
+                effective_ethertype = ntohs(eth_check->ethertype);
+                if (effective_ethertype == 0x8100) {
+                    auto* vlan_check = get_header<VlanHeader>(EthernetHeader::SIZE);
+                    if (vlan_check) effective_ethertype = ntohs(vlan_check->ethertype);
+                    else effective_ethertype = 0; // Safety
+                }
+            }
+
+            if (ip6 && effective_ethertype == 0x86DD) { // Check ethertype for IPv6
                 if (ip6->next_header == 6) { // TCP_PROTOCOL
-                    // current_offset_ was set by ipv6() to point to start of L3.
-                    // Advance by L3 header length.
-                    current_offset_ = l2_header_size_ + IPv6Header::SIZE; // IPv6 has fixed header size for this purpose
+                    l3_header_length = IPv6Header::SIZE;
+                    current_offset_ = l3_start_offset + l3_header_length;
                     TcpHeader* tcp_head = get_header<TcpHeader>(current_offset_);
-                    // if (tcp_head) current_offset_ += tcp_head->get_header_length();
+                    if (tcp_head) current_offset_ += tcp_head->get_header_length();
                     return tcp_head;
                 }
             }
         }
-        current_offset_ = previous_l4_offset; // Restore offset if not TCP
+        // Restore offset if not TCP or if L3 header was not found correctly
+        // current_offset_ = l3_start_offset; // This would be incorrect as ipv4/ipv6 might have advanced it.
+        // It's better to ensure current_offset_ is only advanced upon successful header retrieval.
         return nullptr;
     }
 
     UdpHeader* udp() const {
-        size_t previous_l4_offset = l2_header_size_;
-        IPv4Header* ip4 = ipv4();
-        if (ip4) {
+        size_t l3_start_offset = l2_header_size_;
+        size_t l3_header_length = 0;
+
+        IPv4Header* ip4 = get_header<IPv4Header>(l3_start_offset); // Try IPv4 first
+        if (ip4 && ntohs(get_header<EthernetHeader>(0)->ethertype) == 0x0800) { // Check ethertype for IPv4
             if (ip4->protocol == 17) { // UDP_PROTOCOL
-                current_offset_ = l2_header_size_ + ip4->get_header_length();
+                l3_header_length = ip4->get_header_length();
+                current_offset_ = l3_start_offset + l3_header_length;
                 UdpHeader* udp_head = get_header<UdpHeader>(current_offset_);
-                // if (udp_head) current_offset_ += UdpHeader::SIZE;
+                if (udp_head) current_offset_ += UdpHeader::SIZE;
                 return udp_head;
             }
         } else {
-            IPv6Header* ip6 = ipv6();
-            if (ip6) {
+            IPv6Header* ip6 = get_header<IPv6Header>(l3_start_offset); // Try IPv6
+            uint16_t effective_ethertype = 0;
+            auto* eth_check = get_header<EthernetHeader>(0);
+            if (eth_check) {
+                effective_ethertype = ntohs(eth_check->ethertype);
+                if (effective_ethertype == 0x8100) { // VLAN
+                    auto* vlan_check = get_header<VlanHeader>(EthernetHeader::SIZE);
+                    if (vlan_check) effective_ethertype = ntohs(vlan_check->ethertype);
+                     else effective_ethertype = 0; // Safety
+                }
+            }
+
+            if (ip6 && effective_ethertype == 0x86DD) { // Check ethertype for IPv6
                 if (ip6->next_header == 17) { // UDP_PROTOCOL
-                    current_offset_ = l2_header_size_ + IPv6Header::SIZE;
+                    l3_header_length = IPv6Header::SIZE;
+                    current_offset_ = l3_start_offset + l3_header_length;
                     UdpHeader* udp_head = get_header<UdpHeader>(current_offset_);
-                    // if (udp_head) current_offset_ += UdpHeader::SIZE;
+                    if (udp_head) current_offset_ += UdpHeader::SIZE;
                     return udp_head;
                 }
             }
         }
-        current_offset_ = previous_l4_offset;
+        // current_offset_ = l3_start_offset; // Similar to TCP, avoid incorrect reset.
         return nullptr;
     }
 
@@ -418,52 +450,52 @@ public:
     // This is a complex operation as it requires shifting data.
     // A simpler version might only work if there's pre-allocated headroom.
     // For now, let's assume we need to make space if not already VLAN tagged.
+    // IMPORTANT: This operation assumes that the underlying PacketBuffer has enough
+    // capacity beyond buffer_->get_data_length() to accommodate the new VLAN header.
+    // If buffer_->get_data_length() represents the full capacity, this operation is unsafe
+    // and may lead to buffer overflows. Proper capacity management in PacketBuffer
+    // is crucial for the safety of this method.
     bool push_vlan(uint16_t vlan_id_val, uint8_t priority = 0) {
-        if (!buffer_ || buffer_->size < EthernetHeader::SIZE) return false;
+        if (!buffer_ || buffer_->get_data_length() < EthernetHeader::SIZE) return false;
 
-        EthernetHeader* eth = reinterpret_cast<EthernetHeader*>(buffer_->data);
+        EthernetHeader* eth = reinterpret_cast<EthernetHeader*>(buffer_->get_data_start_ptr());
         uint16_t original_ethertype = eth->ethertype; // Already in network byte order
 
-        // Check if new total size exceeds buffer capacity
-        if (has_vlan()) { // Already has a VLAN tag, modify it (or stack, but let's assume modify for now)
-             VlanHeader* vlan_hdr = reinterpret_cast<VlanHeader*>(buffer_->data + EthernetHeader::SIZE);
+        if (has_vlan()) { // Already has a VLAN tag, modify it
+             VlanHeader* vlan_hdr = reinterpret_cast<VlanHeader*>(buffer_->get_data_start_ptr() + EthernetHeader::SIZE);
              vlan_hdr->set_vlan_id(vlan_id_val);
              vlan_hdr->set_priority(priority);
              // ethertype after vlan tag remains the same
         } else { // No VLAN tag, insert one
-            if (buffer_->size < EthernetHeader::SIZE + VlanHeader::SIZE) return false; // Not enough space for new vlan
+            // Check if there's enough tailroom in the buffer structure to add a VLAN header,
+            // or if we can expand the data length if there's overall capacity.
+            // The original logic shifted data; PacketBuffer's prepend_data is not quite right here
+            // as we are inserting *after* the Ethernet header but before L3.
 
-            // Make space for VLAN header
-            // Shift payload data (everything after Ethernet header) by VlanHeader::SIZE bytes
-            // This is dangerous if buffer_->size is the *actual* packet data size, not allocated capacity
-            // Assuming buffer_->data points to a region large enough for this modification.
-            // A real implementation needs careful buffer capacity management.
-            // Let's assume buffer_->size is the current packet length and there's no spare room.
-            // This means push_vlan can only be done if the PacketBuffer was allocated with extra space.
-            // For this subtask, we'll simulate it but acknowledge the buffer capacity issue.
-            // A robust solution requires reallocating or using a buffer with headroom.
+            // We need to make space *within* the current data area, or ensure buffer has total capacity.
+            if (buffer_->get_tailroom() < VlanHeader::SIZE) {
+                // This check is simplified. A more robust check would consider if the *total* buffer capacity
+                // (not just tailroom from current data_len) is sufficient.
+                // If prepend_data or similar methods are used, they check headroom/tailroom.
+                // Here, we are inserting in the middle, so it's more complex.
+                // For now, assume if not enough tailroom to just expand data_len, it might fail.
+                // A better way is to check if buffer_->get_capacity() is enough for current_len + VlanHeader::SIZE
+                 if (buffer_->get_data_length() + VlanHeader::SIZE > buffer_->get_capacity()) {
+                    return false; // Not enough overall capacity to expand data into tailroom
+                 }
+            }
 
-            // If buffer is not large enough to insert VLAN header
-            // The check for data_capacity_placeholder has been removed.
-            // A proper check against actual buffer capacity should be implemented
-            // if PacketBuffer is extended to support it.
-            // For now, we assume the buffer is large enough or this is handled elsewhere.
-            // if (buffer_->size + VlanHeader::SIZE > buffer_->get_capacity()) {
-            //     return false;
-            // }
-            // The unconditional 'return false;' and its associated '}' were removed from here.
-            // The logic now proceeds to insert the VLAN tag if the initial checks pass.
-            // Proper buffer capacity check is still a TODO if PacketBuffer is to manage fixed-size allocations.
 
-            unsigned char* payload_start = buffer_->data + EthernetHeader::SIZE;
-            size_t payload_size = buffer_->size - EthernetHeader::SIZE;
+            // Pointer to the start of L3 data (payload after Ethernet header)
+            unsigned char* l3_start = buffer_->get_data_start_ptr() + EthernetHeader::SIZE;
+            size_t l3_len = buffer_->get_data_length() - EthernetHeader::SIZE;
 
-            // Shift payload to make space for VLAN header
+            // Shift L3 data to make space for VLAN header
             // memmove is safe for overlapping regions
-            memmove(payload_start + VlanHeader::SIZE, payload_start, payload_size);
+            memmove(l3_start + VlanHeader::SIZE, l3_start, l3_len);
 
             // Insert VLAN header
-            VlanHeader* vlan_hdr = reinterpret_cast<VlanHeader*>(payload_start);
+            VlanHeader* vlan_hdr = reinterpret_cast<VlanHeader*>(l3_start);
             vlan_hdr->tci = 0; // Clear it first
             vlan_hdr->set_vlan_id(vlan_id_val);
             vlan_hdr->set_priority(priority);
@@ -472,11 +504,16 @@ public:
             // Update Ethernet header's ethertype to indicate VLAN
             eth->ethertype = htons(0x8100); // VLAN_ETHERTYPE
 
-            // Update packet's internal state
-            buffer_->size += VlanHeader::SIZE; // Packet is now larger
+            // Update packet's internal state: increase data length in buffer
+            if (!buffer_->set_data_len(buffer_->get_data_length() + VlanHeader::SIZE)) {
+                // This should not happen if capacity check above was okay, but as a safeguard:
+                // Attempt to revert memmove? Very tricky. Best to ensure checks are perfect.
+                // Or, the initial capacity check should be definitive.
+                return false;
+            }
             l2_header_size_ += VlanHeader::SIZE;
         }
-        update_checksums(); // Placeholder
+        update_checksums();
         return true;
     }
 
@@ -484,47 +521,92 @@ public:
         if (!has_vlan()) { // has_vlan calls ethernet()
             return false; // No VLAN tag to pop
         }
-        if (!buffer_ || buffer_->size < EthernetHeader::SIZE + VlanHeader::SIZE) return false;
+        // Ensure buffer has at least Ethernet + VLAN header
+        if (!buffer_ || buffer_->get_data_length() < EthernetHeader::SIZE + VlanHeader::SIZE) return false;
 
+        EthernetHeader* eth = reinterpret_cast<EthernetHeader*>(buffer_->get_data_start_ptr());
+        VlanHeader* vlan_hdr = reinterpret_cast<VlanHeader*>(buffer_->get_data_start_ptr() + EthernetHeader::SIZE);
 
-        EthernetHeader* eth = reinterpret_cast<EthernetHeader*>(buffer_->data);
-        VlanHeader* vlan_hdr = reinterpret_cast<VlanHeader*>(buffer_->data + EthernetHeader::SIZE);
+        uint16_t new_ethertype = vlan_hdr->ethertype; // This is the ethertype that was after the VLAN tag
 
-        uint16_t new_ethertype = vlan_hdr->ethertype; // This is the ethertype after VLAN
-
-        unsigned char* vlan_header_start = buffer_->data + EthernetHeader::SIZE;
-        unsigned char* payload_after_vlan_start = vlan_header_start + VlanHeader::SIZE;
-        size_t payload_size = buffer_->size - (EthernetHeader::SIZE + VlanHeader::SIZE);
+        unsigned char* vlan_header_start_ptr = buffer_->get_data_start_ptr() + EthernetHeader::SIZE;
+        unsigned char* payload_after_vlan_start_ptr = vlan_header_start_ptr + VlanHeader::SIZE;
+        size_t payload_size = buffer_->get_data_length() - (EthernetHeader::SIZE + VlanHeader::SIZE);
 
         // Shift payload data left to overwrite VLAN header
-        memmove(vlan_header_start, payload_after_vlan_start, payload_size);
+        memmove(vlan_header_start_ptr, payload_after_vlan_start_ptr, payload_size);
 
         // Update Ethernet header's ethertype
         eth->ethertype = new_ethertype; // Restore original ethertype
 
-        // Update packet's internal state
-        buffer_->size -= VlanHeader::SIZE; // Packet is now smaller
+        // Update packet's internal state: decrease data length in buffer
+        if (!buffer_->set_data_len(buffer_->get_data_length() - VlanHeader::SIZE)) {
+            // Should not happen if initial length check was okay.
+            return false;
+        }
         l2_header_size_ -= VlanHeader::SIZE;
 
-        update_checksums(); // Placeholder
+        update_checksums();
         return true;
     }
 
 
     // Placeholder for checksum updates (e.g., IP, TCP/UDP)
-    void update_checksums() {
-        // This would involve recalculating checksums for IP, TCP, UDP
-        // if their headers or payloads have changed.
-        // For example, an IP checksum:
-        // IPv4Header* ip = ipv4();
-        // if (ip) {
-        //   ip->header_checksum = 0;
-        //   uint16_t checksum = calculate_internet_checksum(reinterpret_cast<uint16_t*>(ip), ip->get_header_length());
-        //   ip->header_checksum = htons(checksum);
-        // }
+    // void update_checksums() { // Ensuring the old placeholder is fully removed or commented out
+    //     // This would involve recalculating checksums for IP, TCP, UDP
+    //     // if their headers or payloads have changed.
+    // } // End of old placeholder
+    // The actual implementation starts below:
+
+    void update_checksums() { // This is the single, correct definition
+        IPv4Header* ip = ipv4(); // This correctly sets current_offset_ to the start of IPv4 header.
+        if (ip) {
+            // Store original offset to restore it later if other checksums need it.
+            // size_t original_offset = current_offset_;
+
+            // The ipv4() call already positioned current_offset_ at the start of the IPv4 header.
+            // We need the pointer to the header itself.
+            // The current_offset_ for checksum calculation should be the start of the IP header.
+            // The ipv4() method sets current_offset_ to l2_header_size_ then advances it by IP header length.
+            // For checksum, we need the start of IP header.
+            IPv4Header* ip_for_checksum = get_header<IPv4Header>(l2_header_size_);
+            if (!ip_for_checksum) return;
+
+
+            ip_for_checksum->header_checksum = 0;
+            size_t ip_header_len_bytes = ip_for_checksum->get_header_length();
+            uint16_t* words = reinterpret_cast<uint16_t*>(ip_for_checksum);
+            uint32_t sum = 0;
+
+            for (size_t i = 0; i < ip_header_len_bytes / 2; ++i) {
+                sum += ntohs(words[i]); // Sum in host byte order
+            }
+
+            // If header length is odd, there's one last byte to consider.
+            // This case should ideally not happen for a valid IPv4 header if get_header_length() is correct (multiple of 4 bytes).
+            // However, being robust:
+            if (ip_header_len_bytes % 2 != 0) {
+                 // This part is tricky as IPv4 header length is in 32-bit words.
+                 // An odd number of bytes for checksum calculation usually means something is wrong,
+                 // or it's part of a payload checksum (not the case here).
+                 // For IPv4 header, length is (ihl * 4) bytes, always even.
+                 // So, we can probably ignore this case for IPv4 header checksum.
+            }
+
+            while (sum >> 16) { // Add carry
+                sum = (sum & 0xFFFF) + (sum >> 16);
+            }
+
+            ip_for_checksum->header_checksum = htons(static_cast<uint16_t>(~sum));
+
+            // current_offset_ = original_offset; // Restore offset if needed
+            // After ipv4() call, current_offset_ is already advanced past IP header.
+            // No need to restore unless other checksums (TCP/UDP) need to re-parse from L3 start.
+            // For now, this is the only checksum.
+        }
         // Similar logic for TCP/UDP checksums which also involve pseudo-headers.
     }
-
+    // Ensure no other definition of update_checksums() exists above this point in the class.
 
 private:
     PacketBuffer* buffer_;
@@ -534,7 +616,7 @@ private:
     // Hypothetical member for actual allocated capacity if different from buffer_->size
     // This is needed for safe push_vlan like operations.
     // size_t data_capacity_placeholder;
-};
+}; // Semicolon was correctly here from previous fix attempt.
 
 } // namespace netflow
 
