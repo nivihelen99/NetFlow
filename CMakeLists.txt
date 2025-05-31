@@ -38,8 +38,12 @@ if(BUILD_EXAMPLES)
     add_executable(phase4_interface_vlan_config examples/phase4_interface_vlan_config.cpp)
     target_link_libraries(phase4_interface_vlan_config PRIVATE netflow_port_lib netflow_switching_lib)
 
+    # Add the executable target for the phase5 example
+    add_executable(phase5_l3_forwarding examples/phase5_l3_forwarding.cpp)
+    target_link_libraries(phase5_l3_forwarding PRIVATE netflow_switching_lib) # Assuming switching_lib is enough
+
     # --- Optional: Installation for examples (if BUILD_EXAMPLES is ON) ---
-    install(TARGETS phase1_packet_usage phase2_l2_parsing phase3_fdb_usage phase4_interface_vlan_config DESTINATION bin)
+    install(TARGETS phase1_packet_usage phase2_l2_parsing phase3_fdb_usage phase4_interface_vlan_config phase5_l3_forwarding DESTINATION bin)
 
 else()
     message(STATUS "Skipping build of examples.")
@@ -66,6 +70,7 @@ if(BUILD_EXAMPLES)
     add_test(NAME ExampleTest2 COMMAND phase2_l2_parsing)
     add_test(NAME ExampleTest3 COMMAND phase3_fdb_usage)
     add_test(NAME ExampleTest4 COMMAND phase4_interface_vlan_config)
+    add_test(NAME L3ForwardingExample COMMAND phase5_l3_forwarding)
     # (These are very basic tests, real tests would be in the 'tests' directory
     #  and use a testing framework like GTest or Catch2)
 endif()

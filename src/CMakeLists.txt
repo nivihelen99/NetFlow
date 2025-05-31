@@ -22,6 +22,7 @@ add_library(netflow_switching_lib STATIC
     netflow++/arp_processor.cpp   # Added ARP processor source
     netflow++/icmp_processor.cpp  # Added ICMP processor source
     netflow++/routing_manager.cpp # Added Routing Manager source
+    netflow++/management_service.cpp # Added Management Service source
 )
 
 # Make sure the libraries can find their own headers if they were in src,

@@ -17,6 +17,19 @@ class Switch; // Or a more specific delegate/interface for sending packets
 
 class ArpProcessor {
 public:
+    // ARP Cache Entry - Defined first to be usable in get_arp_cache() return type
+    struct ArpCacheEntry {
+        MacAddress mac_address;
+        std::chrono::steady_clock::time_point last_seen;
+        bool is_static; // For static ARP entries if needed in future
+
+        // Default constructor
+        ArpCacheEntry() : mac_address(), last_seen(std::chrono::steady_clock::now()), is_static(false) {}
+
+        ArpCacheEntry(MacAddress mac, bool static_entry = false)
+            : mac_address(mac), last_seen(std::chrono::steady_clock::now()), is_static(static_entry) {}
+    };
+
     // Constructor
     ArpProcessor(InterfaceManager& if_manager, ForwardingDatabase& fwd_db, Switch& packet_sender); // Added Switch& for sending
 
@@ -31,25 +44,14 @@ public:
     // or if the system has multiple interfaces, a source interface IP might be needed.
     void send_arp_request(IpAddress target_ip, uint32_t egress_port_hint);
 
-
-    // ARP Cache Entry
-    struct ArpCacheEntry {
-        MacAddress mac_address;
-        std::chrono::steady_clock::time_point last_seen;
-        bool is_static; // For static ARP entries if needed in future
-
-        // Default constructor
-        ArpCacheEntry() : mac_address(), last_seen(std::chrono::steady_clock::now()), is_static(false) {}
-
-        ArpCacheEntry(MacAddress mac, bool static_entry = false)
-            : mac_address(mac), last_seen(std::chrono::steady_clock::now()), is_static(static_entry) {}
-    };
+    // Method to get a copy of the ARP cache
+    std::map<IpAddress, ArpProcessor::ArpCacheEntry> get_arp_cache() const;
 
 
 private:
     // ARP Cache: Maps IP Address to MAC Address and timestamp
     std::map<IpAddress, ArpCacheEntry> arp_cache_;
-    std::mutex cache_mutex_; // Mutex to protect the ARP cache
+    mutable std::mutex cache_mutex_; // Mutex to protect the ARP cache, mutable for const getter
 
     // References to other components
     InterfaceManager& interface_manager_;
