@@ -140,8 +140,9 @@ void ArpProcessor::send_arp_request(IpAddress target_ip, uint32_t egress_port_hi
                 // Using std::cout for logging as per existing style in this file
                 std::cout << "ARP Request for target IP " << target_ip
                           << ": Using hinted egress port " << determined_egress_port
-                          << " (Source IP: " << src_ip_opt.value()
-                          << ", Source MAC: " /*<< mac_to_string(src_mac_opt.value())*/ << ")" << std::endl;
+                          << " (Source IP: " << src_ip_opt.value() << ", Source MAC: ";
+                for(int i=0; i<6; ++i) std::cout << std::hex << (int)src_mac_opt.value().bytes[i] << (i==5 ? "" : ":");
+                std::cout << std::dec << ")" << std::endl;
             } else {
                 std::cerr << "ARP Request for target IP " << target_ip
                           << ": Hinted egress port " << egress_port_hint
@@ -171,8 +172,9 @@ void ArpProcessor::send_arp_request(IpAddress target_ip, uint32_t egress_port_hi
                     determined_egress_port = port_id;
                     std::cout << "ARP Request for target IP " << target_ip
                               << ": Using fallback L3 interface port " << determined_egress_port
-                              << " (Source IP: " << src_ip_opt.value()
-                              << ", Source MAC: " /*<< mac_to_string(src_mac_opt.value())*/ << ")" << std::endl;
+                              << " (Source IP: " << src_ip_opt.value() << ", Source MAC: ";
+                    for(int i=0; i<6; ++i) std::cout << std::hex << (int)src_mac_opt.value().bytes[i] << (i==5 ? "" : ":");
+                    std::cout << std::dec << ")" << std::endl;
                     found_fallback = true;
                     break;
                 }
@@ -221,7 +223,8 @@ void ArpProcessor::construct_and_send_arp_request(IpAddress source_ip, MacAddres
     // Need to manually "emplace" or get pointer for ARP after Ethernet.
     // The current Packet::arp() method might assume ARP follows IP or is based on ethertype.
     // For a self-constructed packet, we get the pointer directly after Ethernet.
-    ArpHeader* arp_hdr = reinterpret_cast<ArpHeader*>(arp_packet.get_buffer()->get_data_start_ptr() + EthernetHeader::SIZE);
+    // Accessing via eth_hdr pointer is slightly cleaner if eth_hdr is guaranteed to be start of buffer.
+    ArpHeader* arp_hdr = reinterpret_cast<ArpHeader*>((uint8_t*)eth_hdr + EthernetHeader::SIZE);
 
     arp_hdr->hardware_type = htons(1); // Ethernet
     arp_hdr->protocol_type = htons(ETHERTYPE_IPV4); // IPv4
@@ -259,13 +262,17 @@ void ArpProcessor::send_arp_reply( IpAddress original_requester_ip, MacAddress o
 
     // Ethernet Header
     EthernetHeader* eth_hdr = arp_reply_packet.ethernet();
-    if(!eth_hdr) return;
+    if(!eth_hdr) {
+        std::cerr << "Failed to get Ethernet header for ARP reply" << std::endl;
+        return;
+    }
     eth_hdr->dst_mac = original_requester_mac;
     eth_hdr->src_mac = our_mac_for_reply;
     eth_hdr->ethertype = htons(ETHERTYPE_ARP);
 
     // ARP Header
-    ArpHeader* arp_hdr = reinterpret_cast<ArpHeader*>(arp_reply_packet.get_buffer()->get_data_start_ptr() + EthernetHeader::SIZE);
+    // Accessing via eth_hdr pointer is slightly cleaner if eth_hdr is guaranteed to be start of buffer.
+    ArpHeader* arp_hdr = reinterpret_cast<ArpHeader*>((uint8_t*)eth_hdr + EthernetHeader::SIZE);
     arp_hdr->hardware_type = htons(1); // Ethernet
     arp_hdr->protocol_type = htons(ETHERTYPE_IPV4); // IPv4
     arp_hdr->hardware_addr_len = 6;

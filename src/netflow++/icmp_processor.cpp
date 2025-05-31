@@ -135,14 +135,17 @@ void IcmpProcessor::send_icmp_echo_reply(Packet& original_request_packet,
 
     // 1. Ethernet Header
     EthernetHeader* reply_eth_hdr = reply_packet.ethernet(); // This also sets l2_header_size_
-    if (!reply_eth_hdr) { std::cerr << "Failed to get Ethernet header for reply" << std::endl; return; }
+    if (!reply_eth_hdr) {
+        std::cerr << "send_icmp_echo_reply: Failed to get Ethernet header for reply packet." << std::endl;
+        return;
+    }
     reply_eth_hdr->src_mac = new_src_mac;
     reply_eth_hdr->dst_mac = new_dst_mac;
     reply_eth_hdr->ethertype = htons(ETHERTYPE_IPV4);
 
     // 2. IPv4 Header
-    // Need to get pointer after Ethernet header. Packet class doesn't have emplace_ipv4 yet.
-    IPv4Header* reply_ip_hdr = reinterpret_cast<IPv4Header*>(reply_packet.get_buffer()->get_data_start_ptr() + EthernetHeader::SIZE);
+    // Access subsequent headers relative to the previous one.
+    IPv4Header* reply_ip_hdr = reinterpret_cast<IPv4Header*>((uint8_t*)reply_eth_hdr + EthernetHeader::SIZE);
     reply_ip_hdr->version_ihl = (4 << 4) | (IPv4Header::MIN_SIZE / 4); // IPv4, 20-byte header
     reply_ip_hdr->dscp_ecn = 0;
     reply_ip_hdr->total_length = htons(IPv4Header::MIN_SIZE + IcmpHeader::MIN_SIZE + icmp_payload_size);
@@ -155,7 +158,8 @@ void IcmpProcessor::send_icmp_echo_reply(Packet& original_request_packet,
     reply_ip_hdr->dst_ip = new_dst_ip_net; // Already in network byte order
 
     // 3. ICMP Header
-    IcmpHeader* reply_icmp_hdr = reinterpret_cast<IcmpHeader*>(reinterpret_cast<uint8_t*>(reply_ip_hdr) + IPv4Header::MIN_SIZE);
+    // reply_ip_hdr is constructed with MIN_SIZE, so using MIN_SIZE here is correct.
+    IcmpHeader* reply_icmp_hdr = reinterpret_cast<IcmpHeader*>((uint8_t*)reply_ip_hdr + IPv4Header::MIN_SIZE);
     reply_icmp_hdr->type = IcmpHeader::TYPE_ECHO_REPLY; // Echo Reply
     reply_icmp_hdr->code = 0;
     reply_icmp_hdr->checksum = 0; // Will be calculated by update_checksums
@@ -283,13 +287,18 @@ void IcmpProcessor::send_icmp_error_packet_base(
 
 
     // Fill Ethernet Header
-    EthernetHeader* new_eth_hdr = reinterpret_cast<EthernetHeader*>(icmp_packet.get_buffer()->get_data_start_ptr());
+    // Call .ethernet() first to ensure Packet object's l2_header_size_ is set.
+    EthernetHeader* new_eth_hdr = icmp_packet.ethernet();
+    if (!new_eth_hdr) {
+        std::cerr << "ICMP_ERROR_GEN: Failed to get Ethernet header for new ICMP error packet." << std::endl;
+        return; // Packet dtor will release buffer if needed
+    }
     new_eth_hdr->dst_mac = icmp_eth_dst_mac;
     new_eth_hdr->src_mac = icmp_eth_src_mac;
     new_eth_hdr->ethertype = htons(ETHERTYPE_IPV4);
 
     // Fill IPv4 Header for the new ICMP packet
-    IPv4Header* new_ipv4_hdr = reinterpret_cast<IPv4Header*>(reinterpret_cast<uint8_t*>(new_eth_hdr) + EthernetHeader::SIZE);
+    IPv4Header* new_ipv4_hdr = reinterpret_cast<IPv4Header*>((uint8_t*)new_eth_hdr + EthernetHeader::SIZE);
     new_ipv4_hdr->version_ihl = (4 << 4) | (IPv4Header::MIN_SIZE / 4); // IPv4, 20-byte header
     new_ipv4_hdr->dscp_ecn = 0; // DSCP (was tos)
     new_ipv4_hdr->total_length = htons(IPv4Header::MIN_SIZE + IcmpHeader::MIN_SIZE + icmp_data_payload_len);
@@ -302,7 +311,8 @@ void IcmpProcessor::send_icmp_error_packet_base(
     new_ipv4_hdr->header_checksum = 0; // Will be calculated by update_checksums
 
     // Fill ICMP Header
-    IcmpHeader* new_icmp_hdr = reinterpret_cast<IcmpHeader*>(reinterpret_cast<uint8_t*>(new_ipv4_hdr) + IPv4Header::MIN_SIZE);
+    // new_ipv4_hdr is constructed with MIN_SIZE, so using MIN_SIZE here is correct.
+    IcmpHeader* new_icmp_hdr = reinterpret_cast<IcmpHeader*>((uint8_t*)new_ipv4_hdr + IPv4Header::MIN_SIZE);
     new_icmp_hdr->type = icmp_type;
     new_icmp_hdr->code = icmp_code;
     new_icmp_hdr->checksum = 0; // Will be calculated
@@ -320,9 +330,8 @@ void IcmpProcessor::send_icmp_error_packet_base(
     // This is crucial for update_checksums to find the IP header correctly.
     // The Packet class's ethernet() method usually does this.
     // We've manually casted, so we need to ensure the Packet object state is consistent.
-    // Let's rely on the fact that update_checksums will call ethernet() itself.
-    // Or, more safely:
-    icmp_packet.ethernet(); // This will set l2_header_size_ correctly.
+    // The call to icmp_packet.ethernet() earlier has already set l2_header_size_.
+    // No redundant call needed here.
 
     icmp_packet.update_checksums(); // Calculate IP and ICMP checksums
 
