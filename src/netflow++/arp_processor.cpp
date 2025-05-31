@@ -125,47 +125,73 @@ void ArpProcessor::send_arp_request(IpAddress target_ip, uint32_t egress_port_hi
     // Option 2: If egress_port_hint is not valid or not specific enough,
     //           select a suitable interface (e.g., one on the same subnet as target_ip, or a default).
 
-    std::optional<IpAddress> source_ip;
-    std::optional<MacAddress> source_mac;
-    uint32_t actual_egress_port = 0; // The port from which the ARP request will actually be sent.
+    std::optional<IpAddress> src_ip_opt;
+    std::optional<MacAddress> src_mac_opt;
+    uint32_t determined_egress_port = 0;
 
-    if (interface_manager_.is_port_valid(egress_port_hint)) { // Assumed method
-        source_ip = interface_manager_.get_interface_ip(egress_port_hint);
-        source_mac = interface_manager_.get_interface_mac(egress_port_hint);
-        if (source_ip && source_mac) {
-            actual_egress_port = egress_port_hint;
+    // Try to use the hinted egress port first
+    if (egress_port_hint != 0) { // Assuming 0 might mean no hint or invalid
+        if (interface_manager_.is_port_valid(egress_port_hint)) {
+            src_ip_opt = interface_manager_.get_interface_ip(egress_port_hint);
+            src_mac_opt = interface_manager_.get_interface_mac(egress_port_hint);
+
+            if (src_ip_opt.has_value() && src_mac_opt.has_value()) {
+                determined_egress_port = egress_port_hint;
+                // Using std::cout for logging as per existing style in this file
+                std::cout << "ARP Request for target IP " << target_ip
+                          << ": Using hinted egress port " << determined_egress_port
+                          << " (Source IP: " << src_ip_opt.value()
+                          << ", Source MAC: " /*<< mac_to_string(src_mac_opt.value())*/ << ")" << std::endl;
+            } else {
+                std::cerr << "ARP Request for target IP " << target_ip
+                          << ": Hinted egress port " << egress_port_hint
+                          << " is not fully L3 configured (missing IP or MAC). Attempting fallback." << std::endl;
+            }
+        } else {
+            std::cerr << "ARP Request for target IP " << target_ip
+                      << ": Hinted egress port " << egress_port_hint
+                      << " is not a valid port. Attempting fallback." << std::endl;
         }
+    } else {
+         std::cout << "ARP Request for target IP " << target_ip
+                   << ": No egress port hint provided or hint was 0. Attempting fallback." << std::endl;
     }
 
-    // Fallback or more complex logic if hint isn't enough:
-    // E.g., find an interface that can route to target_ip, or a default L3 interface.
-    // For now, if the hint didn't provide a source IP/MAC, we can't send.
-    // Try to find any valid L3 interface if hint fails or is not provided.
-    if (!source_ip.has_value() || !source_mac.has_value()) {
-        std::cout << "send_arp_request: Could not determine source IP/MAC from port hint " << egress_port_hint
-                  << ". Attempting to find a suitable L3 interface." << std::endl;
+    // Fallback logic if hint failed or was not provided/valid
+    if (!src_ip_opt.has_value() || !src_mac_opt.has_value() || determined_egress_port == 0) {
+        std::cout << "ARP Request for target IP " << target_ip
+                  << ": Attempting to find a suitable L3 interface via fallback." << std::endl;
         auto all_l3_ports = interface_manager_.get_all_l3_interface_ids();
         if (!all_l3_ports.empty()) {
-            // Prefer the first L3 interface found, or one that's on the same subnet if subnet info is available for target_ip
-            // For simplicity, using the first one.
-            uint32_t fallback_port_id = all_l3_ports[0];
-            source_ip = interface_manager_.get_interface_ip(fallback_port_id);
-            source_mac = interface_manager_.get_interface_mac(fallback_port_id);
-            if (source_ip && source_mac) {
-                actual_egress_port = fallback_port_id;
-                std::cout << "send_arp_request: Using fallback L3 interface port " << actual_egress_port
-                          << " with IP " << source_ip.value() << " and MAC provided." << std::endl;
-            } else {
-                 std::cout << "send_arp_request: Fallback L3 interface port " << fallback_port_id
-                           << " did not provide valid IP/MAC." << std::endl;
+            bool found_fallback = false;
+            for (uint32_t port_id : all_l3_ports) { // Iterate to find first usable one
+                src_ip_opt = interface_manager_.get_interface_ip(port_id);
+                src_mac_opt = interface_manager_.get_interface_mac(port_id);
+                if (src_ip_opt.has_value() && src_mac_opt.has_value()) {
+                    determined_egress_port = port_id;
+                    std::cout << "ARP Request for target IP " << target_ip
+                              << ": Using fallback L3 interface port " << determined_egress_port
+                              << " (Source IP: " << src_ip_opt.value()
+                              << ", Source MAC: " /*<< mac_to_string(src_mac_opt.value())*/ << ")" << std::endl;
+                    found_fallback = true;
+                    break;
+                }
             }
+            if (!found_fallback) {
+                 std::cerr << "ARP Request for target IP " << target_ip
+                           << ": Fallback failed. No suitable L3 interface found with both IP and MAC." << std::endl;
+            }
+        } else {
+            std::cerr << "ARP Request for target IP " << target_ip
+                      << ": Fallback failed. No L3 interfaces configured." << std::endl;
         }
     }
 
-    if (source_ip.has_value() && source_mac.has_value() && actual_egress_port != 0) {
-        construct_and_send_arp_request(source_ip.value(), source_mac.value(), target_ip, actual_egress_port);
+    if (src_ip_opt.has_value() && src_mac_opt.has_value() && determined_egress_port != 0) {
+        construct_and_send_arp_request(src_ip_opt.value(), src_mac_opt.value(), target_ip, determined_egress_port);
     } else {
-        std::cerr << "send_arp_request: Failed to find a suitable source IP/MAC for ARP request to " << target_ip << std::endl;
+        std::cerr << "ARP Request for target IP " << target_ip
+                  << ": Failed to find a suitable source IP/MAC. ARP request not sent." << std::endl;
     }
 }
 

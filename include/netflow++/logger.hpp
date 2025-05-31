@@ -6,9 +6,13 @@
 #include <vector>   // Not strictly needed for this part, but often included
 #include <ctime>    // For std::time_t, std::time, std::localtime, std::strftime
 #include <cstdio>   // For std::snprintf (fallback for strftime)
-#include "packet.hpp" // For MacAddress, used in mac_to_string
+#include "packet.hpp" // For MacAddress, IpAddress, used in mac_to_string, ip_to_string
+#include <sstream>  // For std::ostringstream
+#include <iomanip>  // For std::hex, std::setw, std::setfill
 
 // Note: <iomanip> and std::put_time are C++20. Using <ctime> for broader compatibility.
+// For IP to string, we might need platform specific headers if not using C++20 features
+// packet.hpp should already bring in arpa/inet.h or winsock2.h for IpAddress definition and ntohl
 
 namespace netflow {
 
@@ -89,6 +93,27 @@ public:
                       mac.bytes[3], mac.bytes[4], mac.bytes[5]);
         return std::string(buf);
     }
+
+    std::string ip_to_string(const IpAddress& ip_addr_net_order) const {
+        // IpAddress is uint32_t in network byte order
+        // Convert to host byte order for manipulation if needed by OS functions,
+        // or format manually.
+        // Using manual formatting to avoid OS-specifics like inet_ntoa if not careful with struct in_addr
+        uint32_t ip_host_order = ntohl(ip_addr_net_order);
+        std::ostringstream oss;
+        oss << ((ip_host_order >> 24) & 0xFF) << "."
+            << ((ip_host_order >> 16) & 0xFF) << "."
+            << ((ip_host_order >> 8) & 0xFF) << "."
+            << (ip_host_order & 0xFF);
+        return oss.str();
+    }
+
+    std::string to_hex_string(uint16_t val) const {
+        std::ostringstream oss;
+        oss << "0x" << std::hex << std::setw(4) << std::setfill('0') << val;
+        return oss.str();
+    }
+
 
 public: // Specific log event methods
 

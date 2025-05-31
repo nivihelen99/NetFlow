@@ -5,6 +5,8 @@
 #include <cstring>  // For memcpy
 #include <memory>   // For std::make_unique
 #include "netflow++/switch.hpp" // For full Switch class definition
+#include <cstdlib>  // For rand()
+#include <algorithm> // For std::min
 
 // Ensure ntohs/htons/htonl are available
 #if __has_include(<arpa/inet.h>)
@@ -179,6 +181,166 @@ void IcmpProcessor::send_icmp_echo_reply(Packet& original_request_packet,
 
     // Send the packet
     switch_ref_.send_control_plane_packet(reply_packet, egress_port); // Changed to send_control_plane_packet
+}
+
+
+// --- ICMP Error Sending Methods ---
+
+void IcmpProcessor::send_icmp_error_packet_base(
+    Packet& original_packet,
+    uint8_t icmp_type,
+    uint8_t icmp_code) {
+
+    IPv4Header* original_ipv4_hdr = original_packet.ipv4();
+    EthernetHeader* original_eth_hdr = original_packet.ethernet(); // Needed for original MACs if used for routing decision
+
+    if (!original_ipv4_hdr || !original_eth_hdr) {
+        // Use switch_ref_.logger_ for logging if available and LOG_ macros are not set up for direct use here.
+        // For now, using std::cerr as a fallback if direct logger access is complex.
+        std::cerr << "ICMP_ERROR_GEN: Cannot send ICMP error for non-IPv4 or non-Ethernet original packet." << std::endl;
+        return;
+    }
+
+    // 1. Determine Source IP for the ICMP error message.
+    //    The ICMP packet's source IP should be an IP of the interface via which the error packet will be sent.
+    //    This requires routing the ICMP error packet (destined for original_ipv4_hdr->src_ip).
+
+    IpAddress icmp_error_destination_ip = original_ipv4_hdr->src_ip; // ICMP error goes to original sender
+    std::optional<RouteEntry> route_to_original_src_opt = switch_ref_.routing_manager_.lookup_route(icmp_error_destination_ip);
+
+    if (!route_to_original_src_opt) {
+        std::cerr << "ICMP_ERROR_GEN: No route to original source " << icmp_error_destination_ip
+                  << " to send ICMP error. Dropping." << std::endl;
+        return;
+    }
+    const RouteEntry& route_to_original_src = route_to_original_src_opt.value();
+
+    std::optional<IpAddress> icmp_error_source_ip_opt = interface_manager_.get_interface_ip(route_to_original_src.egress_interface_id);
+    if (!icmp_error_source_ip_opt) {
+        std::cerr << "ICMP_ERROR_GEN: No IP configured on interface " << route_to_original_src.egress_interface_id
+                  << " to source ICMP error. Dropping." << std::endl;
+        return;
+    }
+    IpAddress icmp_error_source_ip = icmp_error_source_ip_opt.value();
+
+    // 2. Determine Next-Hop MAC for the ICMP error packet
+    IpAddress next_hop_for_icmp_error = route_to_original_src.next_hop_ip;
+    if (next_hop_for_icmp_error == 0) { // Directly connected to the original source's subnet
+        next_hop_for_icmp_error = icmp_error_destination_ip;
+    }
+
+    std::optional<MacAddress> icmp_eth_dst_mac_opt = switch_ref_.arp_processor_.lookup_mac(next_hop_for_icmp_error);
+    if (!icmp_eth_dst_mac_opt) {
+        std::cout << "ICMP_ERROR_GEN: No ARP entry for next-hop " << next_hop_for_icmp_error
+                  << " (for original source " << icmp_error_destination_ip << "). Sending ARP request." << std::endl;
+        switch_ref_.arp_processor_.send_arp_request(next_hop_for_icmp_error, route_to_original_src.egress_interface_id);
+        return; // Cannot send ICMP error without MAC
+    }
+    MacAddress icmp_eth_dst_mac = icmp_eth_dst_mac_opt.value();
+
+    std::optional<MacAddress> icmp_eth_src_mac_opt = interface_manager_.get_interface_mac(route_to_original_src.egress_interface_id);
+    if (!icmp_eth_src_mac_opt) {
+         std::cerr << "ICMP_ERROR_GEN: No MAC configured on interface " << route_to_original_src.egress_interface_id
+                   << " to source ICMP error Ethernet frame. Dropping." << std::endl;
+        return;
+    }
+    MacAddress icmp_eth_src_mac = icmp_eth_src_mac_opt.value();
+
+    // 3. Construct the ICMP error packet.
+    //    Payload: Original IP header + first 8 bytes of original L4 payload.
+    const size_t original_ip_header_len = original_ipv4_hdr->get_header_length(); // Use method
+    const size_t max_original_l4_data_to_copy = 8;
+
+    const uint8_t* original_l4_data_start = reinterpret_cast<const uint8_t*>(original_ipv4_hdr) + original_ip_header_len;
+    size_t available_l4_data_in_original = 0;
+    if (original_packet.get_buffer()->get_data_length() > ( (original_l4_data_start - original_packet.get_buffer()->get_data_start_ptr()) ) ) {
+        available_l4_data_in_original = original_packet.get_buffer()->get_data_length() -
+                                         (original_l4_data_start - original_packet.get_buffer()->get_data_start_ptr());
+    }
+    size_t actual_l4_data_to_copy = std::min(max_original_l4_data_to_copy, available_l4_data_in_original);
+    const size_t icmp_data_payload_len = original_ip_header_len + actual_l4_data_to_copy;
+
+    size_t total_packet_size = EthernetHeader::SIZE + IPv4Header::MIN_SIZE + IcmpHeader::MIN_SIZE + icmp_data_payload_len;
+
+    // Use Switch's buffer pool. Pass total_packet_size as required_data_payload_size and 0 for headroom,
+    // as Packet class methods assume Ethernet header is at the start of buffer's "data" region.
+    PacketBuffer* pkt_buf_raw = switch_ref_.buffer_pool.allocate_buffer(total_packet_size, 0);
+    if (!pkt_buf_raw) {
+        std::cerr << "ICMP_ERROR_GEN: Failed to allocate buffer for ICMP error packet." << std::endl;
+        return;
+    }
+    Packet icmp_packet(pkt_buf_raw); // Manages ref count of pkt_buf_raw
+
+    // The allocate_buffer now returns a buffer with data_len = 0.
+    // We need to set the actual length of data we are about to write.
+    if (!icmp_packet.get_buffer()->set_data_len(total_packet_size)) {
+        std::cerr << "ICMP_ERROR_GEN: Failed to set data length on allocated buffer." << std::endl;
+        // Packet destructor will handle decrementing ref count of pkt_buf_raw if it was successfully constructed.
+        // If Packet construction failed (e.g. null buffer), this point might not be reached.
+        // If pkt_buf_raw is not null but set_data_len fails, Packet dtor handles it.
+        return;
+    }
+
+
+    // Fill Ethernet Header
+    EthernetHeader* new_eth_hdr = reinterpret_cast<EthernetHeader*>(icmp_packet.get_buffer()->get_data_start_ptr());
+    new_eth_hdr->dst_mac = icmp_eth_dst_mac;
+    new_eth_hdr->src_mac = icmp_eth_src_mac;
+    new_eth_hdr->ethertype = htons(ETHERTYPE_IPV4);
+
+    // Fill IPv4 Header for the new ICMP packet
+    IPv4Header* new_ipv4_hdr = reinterpret_cast<IPv4Header*>(reinterpret_cast<uint8_t*>(new_eth_hdr) + EthernetHeader::SIZE);
+    new_ipv4_hdr->version_ihl = (4 << 4) | (IPv4Header::MIN_SIZE / 4); // IPv4, 20-byte header
+    new_ipv4_hdr->dscp_ecn = 0; // DSCP (was tos)
+    new_ipv4_hdr->total_length = htons(IPv4Header::MIN_SIZE + IcmpHeader::MIN_SIZE + icmp_data_payload_len);
+    new_ipv4_hdr->identification = htons(static_cast<uint16_t>(rand())); // Random ID
+    new_ipv4_hdr->flags_fragment_offset = htons(0); // No fragmentation
+    new_ipv4_hdr->ttl = 64; // Default TTL for switch-generated packets
+    new_ipv4_hdr->protocol = IPPROTO_ICMP;
+    new_ipv4_hdr->src_ip = icmp_error_source_ip;     // Network byte order
+    new_ipv4_hdr->dst_ip = icmp_error_destination_ip; // Network byte order
+    new_ipv4_hdr->header_checksum = 0; // Will be calculated by update_checksums
+
+    // Fill ICMP Header
+    IcmpHeader* new_icmp_hdr = reinterpret_cast<IcmpHeader*>(reinterpret_cast<uint8_t*>(new_ipv4_hdr) + IPv4Header::MIN_SIZE);
+    new_icmp_hdr->type = icmp_type;
+    new_icmp_hdr->code = icmp_code;
+    new_icmp_hdr->checksum = 0; // Will be calculated
+    new_icmp_hdr->identifier = 0; // Unused for these error types
+    new_icmp_hdr->sequence_number = 0; // Unused for these error types
+
+    // Fill ICMP Data Payload (original IP header + first 8 bytes of original L4 data)
+    uint8_t* icmp_data_payload_ptr = reinterpret_cast<uint8_t*>(new_icmp_hdr) + IcmpHeader::MIN_SIZE;
+    memcpy(icmp_data_payload_ptr, original_ipv4_hdr, original_ip_header_len);
+    if (actual_l4_data_to_copy > 0) {
+        memcpy(icmp_data_payload_ptr + original_ip_header_len, original_l4_data_start, actual_l4_data_to_copy);
+    }
+
+    // Update L2 header size in the new packet object before calling update_checksums
+    // This is crucial for update_checksums to find the IP header correctly.
+    // The Packet class's ethernet() method usually does this.
+    // We've manually casted, so we need to ensure the Packet object state is consistent.
+    // Let's rely on the fact that update_checksums will call ethernet() itself.
+    // Or, more safely:
+    icmp_packet.ethernet(); // This will set l2_header_size_ correctly.
+
+    icmp_packet.update_checksums(); // Calculate IP and ICMP checksums
+
+    std::cout << "ICMP_ERROR_GEN: Sending ICMP Type " << (int)icmp_type << " Code " << (int)icmp_code
+              << " to " << icmp_error_destination_ip << " from " << icmp_error_source_ip
+              << " via interface " << route_to_original_src.egress_interface_id << std::endl;
+    switch_ref_.send_control_plane_packet(icmp_packet, route_to_original_src.egress_interface_id);
+}
+
+void IcmpProcessor::send_time_exceeded(Packet& original_packet, uint32_t /*original_ingress_port - not directly used for routing decision of reply*/) {
+    // Using std::cout for logging as per existing style in this file, assuming logger_ref_ might not be set up
+    std::cout << "ICMP_PROC: Original packet TTL expired. Sending ICMP Time Exceeded." << std::endl;
+    send_icmp_error_packet_base(original_packet, 11 /* Type: Time Exceeded */, 0 /* Code: TTL exceeded in transit */);
+}
+
+void IcmpProcessor::send_destination_unreachable(Packet& original_packet, uint32_t /*original_ingress_port*/, uint8_t code) {
+    std::cout << "ICMP_PROC: Original packet destination unreachable. Sending ICMP Dest Unreachable code " << (int)code << std::endl;
+    send_icmp_error_packet_base(original_packet, 3 /* Type: Destination Unreachable */, code);
 }
 
 } // namespace netflow
