@@ -271,6 +271,12 @@ public:
 
     void set_logger(SwitchLogger* logger);
 
+    // New methods for CLI configuration
+    void set_actor_system_priority(uint16_t priority);
+    void set_port_lacp_priority(uint32_t port_id, uint16_t priority);
+    std::optional<LacpPortInfo> get_port_lacp_info(uint32_t port_id) const;
+    bool configure_lag_setting(uint32_t lag_id, std::function<void(LagConfig&)> modifier_fn);
+
 private:
     uint64_t switch_mac_address_; // Base MAC for the switch
     uint16_t lacp_system_priority_; // LACP system priority for the switch
