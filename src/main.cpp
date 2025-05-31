@@ -58,10 +58,10 @@ int main(int argc, char* argv[]) {
     default_access_config.native_vlan = 1;
     for(uint32_t i = 2; i < num_ports; ++i) {
         sw.vlan_manager.configure_port(i, default_access_config);
-        sw.stp_manager.set_port_state(i, netflow::StpManager::PortState::FORWARDING); // Assume STP converged
+        // sw.stp_manager.set_port_state(i, netflow::StpManager::PortState::FORWARDING); // Assume STP converged - Method removed
     }
-    sw.stp_manager.set_port_state(0, netflow::StpManager::PortState::FORWARDING);
-    sw.stp_manager.set_port_state(1, netflow::StpManager::PortState::FORWARDING);
+    // sw.stp_manager.set_port_state(0, netflow::StpManager::PortState::FORWARDING); // Method removed
+    // sw.stp_manager.set_port_state(1, netflow::StpManager::PortState::FORWARDING); // Method removed
 
 
     // --- Logger Example ---
@@ -80,8 +80,7 @@ int main(int argc, char* argv[]) {
 
     // Apply these manually set parameters
     sw.logger_.info("CONFIG_MAIN", "Applying manually set parameters to the switch...");
-    // sw.config_manager_.apply_config(sw.config_manager_.get_current_config_data(), sw); // Old signature
-    sw.config_manager_.apply_config(sw); // Corrected signature
+    sw.config_manager_.apply_config(sw.config_manager_.get_current_config_data(), sw); // Old signature was correct
 
     // Verify if admin_up for port 1 was applied (optional check)
     auto port1_cfg_after_apply = sw.interface_manager_.get_port_config(1);

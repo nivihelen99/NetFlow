@@ -194,11 +194,26 @@ public:
         }
     }
 
-    // Non-copyable, non-movable for simplicity for now
+    // Non-copyable for simplicity, but movable
     Packet(const Packet&) = delete;
     Packet& operator=(const Packet&) = delete;
-    Packet(Packet&&) = delete;
-    Packet& operator=(Packet&&) = delete;
+
+    Packet(Packet&& other) noexcept : buffer_(other.buffer_), current_offset_(other.current_offset_), l2_header_size_(other.l2_header_size_) {
+        other.buffer_ = nullptr; // Prevent double decrement_ref by the moved-from object's destructor
+    }
+
+    Packet& operator=(Packet&& other) noexcept {
+        if (this != &other) {
+            if (buffer_) {
+                buffer_->decrement_ref(); // Release own resource
+            }
+            buffer_ = other.buffer_;
+            current_offset_ = other.current_offset_;
+            l2_header_size_ = other.l2_header_size_;
+            other.buffer_ = nullptr; // Prevent double decrement_ref
+        }
+        return *this;
+    }
 
     PacketBuffer* get_buffer() const { return buffer_; }
 
