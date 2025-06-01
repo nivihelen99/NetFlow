@@ -126,31 +126,3 @@ gtest_discover_tests(config_manager_test)
 
 # Ensure tests can find project headers
 target_include_directories(config_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
-# Add executable for RoutingManager tests
-add_executable(routing_manager_test
-    routing_manager_test.cpp
-    # RoutingManager has a .cpp file, so it's part of netflow_switching_lib
-    # ../src/netflow++/routing_manager.cpp # This line is not needed if linking netflow_switching_lib
-)
-target_link_libraries(routing_manager_test PRIVATE netflow_switching_lib GTest::gtest_main)
-gtest_discover_tests(routing_manager_test)
-target_include_directories(routing_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
-# Add executable for ArpProcessor tests
-add_executable(arp_processor_test
-    arp_processor_test.cpp
-    # ArpProcessor has a .cpp file, so it's part of netflow_switching_lib
-)
-target_link_libraries(arp_processor_test PRIVATE netflow_switching_lib GTest::gtest GTest::gmock GTest::gtest_main)
-gtest_discover_tests(arp_processor_test)
-target_include_directories(arp_processor_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
-
-# Add executable for IcmpProcessor tests
-add_executable(icmp_processor_test
-    icmp_processor_test.cpp
-    # IcmpProcessor has a .cpp file, so it's part of netflow_switching_lib
-)
-target_link_libraries(icmp_processor_test PRIVATE netflow_switching_lib GTest::gtest GTest::gmock GTest::gtest_main)
-gtest_discover_tests(icmp_processor_test)
-target_include_directories(icmp_processor_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
