@@ -56,18 +56,23 @@ public:
     LldpManager lldp_manager_;      // Add LldpManager member
     // LacpManager lacp_manager_; // Removed redundant declaration
 
+    // Test hook for capturing sent packets
+    std::function<void(const Packet&, uint32_t)> test_packet_send_hook;
+
     Switch(uint32_t num_ports, uint64_t switch_mac_address,
            uint16_t stp_default_priority = 32768, uint16_t lacp_default_priority = 32768) :
         num_ports_(num_ports),
-        interface_manager_(), // Ensure InterfaceManager is initialized if it has a default constructor
-        fdb(), // Initialize ForwardingDatabase if it has a default constructor or specific params
+        logger_(LogLevel::INFO), // Initialize logger_ early
+        qos_manager_(logger_),
+        acl_manager_(logger_),   // Initialize acl_manager_ with logger_
+        interface_manager_(),
+        fdb(),
         stp_manager(num_ports, switch_mac_address, stp_default_priority),
         lacp_manager_(switch_mac_address, lacp_default_priority),
-        lldp_manager_(*this, interface_manager_), // Initialize LldpManager
-        arp_processor_(interface_manager_, fdb, *this),      // Initialize ArpProcessor with fdb
-        icmp_processor_(interface_manager_, *this),     // Initialize IcmpProcessor
-        flow_table_(1024),
-        logger_(LogLevel::INFO) {
+        lldp_manager_(*this, interface_manager_),
+        arp_processor_(interface_manager_, fdb, *this),
+        icmp_processor_(interface_manager_, *this),
+        flow_table_(1024) {
 
         // Convert uint64_t MAC to MacAddress for logging
         uint8_t temp_mac_bytes[6];
@@ -162,6 +167,11 @@ public:
         // TX stats are incremented by the actual sending mechanism after dequeuing from QoS.
         // For simulation here, if enqueue_packet doesn't lead to TX stats, uncomment below:
         // interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->get_data_length());
+
+        // Call test hook if set
+        if (test_packet_send_hook) {
+            test_packet_send_hook(pkt, egress_port);
+        }
     }
 
     // Method for managers to send control plane frames (raw data version)
@@ -212,6 +222,11 @@ public:
         // If allocation fails, or queuing fails and pkt is not fully passed on, pb must be released.
         // qos_manager_.enqueue_packet should ideally take ownership or manage ref count.
         // If pkt is not enqueued, pb->decrement_ref() would be needed here.
+
+        // Call test hook if set
+        if (test_packet_send_hook) {
+            test_packet_send_hook(pkt, egress_port_id);
+        }
     }
 
 

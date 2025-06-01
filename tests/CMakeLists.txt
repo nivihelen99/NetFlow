@@ -126,3 +126,48 @@ gtest_discover_tests(config_manager_test)
 
 # Ensure tests can find project headers
 target_include_directories(config_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for QosManager tests
+add_executable(qos_manager_test qos_manager_test.cpp)
+
+# Link against GTest
+target_link_libraries(qos_manager_test PRIVATE GTest::gtest_main)
+
+# Link against the NetFlow library (netflow_switching_lib)
+target_link_libraries(qos_manager_test PRIVATE netflow_switching_lib)
+
+# Discover tests for the new executable
+gtest_discover_tests(qos_manager_test)
+
+# Ensure tests can find project headers
+target_include_directories(qos_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for AclManager tests
+add_executable(acl_manager_test acl_manager_test.cpp)
+
+# Link against GTest and NetFlow library
+target_link_libraries(acl_manager_test PRIVATE netflow_switching_lib GTest::gtest_main)
+
+# Discover tests for the new executable
+gtest_discover_tests(acl_manager_test)
+
+# Ensure tests can find project headers
+target_include_directories(acl_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for RoutingManager tests
+add_executable(routing_manager_test routing_manager_test.cpp)
+target_link_libraries(routing_manager_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(routing_manager_test)
+target_include_directories(routing_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for ArpProcessor tests
+add_executable(arp_processor_test arp_processor_test.cpp)
+target_link_libraries(arp_processor_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(arp_processor_test)
+target_include_directories(arp_processor_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for IcmpProcessor tests
+add_executable(icmp_processor_test icmp_processor_test.cpp)
+target_link_libraries(icmp_processor_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(icmp_processor_test)
+target_include_directories(icmp_processor_test PRIVATE ${CMAKE_SOURCE_DIR}/include)

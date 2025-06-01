@@ -9,6 +9,8 @@
 #include "netflow++/stp_manager.hpp"
 #include "netflow++/lacp_manager.hpp"
 #include "netflow++/lldp_manager.hpp"      // Added LldpManager include
+#include "netflow++/qos_manager.hpp"       // Include QosManager header
+#include "netflow++/acl_manager.hpp"       // Include AclManager header
 #include "netflow++/packet.hpp"            // For IpAddress
 #include <string>
 #include <optional>
@@ -16,9 +18,17 @@
 
 namespace netflow {
 
+// Forward declare QosManager if full include isn't desired here,
+// but since we will use its types in private methods, full include is fine.
+// class QosManager;
+
 class ManagementService {
 public:
-    ManagementService(RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi, netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm, netflow::StpManager& stpm, netflow::LacpManager& lacpm, netflow::LldpManager& lldpm); // Added LldpManager
+    ManagementService(RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
+                      netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm,
+                      netflow::StpManager& stpm, netflow::LacpManager& lacpm,
+                      netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
+                      netflow::AclManager& acl_m); // Added AclManager
 
     void register_cli_commands();
 
@@ -58,7 +68,21 @@ private:
     netflow::ForwardingDatabase& fdb_manager_;
     netflow::StpManager& stp_manager_;
     netflow::LacpManager& lacp_manager_;
-    netflow::LldpManager& lldp_manager_; // Added LldpManager reference
+    netflow::LldpManager& lldp_manager_;
+    netflow::QosManager& qos_manager_;
+
+    netflow::QosManager& qos_manager_;
+    netflow::AclManager& acl_manager_; // Added AclManager reference
+
+    // QoS CLI Handlers
+    std::string handle_interface_qos_command(uint32_t port_id, const std::vector<std::string>& qos_args);
+    std::string handle_show_qos_command(const std::vector<std::string>& args);
+    std::string handle_clear_qos_command(const std::vector<std::string>& args);
+
+    // ACL CLI Handlers
+    std::string handle_acl_rule_command(const std::vector<std::string>& args);
+    std::string handle_show_acl_rules_command(const std::vector<std::string>& args);
+    std::string handle_acl_compile_command(const std::vector<std::string>& args);
 };
 
 } // namespace netflow
