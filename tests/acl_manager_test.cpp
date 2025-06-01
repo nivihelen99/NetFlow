@@ -96,8 +96,9 @@ netflow::Packet create_acl_test_packet(
                 tcp_h_data.checksum = 0;
                 tcp_h_data.urgent_pointer = 0;
                 unsigned char tcp_buf[TCP_HEADER_SIZE];
-                std::memcpy(tcp_buf, &tcp_h_data, TCP_HEADER_SIZE);
-                frame_data_vec.insert(frame_data_vec.end(), tcp_buf, tcp_buf + TCP_HEADER_SIZE);
+                std::memset(tcp_buf, 0, TCP_HEADER_SIZE); // Zero out the buffer first
+                std::memcpy(tcp_buf, &tcp_h_data, sizeof(netflow::TcpHeader)); // Use sizeof the actual struct
+                frame_data_vec.insert(frame_data_vec.end(), tcp_buf, tcp_buf + TCP_HEADER_SIZE); // Still insert based on defined header size for L4
             } else if (ipv4_h_data.protocol == netflow::IPPROTO_UDP) {
                 netflow::UdpHeader udp_h_data;
                 udp_h_data.src_port = htons(src_port_opt.value_or(0));
