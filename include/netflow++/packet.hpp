@@ -8,6 +8,7 @@
 #include <cstring>  // For memcpy, memmove
 #include <algorithm> // For std::copy, std::fill, std::equal
 #include <stdexcept> // For exceptions
+#include <string> // Required for std::string, used in stringToIpAddress
 
 // For network byte order functions like ntohs, htons.
 // On Linux/POSIX, this is the typical header.
@@ -67,6 +68,21 @@ inline uint32_t ntohl(uint32_t val) {
 #endif
 
 namespace netflow {
+
+// Helper function to convert string to IpAddress (uint32_t in network byte order)
+static inline uint32_t stringToIpAddress(const std::string& ip_str) {
+    struct in_addr addr;
+    // Ensure that AF_INET and inet_pton are available. They should be from <arpa/inet.h> or <winsock2.h>
+    if (inet_pton(AF_INET, ip_str.c_str(), &addr) == 1) {
+        return addr.s_addr; // Already in network byte order
+    }
+    // Constructing the error message safely
+    std::string err_msg = "Invalid IP address string: " + ip_str;
+    // Adding errno details if available can be helpful but needs to be platform-agnostic or carefully handled.
+    // For simplicity, just the IP string is included here.
+    // Example with errno: err_msg += " (errno: " + std::to_string(errno) + ", " + strerror(errno) + ")";
+    throw std::runtime_error(err_msg);
+}
 
 // Placeholder for MAC Address
 // Ensure MacAddress is packed for correct on-wire representation if not already.
