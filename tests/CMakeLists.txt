@@ -154,6 +154,24 @@ gtest_discover_tests(acl_manager_test)
 # Ensure tests can find project headers
 target_include_directories(acl_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# Add executable for BufferPool tests
+add_executable(buffer_pool_test buffer_pool_test.cpp)
+# BufferPool is header-only but uses PacketBuffer from the library.
+# No other specific source files from netflow_switching_lib are directly compiled for buffer_pool_test itself,
+# but linking netflow_switching_lib makes PacketBuffer definition available if it's not header-only.
+# PacketBuffer.hpp seems to be header-only based on its nature.
+# If PacketBuffer is indeed header-only and has no .cpp, netflow_switching_lib might not be strictly needed here,
+# but it's safer to include if PacketBuffer could have associated compiled code or dependencies.
+# Let's assume PacketBuffer is effectively header-only or its definitions are available through headers.
+# GTest::gtest_main is needed.
+target_link_libraries(buffer_pool_test PRIVATE netflow_switching_lib GTest::gtest_main)
+# Add netflow_switching_lib if any underlying types used by BufferPool/PacketBuffer are compiled in it.
+# PacketBuffer is used by Packet, which is used everywhere, so netflow_switching_lib is usually linked by other tests.
+# However, if BufferPool and PacketBuffer are purely header-only, this specific test might not need netflow_switching_lib.
+# For consistency and safety, and because PacketBuffer is fundamental, we link netflow_switching_lib.
+gtest_discover_tests(buffer_pool_test)
+target_include_directories(buffer_pool_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 # Add executable for RoutingManager tests
 add_executable(routing_manager_test routing_manager_test.cpp)
 target_link_libraries(routing_manager_test PRIVATE netflow_switching_lib GTest::gtest_main)

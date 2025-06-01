@@ -11,6 +11,7 @@
 #include "netflow++/lldp_manager.hpp"      // Added LldpManager include
 #include "netflow++/qos_manager.hpp"       // Include QosManager header
 #include "netflow++/acl_manager.hpp"       // Include AclManager header
+#include "netflow++/logger.hpp"            // Include Logger
 #include "netflow++/packet.hpp"            // For IpAddress
 #include <string>
 #include <optional>
@@ -24,11 +25,12 @@ namespace netflow {
 
 class ManagementService {
 public:
-    ManagementService(RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
+    ManagementService(SwitchLogger& logger, // Added logger
+                      RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
                       netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm,
                       netflow::StpManager& stpm, netflow::LacpManager& lacpm,
                       netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
-                      netflow::AclManager& acl_m); // Added AclManager
+                      netflow::AclManager& acl_m);
 
     void register_cli_commands();
 
@@ -70,9 +72,8 @@ private:
     netflow::LacpManager& lacp_manager_;
     netflow::LldpManager& lldp_manager_;
     netflow::QosManager& qos_manager_;
-
-    netflow::QosManager& qos_manager_;
-    netflow::AclManager& acl_manager_; // Added AclManager reference
+    netflow::AclManager& acl_manager_;
+    SwitchLogger& logger_; // Added logger member
 
     // QoS CLI Handlers
     std::string handle_interface_qos_command(uint32_t port_id, const std::vector<std::string>& qos_args);

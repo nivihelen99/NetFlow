@@ -109,6 +109,7 @@ int main(int argc, char* argv[]) {
 
     // Instantiate ManagementService and register its commands
     netflow::ManagementService mgmt_service(
+        sw.logger_,      // Pass SwitchLogger
         sw.routing_manager_,
         sw.interface_manager_,
         sw.management_interface_,
@@ -117,8 +118,8 @@ int main(int argc, char* argv[]) {
         sw.stp_manager,
         sw.lacp_manager_,
         sw.lldp_manager_,
-        sw.qos_manager_, // Pass QosManager
-        sw.acl_manager_  // Pass AclManager
+        sw.qos_manager_,
+        sw.acl_manager_
     );
     mgmt_service.register_cli_commands(); // This will register all structured commands
 

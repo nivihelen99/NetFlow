@@ -161,9 +161,9 @@ public:
         // For simplicity, assume control packets are ready to go.
         // vlan_manager.process_egress(pkt, egress_port); // May not be needed or different rules for control plane
 
-        uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port); // Use high priority queue?
-        qos_manager_.enqueue_packet(pkt, egress_port, queue_id);
-        logger_.debug("SEND_CONTROL_PACKET", "Control plane packet enqueued to port " + std::to_string(egress_port) + " queue " + std::to_string(static_cast<int>(queue_id)));
+        // uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port); // Classification is internal to enqueue
+        qos_manager_.enqueue_packet(pkt, egress_port);
+        logger_.debug("SEND_CONTROL_PACKET", "Control plane packet enqueued to port " + std::to_string(egress_port));
         // TX stats are incremented by the actual sending mechanism after dequeuing from QoS.
         // For simulation here, if enqueue_packet doesn't lead to TX stats, uncomment below:
         // interface_manager_._increment_tx_stats(egress_port, pkt.get_buffer()->get_data_length());
@@ -210,13 +210,12 @@ public:
 
         // QoS and Enqueue (similar to send_control_plane_packet)
         // Control plane packets might get higher priority.
-        uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port_id);
-        qos_manager_.enqueue_packet(pkt, egress_port_id, queue_id);
+        // uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, egress_port_id); // Classification is internal to enqueue
+        qos_manager_.enqueue_packet(pkt, egress_port_id);
 
         logger_.debug("SEND_CTRL_FRAME", "Control frame (EthType: 0x" + logger_.to_hex_string(ethertype) +
                                        ", Size: " + std::to_string(frame_size) +
-                                       ") enqueued to port " + std::to_string(egress_port_id) +
-                                       " queue " + std::to_string(static_cast<int>(queue_id)));
+                                       ") enqueued to port " + std::to_string(egress_port_id));
         // Note: Actual transmission and TX stats are handled by the QoS dequeuing mechanism or physical layer simulation.
         // If PacketBuffer was allocated and pkt created, its destructor will handle pb's ref count.
         // If allocation fails, or queuing fails and pkt is not fully passed on, pb must be released.
@@ -349,9 +348,9 @@ public:
         }
         if (acl_action == AclActionType::REDIRECT) {
             logger_.info("ACL", "Packet REDIRECTED by ACL to port " + std::to_string(redirect_port_id_acl) + " from ingress port " + std::to_string(ingress_port_id));
-            uint8_t queue_id_redirect = qos_manager_.classify_packet_to_queue(pkt, redirect_port_id_acl);
-            qos_manager_.enqueue_packet(pkt, redirect_port_id_acl, queue_id_redirect);
-            logger_.debug("QOS", "Redirected packet enqueued to port " + std::to_string(redirect_port_id_acl) + " queue " + std::to_string(static_cast<int>(queue_id_redirect)));
+            // uint8_t queue_id_redirect = qos_manager_.classify_packet_to_queue(pkt, redirect_port_id_acl); // Classification is internal to enqueue
+            qos_manager_.enqueue_packet(pkt, redirect_port_id_acl);
+            logger_.debug("QOS", "Redirected packet enqueued to port " + std::to_string(redirect_port_id_acl));
             interface_manager_._increment_tx_stats(redirect_port_id_acl, pkt.get_buffer()->get_data_length());
             return;
         }
@@ -503,8 +502,8 @@ public:
                                 // Use a general send mechanism that handles L2 processing like VLAN tagging on egress if necessary
                                 // and QoS. For now, using qos_manager_.enqueue_packet like known L2 unicasts.
                                 vlan_manager.process_egress(pkt, route.egress_interface_id); // Apply egress VLAN rules
-                                uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, route.egress_interface_id);
-                                qos_manager_.enqueue_packet(pkt, route.egress_interface_id, queue_id);
+                                // uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, route.egress_interface_id); // Classification is internal to enqueue
+                                qos_manager_.enqueue_packet(pkt, route.egress_interface_id);
                                 // interface_manager_._increment_tx_stats(route.egress_interface_id, pkt.get_buffer()->get_data_length()); // qos_manager or physical layer should do this
                                 return;
                             } else {
@@ -613,9 +612,9 @@ public:
                 vlan_manager.process_egress(pkt, final_egress_port);
 
                 // QoS and Enqueue
-                uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, final_egress_port);
-                qos_manager_.enqueue_packet(pkt, final_egress_port, queue_id);
-                logger_.debug("QOS", "Packet enqueued to port " + std::to_string(final_egress_port) + " queue " + std::to_string(static_cast<int>(queue_id)));
+                // uint8_t queue_id = qos_manager_.classify_packet_to_queue(pkt, final_egress_port); // Classification is internal to enqueue
+                qos_manager_.enqueue_packet(pkt, final_egress_port);
+                logger_.debug("QOS", "Packet enqueued to port " + std::to_string(final_egress_port));
                 // Actual TX stats are handled by the component that dequeues and sends.
                 // interface_manager_._increment_tx_stats(final_egress_port, pkt.get_buffer()->get_data_length());
 

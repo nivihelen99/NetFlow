@@ -77,30 +77,6 @@ void AclManager::clear_rules() {
     logger_.log(LogLevel::INFO, "AclManager", "All ACL rules cleared.");
 }
 
-AclActionType AclManager::evaluate(const Packet& pkt, uint32_t& out_redirect_port_id) const {
-    // TODO: Implement
-    // Based on previous header implementation:
-    for (const auto& rule : acl_rules_) {
-        if (check_match(pkt, rule)) {
-            logger_.log(LogLevel::DEBUG, "AclManager", "Packet matched ACL rule ID: " + std::to_string(rule.rule_id) +
-                                                     ", Priority: " + std::to_string(rule.priority) +
-                                                     ", Action: " + std::to_string(static_cast<int>(rule.action)));
-            if (rule.action == AclActionType::REDIRECT) {
-                if (rule.redirect_port_id.has_value()) {
-                    out_redirect_port_id = rule.redirect_port_id.value();
-                } else {
-                    logger_.log(LogLevel::ERROR, "AclManager", "Rule ID " + std::to_string(rule.rule_id) +
-                                                              " has REDIRECT action but no redirect_port_id. Defaulting to DENY.");
-                    return AclActionType::DENY;
-                }
-            }
-            return rule.action;
-        }
-    }
-    logger_.log(LogLevel::DEBUG, "AclManager", "Packet did not match any ACL rules. Default action: PERMIT.");
-    return AclActionType::PERMIT; // Default action if no rules match
-}
-
 void AclManager::compile_rules() {
     // TODO: Implement
     // Placeholder for future optimization. For now, rules are evaluated sequentially.

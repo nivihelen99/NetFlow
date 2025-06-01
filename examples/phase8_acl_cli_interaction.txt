@@ -1,0 +1,74 @@
+# --- Example ACL CLI Interaction ---
+
+# This script demonstrates how to configure and manage Access Control Lists (ACLs)
+# using the NetFlow++ CLI. ACLs allow for rule-based packet filtering.
+
+# Adding ACL Rules
+# ----------------
+# Rules are processed based on priority (higher numeric value = higher precedence).
+# If a rule ID already exists, adding it again updates the existing rule.
+
+# Rule 1: Deny specific TCP traffic
+# Deny TCP traffic from source IP 192.168.1.10 to any destination on TCP port 80 (HTTP).
+# Assign a priority of 100.
+acl-rule add id 10 priority 100 action deny protocol tcp src-ip 192.168.1.10 dst-port 80
+
+# Rule 2: Permit specific UDP traffic
+# Permit UDP traffic from any source to destination IP 10.0.0.5 on UDP port 53 (DNS).
+# Assign a priority of 110 (will be evaluated before rule 10 if rule 10 didn't match).
+acl-rule add id 15 priority 110 action permit protocol udp dst-ip 10.0.0.5 dst-port 53
+
+# Rule 3: Deny traffic from a specific MAC address on VLAN 20
+# Assign a priority of 200 (highest precedence among these examples).
+acl-rule add id 5 priority 200 action deny src-mac 00:1A:2B:3C:4D:5E vlan 20
+
+# Rule 4: Redirect specific traffic
+# Redirect ARP traffic from IP 192.168.2.50 to switch port 3.
+# Priority 150.
+acl-rule add id 25 priority 150 action redirect 3 ethertype 0x0806 src-ip 192.168.2.50
+
+# Rule 5: Permit all other IP traffic (lower priority catch-all)
+# Note: The current ACL matching for IP does not support prefix/mask directly in `src-ip` or `dst-ip`.
+# This rule permits traffic specifically from IP 192.168.1.20.
+# A true "permit ip any any" or subnet permit would need more general wildcarding or be the default.
+# The default action if no rules match is PERMIT. This rule is an example of a lower priority permit.
+acl-rule add id 50 priority 10 action permit protocol ip src-ip 192.168.1.20
+
+# Compiling ACL Rules
+# -------------------
+# After adding or removing rules, they need to be compiled (sorted by priority)
+# for the evaluation engine to process them in the correct order.
+acl-compile
+# Expected output: ACL rules compiled (sorted by priority).
+
+# Showing ACL Rules
+# -----------------
+# Show all configured ACL rules (should be sorted by priority now)
+show acl-rules
+
+# Show a specific ACL rule by its ID
+show acl-rules id 10
+show acl-rules id 25
+
+# To observe ACLs in action:
+# 1. Traffic matching these rules would need to be sent through the switch.
+# 2. The switch's packet processing pipeline (specifically, where `AclManager::evaluate()`
+#    is called) would determine the fate of the packet based on the compiled rules.
+# For example:
+#    - A TCP packet from 192.168.1.10 to any host on port 80 should be DENIED (matches rule 10).
+#    - An ARP packet from 192.168.2.50 should be REDIRECTED to port 3 (matches rule 25).
+#    - UDP traffic to 10.0.0.5 on port 53 should be PERMITTED (matches rule 15).
+#    - A packet from MAC 00:1A:2B:3C:4D:5E on VLAN 20 should be DENIED (matches rule 5, highest priority).
+
+# Removing an ACL Rule
+# --------------------
+# Remove rule 50
+acl-rule remove id 50
+
+# Re-compile after changes (good practice)
+acl-compile
+
+# Show rules again to verify removal
+show acl-rules
+
+# --- End of ACL CLI Example ---

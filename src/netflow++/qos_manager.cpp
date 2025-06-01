@@ -29,8 +29,9 @@ void QosManager::configure_port_qos(uint32_t port_id, QosConfig config) {
     }
 
     port_qos_configs_[port_id] = config;
-    port_queues_[port_id].assign(config.num_queues, std::deque<Packet>());
-    port_queue_stats_[port_id].assign(config.num_queues, QueueStats());
+    // Resize and let deques/stats be default-constructed (empty)
+    port_queues_[port_id].resize(config.num_queues);
+    port_queue_stats_[port_id].resize(config.num_queues);
     port_last_serviced_queue_[port_id] = 0;
 
     logger_.log(LogLevel::INFO, "QosManager", "configure_port_qos - QoS configured for port " + std::to_string(port_id) + " with " +
@@ -93,7 +94,6 @@ void QosManager::enqueue_packet(const Packet& pkt, uint32_t port_id) {
     auto config_it = port_qos_configs_.find(port_id);
     if (config_it == port_qos_configs_.end()) {
         logger_.log(LogLevel::ERROR, "QosManager", "enqueue_packet - No QoS config for port " + std::to_string(port_id) + ". Packet dropped.");
-        // Note: Cannot update QueueStats here as the port might not have a stats entry.
         return;
     }
 
@@ -124,7 +124,9 @@ void QosManager::enqueue_packet(const Packet& pkt, uint32_t port_id) {
                   + " is full (max_depth: " + std::to_string(config.max_queue_depth) + "). Packet dropped (tail drop).");
         stats_it->second[queue_id].packets_dropped_full++;
     } else {
-        queues_it->second[queue_id].push_back(pkt);
+        // Create a new Packet in place using its constructor that takes a PacketBuffer*.
+        // This shares the underlying buffer and increments its reference count.
+        queues_it->second[queue_id].emplace_back(pkt.get_buffer());
         stats_it->second[queue_id].packets_enqueued++;
         logger_.log(LogLevel::DEBUG, "QosManager", "enqueue_packet - Enqueued packet on port " + std::to_string(port_id) + " queue " + std::to_string(static_cast<int>(queue_id))
                   + ". Queue depth: " + std::to_string(queues_it->second[queue_id].size()));
@@ -159,26 +161,24 @@ std::optional<Packet> QosManager::dequeue_packet(uint32_t port_id, uint8_t queue
     QueueStats& stats = stats_it->second[queue_id];
 
     if (queue.empty()) {
-        // logger_.log(LogLevel::DEBUG, "QosManager", "dequeue_packet - Queue " + std::to_string(static_cast<int>(queue_id)) +
-        //           " on port " + std::to_string(port_id) + " is empty.");
         return std::nullopt;
     }
 
-    Packet pkt_copy = queue.front();
+    // Move the packet out of the queue. This uses Packet's move constructor.
+    Packet pkt_to_return = std::move(queue.front());
     queue.pop_front();
 
     stats.packets_dequeued++;
     stats.update_depth(queue);
 
-    logger_.log(LogLevel::DEBUG, "QosManager", "dequeue_packet - Dequeued packet from port " + std::to_string(port_id) +
+    logger_.log(LogLevel::DEBUG, "QosManager", "dequeue_packet - Dequeued packet (moved) from port " + std::to_string(port_id) +
               " queue " + std::to_string(static_cast<int>(queue_id)) + ". New depth: " + std::to_string(stats.current_depth));
-    return pkt_copy;
+    return pkt_to_return;
 }
 
 std::optional<Packet> QosManager::select_packet_to_dequeue(uint32_t port_id) {
     auto config_it = port_qos_configs_.find(port_id);
     if (config_it == port_qos_configs_.end() || config_it->second.num_queues == 0) {
-        // logger_.log(LogLevel::DEBUG, "QosManager", "select_packet_to_dequeue - No QoS config or zero queues for port " + std::to_string(port_id));
         return std::nullopt;
     }
     const QosConfig& config = config_it->second;
@@ -201,10 +201,10 @@ std::optional<Packet> QosManager::select_packet_to_dequeue(uint32_t port_id) {
     } else if (config.scheduler == SchedulerType::WEIGHTED_ROUND_ROBIN ||
                config.scheduler == SchedulerType::DEFICIT_ROUND_ROBIN) {
         uint8_t num_queues = config.num_queues;
-        uint8_t starting_q_idx = port_last_serviced_queue_[port_id];
+        uint8_t current_q_offset = port_last_serviced_queue_[port_id];
 
         for (uint8_t i = 0; i < num_queues; ++i) {
-            uint8_t current_q_check_idx = (starting_q_idx + 1 + i) % num_queues;
+            uint8_t current_q_check_idx = (current_q_offset + 1 + i) % num_queues;
 
             if (current_q_check_idx < queues_it->second.size() && !queues_it->second[current_q_check_idx].empty()) {
                 if (should_transmit(port_id, current_q_check_idx)) {
@@ -218,7 +218,6 @@ std::optional<Packet> QosManager::select_packet_to_dequeue(uint32_t port_id) {
             }
         }
     }
-    // logger_.log(LogLevel::DEBUG, "QosManager", "select_packet_to_dequeue - No packet selected from port " + std::to_string(port_id));
     return std::nullopt;
 }
 
@@ -248,8 +247,6 @@ std::optional<QosManager::QueueStats> QosManager::get_queue_stats(uint32_t port_
             return stats_it->second[queue_id];
         }
     }
-    // logger_.log(LogLevel::WARNING, "QosManager", "get_queue_stats - No stats for port " + std::to_string(port_id) + " queue "
-    //           + std::to_string(static_cast<int>(queue_id)));
     return std::nullopt;
 }
 

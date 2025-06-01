@@ -51,14 +51,16 @@ static std::string format_lldp_neighbors(const std::vector<LldpNeighborInfo>& ne
 static std::string format_lldp_interface_config(uint32_t port_id, const LldpPortConfig& config) { /* ... */ return ""; }
 
 
-ManagementService::ManagementService(RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
+ManagementService::ManagementService(SwitchLogger& logger, // Added logger
+                                     RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
                                      netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm,
                                      netflow::StpManager& stpm, netflow::LacpManager& lacpm,
                                      netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
-                                     netflow::AclManager& acl_m) // Added AclManager
-    : routing_manager_(rm), interface_manager_(im), management_interface_(mi),
+                                     netflow::AclManager& acl_m)
+    : logger_(logger), // Initialize logger_ member
+      routing_manager_(rm), interface_manager_(im), management_interface_(mi),
       vlan_manager_(vm), fdb_manager_(fdbm), stp_manager_(stpm), lacp_manager_(lacpm),
-      lldp_manager_(lldpm), qos_manager_(qos_m), acl_manager_(acl_m) { // Initialize acl_manager_
+      lldp_manager_(lldpm), qos_manager_(qos_m), acl_manager_(acl_m) {
     // Constructor body
 }
 
