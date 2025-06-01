@@ -1,4 +1,3 @@
-
 # C++ Network Packet Processing Framework (NetFlow++)
 
 ## Project Overview
@@ -277,6 +276,97 @@ public:
 };
 ```
 
+### 4. LLDP (Link Layer Discovery Protocol)
+The `LldpManager` class handles the Link Layer Discovery Protocol (LLDP, IEEE 802.1AB), allowing devices to advertise their identity and capabilities to neighbors and learn about adjacent devices.
+
+Key functionalities:
+*   Periodic transmission of LLDPDUs.
+*   Reception and parsing of LLDPDUs from neighbors.
+*   Construction and parsing of standard LLDP TLVs (Chassis ID, Port ID, TTL, System Name, System Description).
+*   Storage and aging of neighbor information.
+*   Per-port configuration (enable/disable, tx_interval, ttl_multiplier).
+
+```cpp
+class LldpManager {
+public:
+    // Constructor
+    explicit LldpManager(Switch& owner_switch, InterfaceManager& if_mgr);
+
+    // Configures LLDP behavior for a specific port
+    void configure_port(uint32_t port_id, bool enabled,
+                        uint32_t tx_interval = 30,
+                        uint32_t ttl_multiplier = 4);
+
+    // Retrieves LLDP neighbors discovered on a specific port
+    std::vector<LldpNeighborInfo> get_neighbors(uint32_t port_id) const;
+
+    // ... other methods ...
+};
+
+// Example Usage (conceptual):
+// Switch sw; /* ... initialize switch ... */
+// InterfaceManager if_mgr; /* ... initialize interface manager ... */
+// LldpManager lldp_mgr(sw, if_mgr);
+//
+// lldp_mgr.configure_port(1, true, 15, 4); // Enable LLDP on port 1, tx_interval 15s, TTL 60s
+// std::vector<LldpNeighborInfo> neighbors_on_port1 = lldp_mgr.get_neighbors(1);
+```
+
+### 5. Layer 3 Routing
+The framework supports Layer 3 routing capabilities, enabling the switch to forward IP packets between different subnets.
+
+**`RoutingManager`:**
+The `RoutingManager` handles the IP routing table, enabling static route configuration and longest prefix match lookups for packet forwarding decisions.
+```cpp
+class RoutingManager {
+public:
+    RoutingManager();
+    void add_static_route(const IpAddress& destination_network,
+                          const IpAddress& subnet_mask,
+                          const IpAddress& next_hop_ip,
+                          uint32_t egress_interface_id,
+                          int metric = 1);
+    void remove_static_route(const IpAddress& destination_network,
+                             const IpAddress& subnet_mask);
+    std::optional<RouteEntry> lookup_route(const IpAddress& destination_ip) const;
+    std::vector<RouteEntry> get_routing_table() const;
+};
+
+// Example Usage (conceptual):
+// RoutingManager rm;
+// IpAddress network_addr("192.168.2.0");
+// IpAddress subnet_mask("255.255.255.0");
+// IpAddress next_hop("10.0.0.2");
+// uint32_t egress_if_id = 3; // Example interface ID
+// rm.add_static_route(network_addr, subnet_mask, next_hop, egress_if_id);
+// auto route_info = rm.lookup_route(IpAddress("192.168.2.10"));
+```
+
+**`ArpProcessor`:**
+The `ArpProcessor` manages the Address Resolution Protocol (ARP), resolving IP addresses to MAC addresses for directly connected networks and handling ARP requests/replies.
+
+**`IcmpProcessor`:**
+The `IcmpProcessor` handles Internet Control Message Protocol (ICMP) messages, such as responding to ICMP Echo Requests (pings) destined for the switch's interfaces and generating ICMP error messages (e.g., Destination Unreachable, Time Exceeded).
+
+**IP Interface Configuration:**
+Layer 3 functionality requires IP addresses to be configured on switch interfaces (physical ports or VLAN interfaces) using the `InterfaceManager`.
+```cpp
+// Conceptual example from InterfaceManager for IP configuration:
+// class InterfaceManager {
+// public:
+//    // ... other methods ...
+//    void add_ip_address(uint32_t port_id,
+//                        const IpAddress& ip_address,
+//                        const IpAddress& subnet_mask);
+//    void remove_ip_address(uint32_t port_id,
+//                           const IpAddress& ip_address,
+//                           const IpAddress& subnet_mask);
+// };
+//
+// InterfaceManager if_mgr; /* ... */
+// if_mgr.add_ip_address(1, IpAddress("192.168.1.1"), IpAddress("255.255.255.0"));
+```
+
 ## System Integration Features
 
 ### 1. Configuration Management
@@ -427,5 +517,4 @@ int main() {
     
     return 0;
 }
-
 
