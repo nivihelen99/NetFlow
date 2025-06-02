@@ -1,8 +1,7 @@
 #ifndef NETFLOW_ROUTING_MANAGER_HPP
 #define NETFLOW_ROUTING_MANAGER_HPP
 
-#ifndef NETFLOW_ROUTING_MANAGER_HPP
-#define NETFLOW_ROUTING_MANAGER_HPP
+// Removed duplicate include guard here
 
 #include "netflow++/packet.hpp" // For IpAddress AND ip_mask_to_prefix_length
 #include <vector>

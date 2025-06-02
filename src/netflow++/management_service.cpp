@@ -10,6 +10,7 @@
 #include "netflow++/isis/isis_common.hpp"  // For IsisLevel, SystemID, AreaAddress types
 #include "netflow++/isis/isis_pdu.hpp"     // For LspId for show commands (potentially)
 #include "netflow++/packet.hpp"
+#include "netflow++/utils.hpp" // Added for safe_stoul, safe_stoi, parse_vlan_list, to_hex_string
 #include <sstream>
 #include <vector>
 #include <string>
@@ -102,11 +103,9 @@ static std::optional<isis::SystemID> parse_system_id_cli(const std::string& s) {
         if (p_str.length() != 4) return std::nullopt;
         for (size_t i = 0; i < p_str.length(); i += 2) {
             std::string byte_str = p_str.substr(i, 2);
-            try {
-                bytes.push_back(static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16)));
-            } catch (const std::exception&) {
-                return std::nullopt;
-            }
+            auto byte_val_opt = netflow::utils::safe_stoul("0x" + byte_str); // safe_stoul handles hex with 0x
+            if (!byte_val_opt || *byte_val_opt > 255) return std::nullopt;
+            bytes.push_back(static_cast<uint8_t>(*byte_val_opt));
         }
     }
     if (bytes.size() != 6) return std::nullopt;
@@ -120,19 +119,34 @@ static std::optional<isis::AreaAddress> parse_area_address_cli(const std::string
     std::vector<std::string> parts;
     std::stringstream ss_parser(s);
     std::string part;
-    while(std::getline(ss_parser, part, '.')) {
-        parts.push_back(part);
+    // Allow parts to be separated by '.' or just be a continuous hex string
+    if (s.find('.') != std::string::npos) {
+        while(std::getline(ss_parser, part, '.')) {
+            parts.push_back(part);
+        }
+    } else {
+        // Handle continuous hex string like "490001" or "4900010002"
+        // AFI is 1 byte, rest is area ID. Max total 1+NET(max 10) = 11 bytes for address family + NET
+        // Or up to 13 bytes for full NSAP.
+        // For simplicity, assume it's a sequence of hex octets.
+        if (s.length() % 2 != 0 || s.empty() || s.length() > 26) return std::nullopt; // Max 13 bytes = 26 hex chars
+        for (size_t i = 0; i < s.length(); i += 2) {
+            parts.push_back(s.substr(i,2));
+        }
     }
+    
+    if (parts.empty()) return std::nullopt;
 
     for (const std::string& p_str : parts) {
-        if (p_str.empty() || p_str.length() % 2 != 0) return std::nullopt;
+        // If original string had no dots, p_str are 2-char hex strings.
+        // If original had dots, p_str can be longer, e.g. "0001".
+        if (p_str.length() % 2 != 0 && p_str.length() > 2) return std::nullopt; // like "001" for a part
+        
         for (size_t i = 0; i < p_str.length(); i += 2) {
             std::string byte_str = p_str.substr(i, 2);
-            try {
-                area_addr_bytes.push_back(static_cast<uint8_t>(std::stoul(byte_str, nullptr, 16)));
-            } catch (const std::exception&) {
-                return std::nullopt;
-            }
+            auto byte_val_opt = netflow::utils::safe_stoul("0x" + byte_str);
+            if (!byte_val_opt || *byte_val_opt > 255) return std::nullopt;
+            area_addr_bytes.push_back(static_cast<uint8_t>(*byte_val_opt));
         }
     }
     if (area_addr_bytes.empty() || area_addr_bytes.size() > 13) return std::nullopt;
@@ -167,157 +181,152 @@ std::string ManagementService::format_acl_rules_output(const std::string& acl_na
 // (These handlers were added in the previous step and are assumed to be correct)
 std::string ManagementService::handle_isis_global_system_id(const std::vector<std::string>& args) {
     // Expected: <SYSTEM_ID> (args[0])
-    if (args.empty()) return "Error: Missing system-id value.";
-    auto sys_id_opt = parse_system_id_cli(args[0]); // Using static helper
-    if (!sys_id_opt) return "Error: Invalid system-id format. Expected XX.XXXX.XXXX.XXXX.XX";
-    isis_manager_.set_system_id(sys_id_opt.value());
-    return "IS-IS system-id set.";
+    if (args.empty()) return std::string("Error: Missing system-id value.");
+    auto sys_id_opt = parse_system_id_cli(args[0]); 
+    if (!sys_id_opt) return std::string("Error: Invalid system-id format. Expected XXXX.XXXX.XXXX");
+    this->isis_manager_.set_system_id(sys_id_opt.value()); 
+    return std::string("IS-IS system-id set.");
 }
 
 std::string ManagementService::handle_isis_global_area(const std::vector<std::string>& args, bool is_add) {
     // Expected: <AREA_ID> (args[0])
-    if (args.empty()) return "Error: Missing area-id value.";
-    auto area_opt = parse_area_address_cli(args[0]); // Using static helper
-    if (!area_opt) return "Error: Invalid area-id format (e.g., 49.0001 or 49.0001.0002).";
+    if (args.empty()) return std::string("Error: Missing area-id value.");
+    auto area_opt = parse_area_address_cli(args[0]); 
+    if (!area_opt) return std::string("Error: Invalid area-id format (e.g., 49.0001 or 49.0001.0002).");
     if (is_add) {
-        isis_manager_.add_area_address(area_opt.value());
-        return "IS-IS area added.";
+        this->isis_manager_.add_area_address(area_opt.value()); 
+        return std::string("IS-IS area added.");
     } else {
-        isis_manager_.remove_area_address(area_opt.value());
+        this->isis_manager_.remove_area_address(area_opt.value()); 
         return "IS-IS area removed.";
     }
 }
 
 std::string ManagementService::handle_isis_global_level(const std::vector<std::string>& args) {
     // Expected: <l1|l2|l1-l2> (args[0])
-    if (args.empty()) return "Error: Missing level value.";
+    if (args.empty()) return std::string("Error: Missing level value.");
     isis::IsisLevel level_to_set;
     if (args[0] == "l1") level_to_set = isis::IsisLevel::L1;
     else if (args[0] == "l2") level_to_set = isis::IsisLevel::L2;
     else if (args[0] == "l1-l2") level_to_set = isis::IsisLevel::L1_L2;
-    else return "Error: Invalid level. Use l1, l2, or l1-l2.";
-    isis_manager_.set_enabled_levels(level_to_set);
-    return "IS-IS router level set.";
+    else return std::string("Error: Invalid level. Use l1, l2, or l1-l2.");
+    this->isis_manager_.set_enabled_levels(level_to_set); 
+    return std::string("IS-IS router level set.");
 }
 
 std::string ManagementService::handle_isis_global_overload_bit(const std::vector<std::string>& args) {
     // Expected: <on|off> (args[0])
-    if (args.empty()) return "Error: Missing on/off value.";
+    if (args.empty()) return std::string("Error: Missing on/off value.");
     bool set_on;
     if (args[0] == "on") set_on = true;
     else if (args[0] == "off") set_on = false;
-    else return "Error: Invalid value. Use on or off.";
-    isis_manager_.set_overload_bit_cli(set_on);
-    return "IS-IS overload-bit set.";
+    else return std::string("Error: Invalid value. Use on or off.");
+    this->isis_manager_.set_overload_bit_cli(set_on); 
+    return std::string("IS-IS overload-bit set.");
 }
 
 std::string ManagementService::handle_isis_global_enable(bool enable) {
     if (enable) {
-        if (isis_manager_.start()) return "IS-IS protocol started.";
-        else return "Error: IS-IS failed to start. Ensure system-id and area are configured.";
+        if (this->isis_manager_.start()) return std::string("IS-IS protocol started."); 
+        else return std::string("Error: IS-IS failed to start. Ensure system-id and area are configured.");
     } else {
-        isis_manager_.stop();
+        this->isis_manager_.stop(); 
         return "IS-IS protocol shut down.";
     }
 }
 
 std::string ManagementService::handle_isis_interface_enable(uint32_t interface_id, const std::vector<std::string>& args) {
     // Expected: [level-1|level-2|l1-l2] (args[0], optional)
-    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id);
+    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
     isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
-    if_conf.interface_id = interface_id; // Ensure interface_id is correctly set
+    if_conf.interface_id = interface_id; 
     if_conf.isis_enabled = true;
 
-    if (!args.empty()) { // Level specified
+    if (!args.empty()) { 
         if (args[0] == "level-1") if_conf.level = isis::IsisLevel::L1;
         else if (args[0] == "level-2") if_conf.level = isis::IsisLevel::L2;
         else if (args[0] == "level-1-2") if_conf.level = isis::IsisLevel::L1_L2;
-        else return "Error: Invalid level specified. Use level-1, level-2, or level-1-2.";
-    } else { // Default to global level if not specified, or keep existing if_conf.level if already configured
-        if (!current_config_opt.has_value() || if_conf.level == isis::IsisLevel::NONE) { // only set to global if not previously set
-             if_conf.level = isis_manager_.get_global_config().enabled_levels;
+        else return std::string("Error: Invalid level specified. Use level-1, level-2, or level-1-2.");
+    } else { 
+        if (!current_config_opt.has_value() || if_conf.level == isis::IsisLevel::NONE) { 
+             if_conf.level = this->isis_manager_.get_global_config().enabled_levels; 
         }
     }
-    isis_manager_.configure_interface(interface_id, if_conf);
-    return "IS-IS enabled on interface " + std::to_string(interface_id) + ".";
+    this->isis_manager_.configure_interface(interface_id, if_conf); 
+    return std::string("IS-IS enabled on interface ") + std::to_string(interface_id) + ".";
 }
 
 std::string ManagementService::handle_isis_interface_disable(uint32_t interface_id) {
-    isis_manager_.disable_isis_on_interface(interface_id);
-    return "IS-IS disabled on interface " + std::to_string(interface_id) + ".";
+    this->isis_manager_.disable_isis_on_interface(interface_id); 
+    return std::string("IS-IS disabled on interface ") + std::to_string(interface_id) + ".";
 }
 
 std::string ManagementService::handle_isis_interface_circuit_type(uint32_t interface_id, const std::vector<std::string>& args) {
     // Expected: <broadcast|point-to-point> (args[0])
-    if (args.empty()) return "Error: Missing circuit type value.";
-    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id);
+    if (args.empty()) return std::string("Error: Missing circuit type value.");
+    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
     isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
     if_conf.interface_id = interface_id;
-    if (!if_conf.isis_enabled && !current_config_opt.has_value()) { // Check if it was never configured before
-         // If trying to set circuit type on an interface where IS-IS was never enabled,
-         // it might be better to enable it first or implicitly enable.
-         // For now, error out if not even a default config exists.
-        auto if_details = interface_manager_.get_interface_details(interface_id);
-        if (!if_details) return "Error: Interface " + std::to_string(interface_id) + " does not exist.";
-        // If we reach here, it means IS-IS is not explicitly configured.
-        // We can apply this and other settings, but it won't be active until 'isis enable'.
-        // However, get_isis_interface_config might return nullopt if never touched by IS-IS.
-        // So, value_or is good. The check "!if_conf.isis_enabled && !current_config_opt.has_value()"
-        // means it's a brand new IS-IS config for this interface.
+    if (!if_conf.isis_enabled && !current_config_opt.has_value()) { 
+        // Check if the underlying interface exists using get_port_config
+        auto port_config_opt = this->interface_manager_.get_port_config(interface_id);
+        if (!port_config_opt) {
+            return std::string("Error: Interface with ID ") + std::to_string(interface_id) + std::string(" not found.");
+        }
+        // Interface exists, can proceed with IS-IS config for it.
     }
 
 
     if (args[0] == "point-to-point") if_conf.circuit_type = isis::CircuitType::P2P;
     else if (args[0] == "broadcast") if_conf.circuit_type = isis::CircuitType::BROADCAST;
-    else return "Error: Invalid circuit-type. Use point-to-point or broadcast.";
+    else return std::string("Error: Invalid circuit-type. Use point-to-point or broadcast.");
     
-    isis_manager_.configure_interface(interface_id, if_conf);
-    return "IS-IS circuit-type set on interface " + std::to_string(interface_id) + ".";
+    this->isis_manager_.configure_interface(interface_id, if_conf); 
+    return std::string("IS-IS circuit-type set on interface ") + std::to_string(interface_id) + ".";
 }
 
 std::string ManagementService::handle_isis_interface_hello_interval(uint32_t interface_id, const std::vector<std::string>& args) {
-    if (args.empty()) return "Error: Missing hello interval value.";
-    try {
-        uint16_t interval = static_cast<uint16_t>(std::stoul(args[0]));
-        // TODO: Add level specification if needed (L1/L2 specific timers)
-        auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id);
-        isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
-        if_conf.interface_id = interface_id;
-        if_conf.hello_interval_seconds = interval;
-        isis_manager_.configure_interface(interface_id, if_conf);
-        return "IS-IS hello-interval set to " + std::to_string(interval) + "s on interface " + std::to_string(interface_id) + ".";
-    } catch (const std::exception& e) {
-        return "Error: Invalid hello interval value.";
+    if (args.empty()) return std::string("Error: Missing hello interval value.");
+    std::optional<unsigned long> interval_opt = netflow::utils::safe_stoul(args[0]);
+    if (!interval_opt || *interval_opt == 0 || *interval_opt > 65535) {
+        return std::string("Error: Invalid hello interval value. Must be 1-65535.");
     }
+    uint16_t interval = static_cast<uint16_t>(*interval_opt);
+    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
+    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+    if_conf.interface_id = interface_id;
+    if_conf.hello_interval_seconds = interval;
+    this->isis_manager_.configure_interface(interface_id, if_conf); 
+    return std::string("IS-IS hello-interval set to ") + std::to_string(interval) + "s on interface " + std::to_string(interface_id) + ".";
 }
 
 std::string ManagementService::handle_isis_interface_hello_multiplier(uint32_t interface_id, const std::vector<std::string>& args) {
-     if (args.empty()) return "Error: Missing hello multiplier value.";
-    try {
-        uint16_t multiplier = static_cast<uint16_t>(std::stoul(args[0]));
-        if (multiplier < 2) return "Error: Hello multiplier must be at least 2.";
-        auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id);
-        isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
-        if_conf.interface_id = interface_id;
-        if_conf.holding_timer_multiplier = multiplier;
-        isis_manager_.configure_interface(interface_id, if_conf);
-        return "IS-IS hello-multiplier set to " + std::to_string(multiplier) + " on interface " + std::to_string(interface_id) + ".";
-    } catch (const std::exception& e) {
-        return "Error: Invalid hello multiplier value.";
+    if (args.empty()) return std::string("Error: Missing hello multiplier value.");
+    std::optional<unsigned long> multiplier_opt = netflow::utils::safe_stoul(args[0]);
+    if (!multiplier_opt || *multiplier_opt < 2 || *multiplier_opt > 255) { // Typical range for multiplier
+        return std::string("Error: Invalid hello multiplier value. Must be >= 2.");
     }
+    uint16_t multiplier = static_cast<uint16_t>(*multiplier_opt);
+    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
+    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+    if_conf.interface_id = interface_id;
+    if_conf.holding_timer_multiplier = multiplier;
+    this->isis_manager_.configure_interface(interface_id, if_conf); 
+    return std::string("IS-IS hello-multiplier set to ") + std::to_string(multiplier) + " on interface " + std::to_string(interface_id) + ".";
 }
 
 std::string ManagementService::handle_isis_interface_priority(uint32_t interface_id, const std::vector<std::string>& args) {
-    if (args.empty()) return "Error: Missing priority value.";
-    try {
-        uint8_t priority = static_cast<uint8_t>(std::stoul(args[0]));
-        if (priority > 127) return "Error: Priority must be between 0 and 127.";
-        // TODO: Add level specification if needed
-        auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id);
-        isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
-        if_conf.interface_id = interface_id;
-        if_conf.priority = priority;
-        isis_manager_.configure_interface(interface_id, if_conf);
+    if (args.empty()) return std::string("Error: Missing priority value.");
+    std::optional<unsigned long> priority_opt = netflow::utils::safe_stoul(args[0]);
+    if (!priority_opt || *priority_opt > 127) {
+        return std::string("Error: Invalid priority value. Must be 0-127.");
+    }
+    uint8_t priority = static_cast<uint8_t>(*priority_opt);
+    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
+    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+    if_conf.interface_id = interface_id;
+    if_conf.priority = priority;
+    this->isis_manager_.configure_interface(interface_id, if_conf); 
         return "IS-IS priority set to " + std::to_string(priority) + " on interface " + std::to_string(interface_id) + ".";
     } catch (const std::exception& e) {
         return "Error: Invalid priority value.";
@@ -370,10 +379,10 @@ static std::string area_address_to_cli_string(const isis::AreaAddress& area) {
 
 std::string ManagementService::show_isis_summary_cli(const std::vector<std::string>& args) {
     std::stringstream ss;
-    if (!isis_manager_.is_running() && !isis_manager_.is_globally_configured()) return "IS-IS protocol is not configured nor running.\n";
+    if (!this->isis_manager_.is_running() && !this->isis_manager_.is_globally_configured()) return std::string("IS-IS protocol is not configured nor running.\n"); 
     
-    isis::IsisConfig config = isis_manager_.get_global_config();
-    ss << "IS-IS Process Summary (" << (isis_manager_.is_running() ? "Running" : "Shutdown (but configured)") << "):\n";
+    isis::IsisConfig config = this->isis_manager_.get_global_config(); 
+    ss << "IS-IS Process Summary (" << (this->isis_manager_.is_running() ? "Running" : "Shutdown (but configured)") << "):\n"; 
     ss << "  System ID: " << system_id_to_cli_string(config.system_id) << "\n";
     ss << "  Enabled Levels: ";
     switch(config.enabled_levels) {
@@ -385,16 +394,15 @@ std::string ManagementService::show_isis_summary_cli(const std::vector<std::stri
     ss << "  Area Addresses:\n";
     if (config.area_addresses.empty()) ss << "    None\n";
     for(const auto& area : config.area_addresses) {
-        ss << "    " << area_address_to_cli_string(area) << "\n"; // Uses simplified hex string for now
+        ss << "    " << area_address_to_cli_string(area) << "\n"; 
     }
     ss << "  Overload Bit: " << (config.over_load_bit_set ? "Set" : "Not Set") << "\n";
-    // TODO: Add count of active interfaces, adjacencies, LSPs per level.
     return ss.str();
 }
-std::string ManagementService::show_isis_neighbors_cli(const std::vector<std::string>& args) { return "Placeholder: show isis neighbors"; }
-std::string ManagementService::show_isis_database_cli(const std::vector<std::string>& args) { return "Placeholder: show isis database"; }
-std::string ManagementService::show_isis_interface_cli(const std::vector<std::string>& args) { return "Placeholder: show isis interface"; }
-std::string ManagementService::show_isis_routes_cli(const std::vector<std::string>& args) { return "Placeholder: show isis routes"; }
+std::string ManagementService::show_isis_neighbors_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis neighbors"); }
+std::string ManagementService::show_isis_database_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis database"); }
+std::string ManagementService::show_isis_interface_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis interface"); }
+std::string ManagementService::show_isis_routes_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis routes"); }
 
 
 void ManagementService::register_cli_commands() {
@@ -556,6 +564,125 @@ void ManagementService::register_cli_commands() {
                     }
                 }
                 // ... other 'no interface' subcommands ...
+
+    // --- IS-IS Global Configuration Commands ---
+    management_interface_.register_command(
+        {"configure", "router", "isis", "system-id"}, 
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing system-id value. Usage: ... system-id <SYSTEM_ID>");
+            return handle_isis_global_system_id(args); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "area", "add"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area add <AREA_ID>");
+            return handle_isis_global_area(args, true); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "area", "remove"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area remove <AREA_ID>");
+            return handle_isis_global_area(args, false); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "level"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing level value. Usage: ... level <l1|l2|l1-l2>");
+            return handle_isis_global_level(args); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "overload-bit", "set"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing on/off value. Usage: ... overload-bit set <on|off>");
+            return handle_isis_global_overload_bit(args); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "enable"},
+        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(true); });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "shutdown"},
+        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(false); });
+
+    // --- IS-IS Interface Configuration Commands ---
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "enable"}, 
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing interface ID for 'isis enable'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            std::vector<std::string> level_args; 
+            if (args.size() > 1) level_args.push_back(args[1]); // Optional level
+            return handle_isis_interface_enable(if_id, level_args);
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "disable"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.empty()) return std::string("Error: Missing interface ID for 'isis disable'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_disable(if_id);
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "circuit-type"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or circuit type for 'isis circuit-type'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_circuit_type(if_id, {args[1]});
+        });
+    
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "hello-interval"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or interval for 'isis hello-interval'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_hello_interval(if_id, {args[1]});
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "hello-multiplier"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or multiplier for 'isis hello-multiplier'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_hello_multiplier(if_id, {args[1]});
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "priority"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or priority for 'isis priority'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_priority(if_id, {args[1]});
+        });
+
+    // --- Show IS-IS Commands ---
+    management_interface_.register_command({"show", "isis", "summary"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_summary_cli(args); });
+    management_interface_.register_command({"show", "isis", "neighbors"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_neighbors_cli(args); });
+    management_interface_.register_command({"show", "isis", "interface"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_interface_cli(args); });
+    management_interface_.register_command({"show", "isis", "database"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_database_cli(args); });
+    management_interface_.register_command({"show", "isis", "routes"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_routes_cli(args); });
             }
             // ... other 'no' commands ...
             return "Error: 'no " + args[0] + "' command not fully implemented or unknown structure.";

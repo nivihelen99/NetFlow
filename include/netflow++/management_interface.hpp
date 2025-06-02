@@ -112,45 +112,63 @@ public:
     // --- CLI Command Handling ---
     using CliHandler = std::function<std::string(const std::vector<std::string>& args)>; // Handler returns string response
 
-    void register_command(const std::string& command_name, CliHandler handler) {
-        cli_commands_[command_name] = std::move(handler);
+    void register_command(const std::vector<std::string>& command_parts, CliHandler handler) {
+        if (command_parts.empty()) return; // Cannot register an empty command
+        cli_commands_[command_parts] = std::move(handler);
     }
 
-    // Placeholder for parsing and dispatching a CLI command line.
+    // Updated for multi-part command handling.
     std::string handle_cli_command(const std::string& command_line) const {
         if (command_line.empty()) {
             return "Error: Empty command.";
         }
 
-        std::vector<std::string> parts;
+        std::vector<std::string> input_parts;
         std::string current_part;
         std::istringstream iss(command_line);
 
-        // Simple space-based tokenization. Doesn't handle quotes or complex arguments.
         while(iss >> current_part) {
-            parts.push_back(current_part);
+            input_parts.push_back(current_part);
         }
 
-        if (parts.empty()) {
-            return "Error: Empty command after parsing."; // Should not happen if command_line wasn't empty
+        if (input_parts.empty()) {
+            return "Error: Empty command after parsing.";
         }
 
-        const std::string& command_name = parts[0];
-        auto it = cli_commands_.find(command_name);
-        if (it != cli_commands_.end()) {
-            std::vector<std::string> args;
-            if (parts.size() > 1) {
-                args.assign(parts.begin() + 1, parts.end());
+        // Find the longest matching registered command prefix
+        std::vector<std::string> best_match_command_key;
+        const CliHandler* best_handler = nullptr;
+
+        for (auto const& [registered_command_key, handler_func] : cli_commands_) {
+            if (input_parts.size() >= registered_command_key.size()) {
+                bool prefix_match = true;
+                for (size_t i = 0; i < registered_command_key.size(); ++i) {
+                    if (input_parts[i] != registered_command_key[i]) {
+                        prefix_match = false;
+                        break;
+                    }
+                }
+                if (prefix_match) {
+                    if (best_handler == nullptr || registered_command_key.size() > best_match_command_key.size()) {
+                        best_match_command_key = registered_command_key;
+                        best_handler = &handler_func;
+                    }
+                }
             }
-            return it->second(args); // Call the handler with arguments
         }
-        return "Error: Unknown command '" + command_name + "'. Type 'help' for available commands.";
+
+        if (best_handler) {
+            std::vector<std::string> args(input_parts.begin() + best_match_command_key.size(), input_parts.end());
+            return (*best_handler)(args);
+        }
+        
+        return "Error: Unknown command or prefix: " + command_line + ". Type 'help' for available commands.";
     }
 
 private:
     std::map<std::string, OidHandler> oid_handlers_;
     std::map<RestEndpointKey, RestHandler> rest_endpoints_;
-    std::map<std::string, CliHandler> cli_commands_;
+    std::map<std::vector<std::string>, CliHandler> cli_commands_; // Key is now std::vector<std::string>
 };
 
 } // namespace netflow

@@ -8,6 +8,9 @@
 #include <cstring>  // For memcpy, memmove
 #include <algorithm> // For std::copy, std::fill, std::equal
 #include <stdexcept> // For exceptions
+#include <string>    // For std::string
+#include <cstdio>    // For std::sscanf
+#include <array>     // For std::array in MacAddress if chosen
 
 // For network byte order functions like ntohs, htons.
 // On Linux/POSIX, this is the typical header.
@@ -75,23 +78,77 @@ namespace netflow {
 #pragma pack(push, 1)
 #endif
 struct MacAddress {
-    uint8_t bytes[6];
+    // Using std::array for a bit more safety and modern C++ feel, though uint8_t bytes[6] is also fine.
+    std::array<uint8_t, 6> bytes_{}; // Zero-initialized by default thanks to value-initialization of array
+
 #if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
 #pragma pack(pop)
 #endif
 
-    MacAddress() {
-        std::fill(bytes, bytes + 6, 0);
+    MacAddress() = default; // Default constructor explicitly defaulted
+
+    MacAddress(const uint8_t* mac_bytes_ptr) {
+        if (mac_bytes_ptr) {
+            std::copy(mac_bytes_ptr, mac_bytes_ptr + 6, bytes_.begin());
+        } else {
+            bytes_.fill(0); // Or throw error
+        }
     }
 
-    // Removed duplicate constructor
-
-    MacAddress(const uint8_t* mac_bytes) {
-        std::copy(mac_bytes, mac_bytes + 6, bytes);
+    // New constructor from string
+    MacAddress(const std::string& mac_str) {
+        bytes_.fill(0); // Initialize to zero
+        if (mac_str.length() == 17) { // Basic check for "XX:XX:XX:XX:XX:XX"
+            unsigned int temp_b[6]; // sscanf needs unsigned int for %x with uint8_t target array
+            int matched = std::sscanf(mac_str.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
+                                      &temp_b[0], &temp_b[1], &temp_b[2],
+                                      &temp_b[3], &temp_b[4], &temp_b[5]);
+            if (matched == 6) { // Check if all 6 hex values were successfully parsed
+                for (size_t i = 0; i < 6; ++i) {
+                    if (temp_b[i] > 255) { // Check for overflow if sscanf doesn't guarantee it for %02x
+                        bytes_.fill(0); // Error in parsing, reset to zero
+                        return;
+                    }
+                    bytes_[i] = static_cast<uint8_t>(temp_b[i]);
+                }
+            }
+            // If not matched == 6, bytes_ remains zero-initialized due to fill at the start.
+        }
+        // If mac_str.length() is not 17, it also remains zero-initialized.
     }
+
 
     bool operator==(const MacAddress& other) const {
-        return std::equal(bytes, bytes + 6, other.bytes);
+        return bytes_ == other.bytes_;
+    }
+    
+    // Add a to_string method for easier debugging/logging if it doesn't exist
+    std::string to_string() const {
+        char buf[18];
+        std::snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
+                      bytes_[0], bytes_[1], bytes_[2], bytes_[3], bytes_[4], bytes_[5]);
+        return std::string(buf);
+    }
+    
+    // Add a way to check if MAC is zero (broadcast or unspecified)
+    bool is_zero() const {
+        for(uint8_t b : bytes_) {
+            if (b != 0) return false;
+        }
+        return true;
+    }
+    
+    // Add a way to check if MAC is broadcast
+    bool is_broadcast() const {
+        for(uint8_t b : bytes_) {
+            if (b != 0xFF) return false;
+        }
+        return true;
+    }
+    
+    // Needed for std::map keys or std::set
+    bool operator<(const MacAddress& other) const {
+        return bytes_ < other.bytes_;
     }
 };
 

@@ -21,7 +21,8 @@ namespace netflow {
 
 // Forward declare QosManager if full include isn't desired here,
 // but since we will use its types in private methods, full include is fine.
-class IsisManager; // Forward declaration for IsisManager
+// Removed forward declaration, will include the full header.
+#include "netflow++/isis/isis_manager.hpp" // Include IsisManager header
 
 class ManagementService {
 public:
@@ -30,7 +31,7 @@ public:
                       netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm,
                       netflow::StpManager& stpm, netflow::LacpManager& lacpm,
                       netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
-                      netflow::AclManager& acl_m, IsisManager& isis_m); // Added IsisManager
+                      netflow::AclManager& acl_m, netflow::isis::IsisManager& isis_m); // Corrected namespace
 
     void register_cli_commands();
 
@@ -73,7 +74,7 @@ private:
     netflow::LldpManager& lldp_manager_;
     netflow::QosManager& qos_manager_;
     netflow::AclManager& acl_manager_;
-    IsisManager& isis_manager_; // Added IsisManager member
+    netflow::isis::IsisManager& isis_manager_; // Corrected namespace for member
     SwitchLogger& logger_; // Added logger member
 
     // QoS CLI Handlers
