@@ -235,7 +235,7 @@ void ArpProcessor::construct_and_send_arp_request(IpAddress source_ip, MacAddres
     arp_hdr->sender_ip = source_ip; // Assumed already in network byte order
     // For ARP request, target MAC is often all zeros or ignored.
     // Some implementations use broadcast MAC here too, but typically it's 00:00:00:00:00:00
-    std::fill(arp_hdr->target_mac.bytes, arp_hdr->target_mac.bytes + 6, 0x00);
+    std::fill(arp_hdr->target_mac.bytes.begin(), arp_hdr->target_mac.bytes.end(), 0x00);
     arp_hdr->target_ip = target_ip; // Assumed already in network byte order
 
     std::cout << "Constructed ARP Request: SrcIP=" << source_ip << ", SrcMAC=";
