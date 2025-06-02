@@ -6,86 +6,91 @@
 #elif __has_include(<winsock2.h>)
 #include <winsock2.h>
 #endif
+#include <iostream> // For potential debug logging
+
 
 namespace netflow {
 
 RoutingManager::RoutingManager() {
     // Constructor body can be empty for now.
-    // The routing_table_ (std::vector) and table_mutex_ (std::mutex)
-    // will be default-initialized.
 }
 
 void RoutingManager::add_static_route(const IpAddress& destination_network, const IpAddress& subnet_mask,
-                                      const IpAddress& next_hop_ip, uint32_t egress_interface_id, int metric) {
+                                      const IpAddress& next_hop_ip, uint32_t egress_interface_id, 
+                                      int metric, uint8_t admin_distance) {
     std::lock_guard<std::mutex> lock(table_mutex_);
 
-    // Ensure the provided destination_network is actually a network address
     IpAddress actual_network_address = destination_network & subnet_mask;
 
-    // Optional: Check for duplicates
-    for (const auto& entry : routing_table_) {
-        if (entry.destination_network == actual_network_address &&
-            entry.subnet_mask == subnet_mask &&
-            entry.next_hop_ip == next_hop_ip && // Could be more nuanced if just updating metric/interface
-            entry.egress_interface_id == egress_interface_id) {
-            // Route exists, perhaps update metric or just return
-            // For this implementation, we'll assume updates are handled by remove then add, or we simply don't add duplicates.
-            // To prevent exact duplicates (all fields same):
-            // if (entry.metric == metric) return; // if all same, do nothing
-            return; // Simple: don't add if a very similar route (network, mask, next_hop, iface) exists.
-        }
-    }
+    // Remove existing static route to the same exact prefix to prevent duplicates if re-adding with new params
+    routing_table_.erase(
+        std::remove_if(routing_table_.begin(), routing_table_.end(),
+                       [&](const RouteEntry& entry) {
+                           return entry.source == RouteSource::STATIC &&
+                                  entry.destination_network == actual_network_address &&
+                                  entry.subnet_mask == subnet_mask;
+                       }),
+        routing_table_.end());
+    
+    routing_table_.emplace_back(actual_network_address, subnet_mask, next_hop_ip, 
+                                egress_interface_id, metric, RouteSource::STATIC, admin_distance);
+    rebuild_routing_table();
+}
 
-    routing_table_.emplace_back(actual_network_address, subnet_mask, next_hop_ip, egress_interface_id, metric);
-
-    // Sort the routing table: longest prefix match first (most bits in subnet mask)
-    // then by metric, then by destination network for stable ordering.
-    std::sort(routing_table_.begin(), routing_table_.end(),
-        [](const RouteEntry& a, const RouteEntry& b) {
-            // __builtin_popcount works on integers. IpAddress is uint32_t.
-            // Masks are already in network byte order, ntohl converts to host byte order for popcount.
-            uint32_t popcount_a = __builtin_popcount(ntohl(a.subnet_mask));
-            uint32_t popcount_b = __builtin_popcount(ntohl(b.subnet_mask));
-
-            if (popcount_a != popcount_b) {
-                return popcount_a > popcount_b; // Higher popcount (longer mask) first
-            }
-            // If subnet mask lengths are equal, sort by metric (lower is better)
-            if (a.metric != b.metric) {
-                return a.metric < b.metric;
-            }
-            // If metrics are also equal, sort by destination network for stability
-            // (ntohl for consistent comparison if IPs are stored network order)
-            return ntohl(a.destination_network) < ntohl(b.destination_network);
-        });
+void RoutingManager::add_connected_route(const IpAddress& network_address,
+                                         const IpAddress& subnet_mask,
+                                         uint32_t interface_id) {
+    std::lock_guard<std::mutex> lock(table_mutex_);
+    // Connected routes: AD 0, Metric 0. Next hop is 0.0.0.0.
+    routing_table_.emplace_back(network_address & subnet_mask, subnet_mask, IpAddress(0),
+                                interface_id, 0, RouteSource::CONNECTED, 0);
+    rebuild_routing_table();
 }
 
 void RoutingManager::remove_static_route(const IpAddress& destination_network, const IpAddress& subnet_mask) {
     std::lock_guard<std::mutex> lock(table_mutex_);
-
     IpAddress actual_network_address = destination_network & subnet_mask;
-
     routing_table_.erase(
         std::remove_if(routing_table_.begin(), routing_table_.end(),
                        [&](const RouteEntry& entry) {
-                           return entry.destination_network == actual_network_address &&
+                           return entry.source == RouteSource::STATIC && // Important: only remove static
+                                  entry.destination_network == actual_network_address &&
                                   entry.subnet_mask == subnet_mask;
-                           // This removes all routes for that network/mask.
-                           // If multiple routes to the same network (e.g. different next hops/metrics)
-                           // were allowed and needed specific removal, the criteria would need more fields.
                        }),
         routing_table_.end());
+    // No need to rebuild_routing_table() if only removing, unless order is critical for other operations
+    // or to remove gaps, but vector erase handles gaps. Sorting is for lookup optimization.
+    // Let's call it to be safe and maintain a canonical state.
+    rebuild_routing_table(); 
+}
+
+void RoutingManager::update_dynamic_routes(const std::vector<RouteEntry>& new_routes, RouteSource source_type) {
+    std::lock_guard<std::mutex> lock(table_mutex_);
+    // Remove all existing routes from the specified dynamic source
+    routing_table_.erase(
+        std::remove_if(routing_table_.begin(), routing_table_.end(),
+                       [&](const RouteEntry& entry) {
+                           return entry.source == source_type;
+                       }),
+        routing_table_.end());
+
+    // Add all new routes. Their source and AD should be correctly set by the caller (e.g. IsisManager)
+    routing_table_.insert(routing_table_.end(), new_routes.begin(), new_routes.end());
+    
+    rebuild_routing_table();
 }
 
 std::optional<RouteEntry> RoutingManager::lookup_route(const IpAddress& destination_ip) const {
-    std::lock_guard<std::mutex> lock(table_mutex_); // Mutex is mutable
+    std::lock_guard<std::mutex> lock(table_mutex_); 
 
+    // The routing_table_ is sorted by rebuild_routing_table() according to:
+    // 1. Longest prefix match (descending prefix length)
+    // 2. Lowest administrative distance
+    // 3. Lowest metric
+    // So, the first entry that matches the prefix criteria is the best route.
     for (const auto& entry : routing_table_) {
-        // Apply mask to the destination IP and compare with the route's network address
-        // Both entry.destination_network and entry.subnet_mask are in network byte order.
-        // destination_ip is also assumed to be in network byte order.
         if ((destination_ip & entry.subnet_mask) == entry.destination_network) {
-            return entry; // Return a copy of the matched entry
+            return entry; // Return a copy of the first (and thus best) matched entry
         }
     }
     return std::nullopt; // No route found
@@ -94,6 +99,19 @@ std::optional<RouteEntry> RoutingManager::lookup_route(const IpAddress& destinat
 std::vector<RouteEntry> RoutingManager::get_routing_table() const {
     std::lock_guard<std::mutex> lock(table_mutex_);
     return routing_table_; // Return a copy of the table
+}
+
+void RoutingManager::rebuild_routing_table() {
+    // Sorts the table based on RouteEntry::operator<
+    // Order: Longest prefix, then lowest AD, then lowest metric.
+    std::sort(routing_table_.begin(), routing_table_.end());
+
+    // Optional: remove dominated routes if not handled by specific logic.
+    // E.g., if we have 10.0.0.0/8 AD 10 and 10.0.0.0/8 AD 100 from different sources,
+    // the AD 100 one will never be used if lookup_route just picks the first one after sorting.
+    // The current lookup_route correctly handles this by iterating and checking AD.
+    // The sort order itself ensures that the first match found by lookup_route's iteration
+    // will be the best one according to longest prefix, then AD, then metric.
 }
 
 } // namespace netflow

@@ -21,7 +21,7 @@ namespace netflow {
 
 // Forward declare QosManager if full include isn't desired here,
 // but since we will use its types in private methods, full include is fine.
-// class QosManager;
+class IsisManager; // Forward declaration for IsisManager
 
 class ManagementService {
 public:
@@ -30,7 +30,7 @@ public:
                       netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm,
                       netflow::StpManager& stpm, netflow::LacpManager& lacpm,
                       netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
-                      netflow::AclManager& acl_m);
+                      netflow::AclManager& acl_m, IsisManager& isis_m); // Added IsisManager
 
     void register_cli_commands();
 
@@ -73,6 +73,7 @@ private:
     netflow::LldpManager& lldp_manager_;
     netflow::QosManager& qos_manager_;
     netflow::AclManager& acl_manager_;
+    IsisManager& isis_manager_; // Added IsisManager member
     SwitchLogger& logger_; // Added logger member
 
     // QoS CLI Handlers
@@ -85,6 +86,31 @@ private:
     // Helper for formatting ACL output for 'show acl-rules'
     std::string format_acl_rules_output(const std::string& acl_name_filter, std::optional<uint32_t> rule_id_filter);
     // Show ACLs is handled within handle_show_command
+
+    // IS-IS CLI Handlers (prototypes)
+    // Global IS-IS configuration
+    std::string handle_isis_global_system_id(const std::vector<std::string>& args);
+    std::string handle_isis_global_area(const std::vector<std::string>& args, bool is_add); // bool to distinguish add/remove
+    std::string handle_isis_global_level(const std::vector<std::string>& args);
+    std::string handle_isis_global_overload_bit(const std::vector<std::string>& args);
+    std::string handle_isis_global_enable(bool enable); // For global enable/disable (start/stop)
+
+    // Interface IS-IS configuration
+    std::string handle_isis_interface_enable(uint32_t interface_id, const std::vector<std::string>& args);
+    std::string handle_isis_interface_disable(uint32_t interface_id);
+    std::string handle_isis_interface_circuit_type(uint32_t interface_id, const std::vector<std::string>& args);
+    std::string handle_isis_interface_hello_interval(uint32_t interface_id, const std::vector<std::string>& args);
+    std::string handle_isis_interface_hello_multiplier(uint32_t interface_id, const std::vector<std::string>& args);
+    std::string handle_isis_interface_priority(uint32_t interface_id, const std::vector<std::string>& args);
+    // std::string handle_isis_interface_metric(uint32_t interface_id, const std::vector<std::string>& args); // If implemented
+
+    // Show IS-IS commands
+    std::string show_isis_neighbors_cli(const std::vector<std::string>& args);
+    std::string show_isis_database_cli(const std::vector<std::string>& args);
+    std::string show_isis_interface_cli(const std::vector<std::string>& args);
+    std::string show_isis_routes_cli(const std::vector<std::string>& args);
+    std::string show_isis_summary_cli(const std::vector<std::string>& args); // New summary show command
+
 };
 
 } // namespace netflow
