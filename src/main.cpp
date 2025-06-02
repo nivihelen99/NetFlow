@@ -1,4 +1,5 @@
 #include "netflow++/switch.hpp"
+#include "netflow++/management_service.hpp" // Include ManagementService
 #include <iostream>
 #include <vector>
 
@@ -106,20 +107,39 @@ int main(int argc, char* argv[]) {
     std::cout << "\n--- ManagementInterface Examples ---" << std::endl;
     sw.logger_.info("MGMT_IF_MAIN", "Registering sample CLI commands and OID handlers...");
 
-    // CLI Command
-    sw.management_interface_.register_command("show_version",
+    // Instantiate ManagementService and register its commands
+    netflow::ManagementService mgmt_service(
+        sw.logger_,      // Pass SwitchLogger
+        sw.routing_manager_,
+        sw.interface_manager_,
+        sw.management_interface_,
+        sw.vlan_manager,
+        sw.fdb,
+        sw.stp_manager,
+        sw.lacp_manager_,
+        sw.lldp_manager_,
+        sw.qos_manager_,
+        sw.acl_manager_
+    );
+    mgmt_service.register_cli_commands(); // This will register all structured commands
+
+    // The following direct registrations can co-exist or be replaced by ManagementService commands
+    // For example, "help" is now registered by ManagementService with more details.
+    // "show_version" could be a simple command kept here or moved into ManagementService.
+    // CLI Command (Example of a simple, direct registration)
+    sw.management_interface_.register_command("show_version_simple",
         [&](const std::vector<std::string>& args) -> std::string {
-            // Accessing logger from Switch instance captured by lambda (if needed, or use global)
-            // sw.logger_.debug("CLI_HANDLER", "'show_version' command executed.");
-            return "NetFlow++ Switch Version 1.0.1-alpha";
+            return "NetFlow++ Switch Version 1.0.1-alpha (Simple Handler)";
         }
     );
-    std::string version_output = sw.management_interface_.handle_cli_command("show_version");
-    sw.logger_.info("CLI_TEST", "Output of 'show_version': " + version_output);
-    std::string help_output = sw.management_interface_.handle_cli_command("help"); // Test unknown command
-    sw.logger_.info("CLI_TEST", "Output of 'help': " + help_output);
+    std::string version_output = sw.management_interface_.handle_cli_command("show_version_simple");
+    sw.logger_.info("CLI_TEST", "Output of 'show_version_simple': " + version_output);
 
-    // OID Handler
+    // Test the ManagementService registered help command
+    std::string help_output = sw.management_interface_.handle_cli_command("help");
+    sw.logger_.info("CLI_TEST", "Output of 'help' (from ManagementService):\n" + help_output);
+
+    // OID Handler (remains as is, not affected by ManagementService CLI commands)
     sw.management_interface_.register_oid_handler(
         "1.3.6.1.2.1.1.1.0", // sysDescr OID
         [](){ return std::string("NetFlow++ Switch - High Performance Software Defined Networking"); }
@@ -229,6 +249,11 @@ int main(int argc, char* argv[]) {
 
     // --- ACL Example Configuration ---
     std::cout << "\n--- ACL Configuration Example ---" << std::endl;
+    std::string main_acl_name = "DEFAULT_INGRESS_ACL";
+    if (sw.acl_manager_.create_acl(main_acl_name)) {
+        std::cout << "Created ACL: " << main_acl_name << std::endl;
+    }
+
     netflow::AclRule acl_deny_rule;
     acl_deny_rule.rule_id = 1;
     acl_deny_rule.priority = 200; // High priority
@@ -236,8 +261,8 @@ int main(int argc, char* argv[]) {
     acl_deny_rule.src_ip = ntohl(0xC0A80101); // 192.168.1.1
     acl_deny_rule.protocol = 6; // TCP
     acl_deny_rule.action = netflow::AclActionType::DENY;
-    sw.acl_manager_.add_rule(acl_deny_rule);
-    std::cout << "Added ACL DENY rule for TCP from 192.168.1.1 (ID:1, Prio:200)." << std::endl;
+    sw.acl_manager_.add_rule(main_acl_name, acl_deny_rule);
+    std::cout << "Added ACL DENY rule to ACL '" << main_acl_name << "' for TCP from 192.168.1.1 (ID:1, Prio:200)." << std::endl;
 
     netflow::AclRule acl_redirect_rule;
     acl_redirect_rule.rule_id = 2;
@@ -247,8 +272,15 @@ int main(int argc, char* argv[]) {
     acl_redirect_rule.protocol = 17; // UDP
     acl_redirect_rule.action = netflow::AclActionType::REDIRECT;
     acl_redirect_rule.redirect_port_id = 2;
-    sw.acl_manager_.add_rule(acl_redirect_rule);
-    std::cout << "Added ACL REDIRECT rule for UDP from 192.168.1.2 to port 2 (ID:2, Prio:150)." << std::endl;
+    sw.acl_manager_.add_rule(main_acl_name, acl_redirect_rule);
+    std::cout << "Added ACL REDIRECT rule to ACL '" << main_acl_name << "' for UDP from 192.168.1.2 to port 2 (ID:2, Prio:150)." << std::endl;
+
+    sw.acl_manager_.compile_rules(main_acl_name);
+    std::cout << "Compiled ACL: " << main_acl_name << std::endl;
+
+    // To make these ACLs effective, they need to be applied to an interface, e.g.:
+    // sw.interface_manager_.apply_acl_to_interface(0, main_acl_name, netflow::AclDirection::INGRESS);
+    // std::cout << "Applied ACL " << main_acl_name << " to interface 0 ingress." << std::endl;
 
 
     // --- LACP Example Configuration ---

@@ -24,6 +24,8 @@ add_library(netflow_switching_lib STATIC
     netflow++/routing_manager.cpp # Added Routing Manager source
     netflow++/management_service.cpp # Added Management Service source
     netflow++/lldp_manager.cpp       # Added LLDP Manager source
+    netflow++/qos_manager.cpp      # Added QoS Manager source
+    netflow++/acl_manager.cpp      # Added ACL Manager source
 )
 
 # Make sure the libraries can find their own headers if they were in src,

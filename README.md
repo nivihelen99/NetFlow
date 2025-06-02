@@ -198,6 +198,8 @@ public:
 ## Advanced Switch Features
 
 ### 1. Quality of Service (QoS)
+The `QosManager` is implemented to provide port-based Quality of Service. It supports configuration of multiple queues per port, various scheduling strategies like Strict Priority and basic Weighted Round Robin (with a simple round-robin fallback for now), and configurable maximum queue depths. Packet classification, for instance based on VLAN Priority Code Point (PCP), directs packets to appropriate queues. The manager handles enqueueing packets based on classification and dequeueing them based on the configured scheduling policy. CLI commands are available for configuring QoS parameters and monitoring queue statistics.
+
 ```cpp
 class QosManager {
 public:
@@ -208,11 +210,14 @@ public:
         SchedulerType scheduler;
         std::vector<uint32_t> queue_weights;
         std::vector<uint32_t> rate_limits_kbps;
+        uint32_t max_queue_depth; // Max packets per queue
     };
     
     void configure_port_qos(uint32_t port, const QosConfig& config);
-    uint8_t classify_packet(const Packet& pkt, uint32_t port);
-    void enqueue_packet(const Packet& pkt, uint32_t port, uint8_t queue);
+    // uint8_t classify_packet(const Packet& pkt, uint32_t port); // Now internal
+    // void enqueue_packet(const Packet& pkt, uint32_t port, uint8_t queue); // Signature changed
+    void enqueue_packet(const Packet& pkt, uint32_t port);
+    std::optional<Packet> select_packet_to_dequeue(uint32_t port_id); // New dequeue method
     
     // Traffic shaping
     bool should_transmit(uint32_t port, uint8_t queue);
@@ -221,35 +226,43 @@ public:
 ```
 
 ### 2. Access Control Lists (ACL)
+The `AclManager` has been implemented to support rule-based packet filtering. It allows for the creation and management of **named Access Control Lists (ACLs)**, enabling multiple distinct sets of rules. These rules are processed based on priority and can match on various L2, L3, and L4 packet header fields (e.g., MAC/IP addresses, VLAN ID, EtherType, protocol, L4 ports). Supported actions include PERMIT, DENY, and REDIRECT to a specified port. Named ACLs can be **applied to specific switch interfaces in either ingress or egress directions** via the `InterfaceManager`. A `compile_rules` method sorts rules by priority for efficient evaluation within each named ACL. CLI commands are available for creating/deleting named ACLs, managing rules within them, and applying ACLs to interfaces.
+
 ```cpp
 class AclManager {
 public:
     enum class ActionType { PERMIT, DENY, REDIRECT };
     
-    struct AclRule {
+    struct AclRule { // Simplified for README, actual may have more or different types
         uint32_t rule_id;
-        uint32_t priority;
+        int priority;
         
-        // Match fields (optional)
         std::optional<MacAddress> src_mac;
         std::optional<MacAddress> dst_mac;
         std::optional<uint16_t> vlan_id;
-        std::optional<uint16_t> ethertype;
-        std::optional<IpAddress> src_ip;
-        std::optional<IpAddress> dst_ip;
-        std::optional<uint16_t> src_port;
-        std::optional<uint16_t> dst_port;
+        std::optional<uint16_t> ethertype; // Host byte order
+        std::optional<uint32_t> src_ip;    // Host byte order
+        std::optional<uint32_t> dst_ip;    // Host byte order
+        std::optional<uint8_t> protocol;
+        std::optional<uint16_t> src_port;  // Host byte order
+        std::optional<uint16_t> dst_port;  // Host byte order
         
         ActionType action;
-        std::optional<uint32_t> redirect_port;
+        std::optional<uint32_t> redirect_port_id;
     };
     
-    void add_rule(const AclRule& rule);
-    void remove_rule(uint32_t rule_id);
-    ActionType evaluate(const Packet& pkt, uint32_t& redirect_port);
+    // Named ACL management
+    bool create_acl(const std::string& acl_name);
+    bool delete_acl(const std::string& acl_name);
+    std::vector<std::string> get_acl_names() const;
+
+    // Rule management within a named ACL
+    bool add_rule(const std::string& acl_name, const AclRule& rule);
+    bool remove_rule(const std::string& acl_name, uint32_t rule_id);
+    AclActionType evaluate(const std::string& acl_name, const Packet& pkt,
+                           uint32_t& out_redirect_port_id) const;
     
-    // Performance optimization
-    void compile_rules(); // Convert to optimized lookup structure
+    void compile_rules(const std::string& acl_name);
 };
 ```
 
@@ -517,4 +530,4 @@ int main() {
     
     return 0;
 }
-
+```

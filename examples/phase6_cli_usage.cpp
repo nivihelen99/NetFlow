@@ -1,24 +1,18 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <sstream> // For std::ostringstream in case any manager needs it for string conversion
-#include <iomanip>   // For std::setw, std::left if needed by any manager for string conversion
+#include <sstream>
+#include <iomanip>
 
 // NetFlow++ Headers
-#include "netflow++/interface_manager.hpp"
-#include "netflow++/vlan_manager.hpp"
-#include "netflow++/forwarding_database.hpp"
-#include "netflow++/stp_manager.hpp"
-#include "netflow++/lacp_manager.hpp"
-#include "netflow++/routing_manager.hpp"
+#include "netflow++/switch.hpp" // For full Switch class definition and all its managers
 #include "netflow++/management_interface.hpp"
 #include "netflow++/management_service.hpp"
-#include "netflow++/packet.hpp" // For MacAddress
-#include "netflow++/switch.hpp" // For full Switch class definition
+#include "netflow++/packet.hpp" // For MacAddress (though Switch includes it)
 
 // Example constants
 const uint32_t NUM_PORTS_EXAMPLE = 8;
-const uint64_t SWITCH_BASE_MAC_EXAMPLE = 0x001122334400ULL; // Base MAC for the switch
+const uint64_t SWITCH_BASE_MAC_EXAMPLE = 0x001122334400ULL;
 const uint16_t DEFAULT_STP_PRIORITY_EXAMPLE = 32768;
 const uint16_t DEFAULT_LACP_SYSTEM_PRIORITY_EXAMPLE = 32768;
 
@@ -30,7 +24,7 @@ netflow::MacAddress generate_port_mac(uint32_t port_id) {
     mac_bytes[2] = (SWITCH_BASE_MAC_EXAMPLE >> 24) & 0xFF;
     mac_bytes[3] = (SWITCH_BASE_MAC_EXAMPLE >> 16) & 0xFF;
     mac_bytes[4] = (SWITCH_BASE_MAC_EXAMPLE >> 8) & 0xFF;
-    mac_bytes[5] = (SWITCH_BASE_MAC_EXAMPLE & 0xFF) + port_id + 1; // Make it unique per port
+    mac_bytes[5] = (SWITCH_BASE_MAC_EXAMPLE & 0xFF) + port_id + 1;
     return netflow::MacAddress(mac_bytes);
 }
 
@@ -51,6 +45,8 @@ void run_sample_commands(netflow::ManagementInterface& mi) {
         "show lacp",
         "show lacp 1 internal",
         "show etherchannel summary",
+        "show qos interface 0", // Added QoS show
+        "show acl-rules",       // Added ACL show
         // Interface configuration
         "interface 0 shutdown",
         "interface 0 no shutdown",
@@ -77,30 +73,36 @@ void run_sample_commands(netflow::ManagementInterface& mi) {
         "show spanning-tree",
         // LACP configuration
         "lacp system-priority 30000",
-        "interface port-channel 1 mode active", // Creates PC1
+        "interface port-channel 1 mode active",
         "interface port-channel 1 rate fast",
-        "interface 2 channel-group 1 mode active", // Add port 2 to PC1
-        "interface 3 channel-group 1",             // Add port 3 to PC1
+        "interface 2 channel-group 1 mode active",
+        "interface 3 channel-group 1",
         "interface 2 lacp port-priority 100",
         "show lacp 1 internal",
         "// --- LLDP Commands ---",
-        "show lldp interface", // Show initial state (should be disabled)
-        "lldp enable",         // Enable LLDP globally
+        "show lldp interface",
+        "lldp enable",
         "show lldp interface 0",
-        "show lldp interface 1",
         "interface 0 lldp tx-interval 10",
-        "interface 0 lldp ttl-multiplier 5",
         "show lldp interface 0",
-        "// Note: show lldp neighbors may be empty unless another LLDP-enabled device is connected",
         "show lldp neighbors",
-        "show lldp neighbors interface 0 detail",
-        "interface 1 lldp disable",
-        "show lldp interface 1",
-        "lldp disable",        // Disable LLDP globally
-        "show lldp interface", // Show final state
+        "lldp disable",
+        "// --- QoS Commands ---",
+        "interface 0 qos enable",
+        "interface 0 qos num-queues 2",
+        "interface 0 qos scheduler strict-priority",
+        "interface 0 qos max-depth 500",
+        "show qos interface 0 config",
+        "// --- ACL Commands ---",
+        "acl-rule add id 1 priority 100 action permit src-ip 10.0.0.1 dst-ip 10.0.0.2 protocol tcp dst-port 80",
+        "acl-rule add id 2 priority 90 action deny src-ip 10.0.0.0", // Simpler rule using default IP mask from AclRule if any
+        "acl-compile",
+        "show acl-rules",
+        "show acl-rules id 1",
         // Clear commands
         "clear interface 0 stats",
         "clear mac address-table dynamic",
+        "clear qos interface 0 stats", // Added QoS clear
         // Invalid commands for error demonstration
         "show foobar",
         "interface 999 shutdown"
@@ -115,62 +117,50 @@ void run_sample_commands(netflow::ManagementInterface& mi) {
 }
 
 int main() {
-    // 1. Instantiate Managers
-    netflow::InterfaceManager interface_manager;
-    netflow::VlanManager vlan_manager;
-    netflow::ForwardingDatabase fdb_manager;
-    netflow::StpManager stp_manager(NUM_PORTS_EXAMPLE, SWITCH_BASE_MAC_EXAMPLE, DEFAULT_STP_PRIORITY_EXAMPLE);
-    netflow::LacpManager lacp_manager(SWITCH_BASE_MAC_EXAMPLE, DEFAULT_LACP_SYSTEM_PRIORITY_EXAMPLE);
-    netflow::RoutingManager routing_manager; // RoutingManager might need InterfaceManager
+    // 1. Instantiate Switch (which owns all core managers)
+    // The Switch constructor now handles logger initialization internally.
+    netflow::Switch sw(NUM_PORTS_EXAMPLE, SWITCH_BASE_MAC_EXAMPLE,
+                       DEFAULT_STP_PRIORITY_EXAMPLE, DEFAULT_LACP_SYSTEM_PRIORITY_EXAMPLE);
 
-    // In a real application, Switch would own most managers. For this example, we create them separately.
-    // However, LldpManager needs a Switch reference. We'll create a minimal Switch instance.
-    // Note: This Switch instance is very basic and might not reflect full system behavior
-    // if other managers it owns internally are not fully configured or if it has complex startup.
-    // For the purpose of this CLI example, it primarily serves to provide the LldpManager.
-    netflow::Switch mock_switch_for_example(NUM_PORTS_EXAMPLE, SWITCH_BASE_MAC_EXAMPLE);
-    // LldpManager requires the Switch and InterfaceManager
-    netflow::LldpManager lldp_manager(mock_switch_for_example, interface_manager);
-
-
-    // Pre-configure some interfaces for demonstration
+    // Pre-configure some interfaces for demonstration using the switch's InterfaceManager
     for (uint32_t i = 0; i < NUM_PORTS_EXAMPLE; ++i) {
         netflow::InterfaceManager::PortConfig p_config;
-        p_config.admin_up = true; // Default admin up
+        p_config.admin_up = true;
         p_config.mac_address = generate_port_mac(i);
         p_config.mtu = 1500;
-        p_config.speed_mbps = 1000; // Default 1Gbps
+        p_config.speed_mbps = 1000;
         p_config.full_duplex = true;
         p_config.auto_negotiation = true;
-        interface_manager.configure_port(i, p_config);
+        sw.interface_manager_.configure_port(i, p_config);
+        sw.interface_manager_.simulate_port_link_up(i); // Ensure link is up
 
-        // Default VLAN config (Port 0 in access vlan 1, others default)
         if (i == 0) {
-            netflow::VlanManager::PortConfig v_config; // Default is access, vlan 1
-            vlan_manager.configure_port(i, v_config);
+            netflow::VlanManager::PortConfig v_config;
+            sw.vlan_manager.configure_port(i, v_config);
         }
-        // Default STP config (ports are initialized by StpManager constructor)
-        // Default LACP config (ports are initialized when added to a LAG)
     }
 
-    // 2. Instantiate ManagementInterface and ManagementService
-    netflow::ManagementInterface management_interface;
+    // 2. Instantiate ManagementInterface (if it's standalone) and ManagementService
+    // ManagementInterface is part of the Switch instance (sw.management_interface_)
     netflow::ManagementService management_service(
-        routing_manager,
-        interface_manager,
-        management_interface,
-        vlan_manager,
-        fdb_manager,
-        stp_manager,
-        lacp_manager,
-        lldp_manager // Pass LldpManager to ManagementService
+        sw.logger_, // Pass logger from Switch
+        sw.routing_manager_,
+        sw.interface_manager_,
+        sw.management_interface_, // Pass ManagementInterface from Switch
+        sw.vlan_manager,
+        sw.fdb,
+        sw.stp_manager,
+        sw.lacp_manager_,
+        sw.lldp_manager_,
+        sw.qos_manager_,    // Pass QosManager from Switch
+        sw.acl_manager_     // Pass AclManager from Switch
     );
 
     // 3. Register CLI commands
     management_service.register_cli_commands();
 
     // 4. Run predefined sample commands
-    run_sample_commands(management_interface);
+    run_sample_commands(sw.management_interface_); // Pass ManagementInterface from Switch
 
     // 5. Start interactive console loop
     std::cout << "NetFlow++ Interactive CLI. Type 'exit' or 'quit' to exit.\n";
@@ -178,7 +168,7 @@ int main() {
     while (true) {
         std::cout << "RouterCLI> ";
         if (!std::getline(std::cin, line)) {
-            break; // EOF or error
+            break;
         }
         if (line == "exit" || line == "quit") {
             break;
@@ -187,7 +177,7 @@ int main() {
             continue;
         }
 
-        std::string output = management_interface.handle_cli_command(line);
+        std::string output = sw.management_interface_.handle_cli_command(line);
         std::cout << output << std::endl;
     }
 

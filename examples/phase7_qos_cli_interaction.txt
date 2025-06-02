@@ -1,0 +1,75 @@
+# --- Example QoS CLI Interaction ---
+
+# This script demonstrates how to configure and monitor Quality of Service (QoS)
+# features on a switch interface using the NetFlow++ CLI.
+
+# Configure QoS on interface 1
+# ----------------------------
+# First, ensure QoS is active on the interface. This applies a default or existing config.
+interface 1 qos enable
+# Set the number of hardware queues to be used for this interface (e.g., 1 to 8)
+interface 1 qos num-queues 4
+# Choose a scheduling policy for these queues
+interface 1 qos scheduler strict-priority
+# Set a maximum depth (in packets) for each queue on this interface
+interface 1 qos max-depth 1000
+
+# Optional: Configure weights for WRR/DRR or rate limits if scheduler supports it
+# and if the underlying dequeue logic fully implements these features.
+# The current implementation of WRR/DRR falls back to basic Round Robin.
+# Rate limiting enforcement is a TODO in the QosManager.
+# interface 1 qos scheduler weighted-round-robin
+# interface 1 qos queue 0 weight 100
+# interface 1 qos queue 1 weight 50
+# interface 1 qos queue 0 rate-limit 10000  # Rate in Kbps (e.g., 10 Mbps)
+# interface 1 qos queue 1 rate-limit 5000   # 5 Mbps
+
+# Verify QoS Configuration
+# ------------------------
+# Display the current QoS configuration for interface 1
+show qos interface 1 config
+# Expected output will show the scheduler type, number of queues, max depth,
+# and any configured weights or rate limits per queue.
+
+# Monitor QoS Statistics
+# ----------------------
+# Display current statistics for all queues on interface 1
+# Initially, all counters (enqueued, dequeued, dropped) should be zero.
+show qos interface 1 stats
+# The 'queues' keyword is an alias for 'stats' for this command.
+show qos interface 1 queues
+
+# To observe changes in statistics:
+# 1. Traffic would need to be sent through the switch.
+# 2. Packets egressing on interface 1 would be classified by QosManager
+#    (e.g., based on VLAN PCP bits) into one of the 4 configured queues.
+# 3. As packets are enqueued and (conceptually) dequeued for transmission,
+#    the "enqueued" and "dequeued" counters would increment.
+# 4. If a queue reaches its max-depth (1000 packets), subsequently classified
+#    packets for that queue would be dropped, incrementing the "dropped (full)" counter.
+
+# Example: If traffic with PCP 7 (maps to queue 0 in SP) and PCP 1 (maps to queue 3)
+# is sent out of interface 1, `show qos interface 1 stats` would show:
+# QoS Statistics for Interface 1:
+#   Queue 0:
+#     Current Depth: X packets
+#     Enqueued:      Y packets
+#     Dequeued:      Z packets
+#     Dropped (Full):A packets
+#   Queue 1:
+#     Current Depth: 0 packets
+#     Enqueued:      0 packets
+#     ...
+#   Queue 3:
+#     Current Depth: P packets
+#     Enqueued:      Q packets
+#     ...
+
+# Clearing Statistics
+# -------------------
+# To reset QoS statistics for an interface:
+clear qos interface 1 stats
+# After this, `show qos interface 1 stats` should show all counters reset to zero.
+# The QoS configuration itself (scheduler, num_queues, etc.) remains unchanged.
+
+# --- End of QoS CLI Example ---
