@@ -69,23 +69,32 @@ struct AclRule {
 
 class AclManager {
 public:
-    AclManager(SwitchLogger& logger); // Constructor that takes a logger
+    AclManager(SwitchLogger& logger);
     ~AclManager();
 
-    bool add_rule(const AclRule& rule);
-    bool remove_rule(uint32_t rule_id_to_remove);
-    std::optional<AclRule> get_rule(uint32_t rule_id) const; // New method
-    const std::vector<AclRule>& get_all_rules() const; // Renamed from get_rules
-    void clear_rules();
-    AclActionType evaluate(const Packet& pkt, uint32_t& out_redirect_port_id) const; // Renamed from evaluate_packet
-    void compile_rules();
+    // Named ACL management
+    bool create_acl(const std::string& acl_name);
+    bool delete_acl(const std::string& acl_name);
+    std::vector<std::string> get_acl_names() const;
+    std::map<std::string, std::vector<AclRule>> get_all_named_acls() const; // For inspection/saving
+    void clear_all_acls(); // Clears all named ACLs and their rules
+
+    // Rule management within a named ACL
+    bool add_rule(const std::string& acl_name, const AclRule& rule);
+    bool remove_rule(const std::string& acl_name, uint32_t rule_id_to_remove);
+    std::optional<AclRule> get_rule(const std::string& acl_name, uint32_t rule_id) const;
+    std::vector<AclRule> get_all_rules(const std::string& acl_name) const; // Get rules for a specific ACL
+    void clear_rules(const std::string& acl_name); // Clear rules for a specific ACL
+
+    // Evaluation and compilation for a named ACL
+    AclActionType evaluate(const std::string& acl_name, const Packet& pkt, uint32_t& out_redirect_port_id) const;
+    void compile_rules(const std::string& acl_name);
 
 private:
     SwitchLogger& logger_;
-    std::vector<AclRule> acl_rules_;
-    bool needs_compilation_ = true; // Flag to indicate if rules need recompilation (sorting)
+    std::map<std::string, std::vector<AclRule>> named_acl_rules_;
+    std::map<std::string, bool> named_acl_needs_compilation_;
 
-    // Helper method for matching a packet against a rule.
     bool check_match(const Packet& pkt, const AclRule& rule) const;
 };
 

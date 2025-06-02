@@ -80,10 +80,9 @@ private:
     std::string handle_show_qos_command(const std::vector<std::string>& args);
     std::string handle_clear_qos_command(const std::vector<std::string>& args);
 
-    // ACL CLI Handlers
-    std::string handle_acl_rule_command(const std::vector<std::string>& args);
-    std::string handle_show_acl_rules_command(const std::vector<std::string>& args);
-    std::string handle_acl_compile_command(const std::vector<std::string>& args);
+    // ACL CLI Handler (main dispatcher for 'acl' command)
+    std::string handle_acl_command(const std::vector<std::string>& args);
+    // Show ACLs is handled within handle_show_command
 };
 
 } // namespace netflow

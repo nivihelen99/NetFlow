@@ -210,7 +210,7 @@ public:
         SchedulerType scheduler;
         std::vector<uint32_t> queue_weights;
         std::vector<uint32_t> rate_limits_kbps;
-        // uint32_t max_queue_depth; // Added in implementation
+        uint32_t max_queue_depth; // Max packets per queue
     };
     
     void configure_port_qos(uint32_t port, const QosConfig& config);
@@ -226,40 +226,43 @@ public:
 ```
 
 ### 2. Access Control Lists (ACL)
-The `AclManager` has been implemented to support rule-based packet filtering. It allows for the creation and management of Access Control Lists (ACLs) where rules are processed based on priority. Rules can match on various L2, L3, and L4 packet header fields, including source/destination MAC and IP addresses, VLAN ID, EtherType, IP protocol, and L4 ports. Supported actions for matching packets include PERMIT, DENY, and REDIRECT to a specified port. A `compile_rules` method is provided to sort rules by priority for efficient evaluation. CLI commands are available for adding, removing, viewing, and compiling ACL rules.
+The `AclManager` has been implemented to support rule-based packet filtering. It allows for the creation and management of **named Access Control Lists (ACLs)**, enabling multiple distinct sets of rules. These rules are processed based on priority and can match on various L2, L3, and L4 packet header fields (e.g., MAC/IP addresses, VLAN ID, EtherType, protocol, L4 ports). Supported actions include PERMIT, DENY, and REDIRECT to a specified port. Named ACLs can be **applied to specific switch interfaces in either ingress or egress directions** via the `InterfaceManager`. A `compile_rules` method sorts rules by priority for efficient evaluation within each named ACL. CLI commands are available for creating/deleting named ACLs, managing rules within them, and applying ACLs to interfaces.
 
 ```cpp
 class AclManager {
 public:
     enum class ActionType { PERMIT, DENY, REDIRECT };
     
-    struct AclRule {
+    struct AclRule { // Simplified for README, actual may have more or different types
         uint32_t rule_id;
-        int priority; // Changed from uint32_t to int in implementation, higher value = higher prio
+        int priority;
         
-        // Match fields (optional)
         std::optional<MacAddress> src_mac;
         std::optional<MacAddress> dst_mac;
         std::optional<uint16_t> vlan_id;
-        std::optional<uint16_t> ethertype;
-        std::optional<uint32_t> src_ip; // Changed from IpAddress to uint32_t in implementation
-        std::optional<uint32_t> dst_ip; // Changed from IpAddress to uint32_t in implementation
+        std::optional<uint16_t> ethertype; // Host byte order
+        std::optional<uint32_t> src_ip;    // Host byte order
+        std::optional<uint32_t> dst_ip;    // Host byte order
         std::optional<uint8_t> protocol;
-        std::optional<uint16_t> src_port;
-        std::optional<uint16_t> dst_port;
+        std::optional<uint16_t> src_port;  // Host byte order
+        std::optional<uint16_t> dst_port;  // Host byte order
         
         ActionType action;
-        std::optional<uint32_t> redirect_port_id; // Renamed from redirect_port
+        std::optional<uint32_t> redirect_port_id;
     };
     
-    void add_rule(const AclRule& rule);
-    void remove_rule(uint32_t rule_id);
-    // AclActionType evaluate(const Packet& pkt, uint32_t& redirect_port); // Signature changed
-    AclActionType evaluate(const Packet& pkt, uint32_t& out_redirect_port_id) const;
+    // Named ACL management
+    bool create_acl(const std::string& acl_name);
+    bool delete_acl(const std::string& acl_name);
+    std::vector<std::string> get_acl_names() const;
 
+    // Rule management within a named ACL
+    bool add_rule(const std::string& acl_name, const AclRule& rule);
+    bool remove_rule(const std::string& acl_name, uint32_t rule_id);
+    AclActionType evaluate(const std::string& acl_name, const Packet& pkt,
+                           uint32_t& out_redirect_port_id) const;
     
-    // Performance optimization
-    void compile_rules(); // Convert to optimized lookup structure
+    void compile_rules(const std::string& acl_name);
 };
 ```
 

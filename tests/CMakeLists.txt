@@ -154,6 +154,12 @@ gtest_discover_tests(acl_manager_test)
 # Ensure tests can find project headers
 target_include_directories(acl_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# Add executable for AclIntegration tests
+add_executable(acl_integration_test acl_integration_test.cpp)
+target_link_libraries(acl_integration_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(acl_integration_test)
+target_include_directories(acl_integration_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 # Add executable for BufferPool tests
 add_executable(buffer_pool_test buffer_pool_test.cpp)
 # BufferPool is header-only but uses PacketBuffer from the library.

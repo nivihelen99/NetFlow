@@ -1,74 +1,122 @@
-# --- Example ACL CLI Interaction ---
+# --- Example ACL CLI Interaction (Named ACLs) ---
 
-# This script demonstrates how to configure and manage Access Control Lists (ACLs)
-# using the NetFlow++ CLI. ACLs allow for rule-based packet filtering.
+# This script demonstrates how to configure and manage named Access Control Lists (ACLs)
+# and apply them to interfaces using the NetFlow++ CLI.
 
-# Adding ACL Rules
-# ----------------
-# Rules are processed based on priority (higher numeric value = higher precedence).
-# If a rule ID already exists, adding it again updates the existing rule.
-
-# Rule 1: Deny specific TCP traffic
-# Deny TCP traffic from source IP 192.168.1.10 to any destination on TCP port 80 (HTTP).
-# Assign a priority of 100.
-acl-rule add id 10 priority 100 action deny protocol tcp src-ip 192.168.1.10 dst-port 80
-
-# Rule 2: Permit specific UDP traffic
-# Permit UDP traffic from any source to destination IP 10.0.0.5 on UDP port 53 (DNS).
-# Assign a priority of 110 (will be evaluated before rule 10 if rule 10 didn't match).
-acl-rule add id 15 priority 110 action permit protocol udp dst-ip 10.0.0.5 dst-port 53
-
-# Rule 3: Deny traffic from a specific MAC address on VLAN 20
-# Assign a priority of 200 (highest precedence among these examples).
-acl-rule add id 5 priority 200 action deny src-mac 00:1A:2B:3C:4D:5E vlan 20
-
-# Rule 4: Redirect specific traffic
-# Redirect ARP traffic from IP 192.168.2.50 to switch port 3.
-# Priority 150.
-acl-rule add id 25 priority 150 action redirect 3 ethertype 0x0806 src-ip 192.168.2.50
-
-# Rule 5: Permit all other IP traffic (lower priority catch-all)
-# Note: The current ACL matching for IP does not support prefix/mask directly in `src-ip` or `dst-ip`.
-# This rule permits traffic specifically from IP 192.168.1.20.
-# A true "permit ip any any" or subnet permit would need more general wildcarding or be the default.
-# The default action if no rules match is PERMIT. This rule is an example of a lower priority permit.
-acl-rule add id 50 priority 10 action permit protocol ip src-ip 192.168.1.20
-
-# Compiling ACL Rules
-# -------------------
-# After adding or removing rules, they need to be compiled (sorted by priority)
-# for the evaluation engine to process them in the correct order.
-acl-compile
-# Expected output: ACL rules compiled (sorted by priority).
-
-# Showing ACL Rules
-# -----------------
-# Show all configured ACL rules (should be sorted by priority now)
-show acl-rules
-
-# Show a specific ACL rule by its ID
-show acl-rules id 10
-show acl-rules id 25
-
-# To observe ACLs in action:
-# 1. Traffic matching these rules would need to be sent through the switch.
-# 2. The switch's packet processing pipeline (specifically, where `AclManager::evaluate()`
-#    is called) would determine the fate of the packet based on the compiled rules.
-# For example:
-#    - A TCP packet from 192.168.1.10 to any host on port 80 should be DENIED (matches rule 10).
-#    - An ARP packet from 192.168.2.50 should be REDIRECTED to port 3 (matches rule 25).
-#    - UDP traffic to 10.0.0.5 on port 53 should be PERMITTED (matches rule 15).
-#    - A packet from MAC 00:1A:2B:3C:4D:5E on VLAN 20 should be DENIED (matches rule 5, highest priority).
-
-# Removing an ACL Rule
+# 1. Create Named ACLs
 # --------------------
-# Remove rule 50
-acl-rule remove id 50
+# ACLs must be created before rules can be added to them.
+acl create INGRESS_FILTER_1
+# Expected: ACL 'INGRESS_FILTER_1' created.
 
-# Re-compile after changes (good practice)
-acl-compile
+acl create EGRESS_POLICY_X
+# Expected: ACL 'EGRESS_POLICY_X' created.
 
-# Show rules again to verify removal
+# Attempt to create an existing ACL (should fail or inform)
+acl create INGRESS_FILTER_1
+# Expected: Error: Failed to create ACL 'INGRESS_FILTER_1' (it may already exist or name is invalid).
+
+# List all configured ACL names
 show acl-rules
+# Expected:
+# Configured ACLs:
+#   INGRESS_FILTER_1
+#   EGRESS_POLICY_X
 
-# --- End of ACL CLI Example ---
+# 2. Add Rules to a Named ACL
+# ----------------------------
+# Rules are added to a specific named ACL.
+# Rule 1 (for INGRESS_FILTER_1): Deny TCP traffic from 192.168.1.10 to any on port 80
+acl INGRESS_FILTER_1 rule add id 10 priority 100 action deny protocol tcp src-ip 192.168.1.10 dst-port 80
+# Expected: ACL rule 10 added/updated in ACL 'INGRESS_FILTER_1'.
+
+# Rule 2 (for INGRESS_FILTER_1): Permit UDP traffic to DNS server 8.8.8.8
+acl INGRESS_FILTER_1 rule add id 20 priority 110 action permit protocol udp dst-ip 8.8.8.8 dst-port 53
+# Expected: ACL rule 20 added/updated in ACL 'INGRESS_FILTER_1'.
+
+# Rule 3 (for EGRESS_POLICY_X): Deny any traffic to MAC 00:DE:AD:BE:EF:00
+acl EGRESS_POLICY_X rule add id 5 priority 200 action deny dst-mac 00:DE:AD:BE:EF:00
+# Expected: ACL rule 5 added/updated in ACL 'EGRESS_POLICY_X'.
+
+# 3. Compile Named ACLs
+# ---------------------
+# Rules within an ACL are sorted by priority during compilation for efficient evaluation.
+acl INGRESS_FILTER_1 compile
+# Expected: ACL 'INGRESS_FILTER_1' compiled.
+acl EGRESS_POLICY_X compile
+# Expected: ACL 'EGRESS_POLICY_X' compiled.
+
+# 4. Show ACL Rules
+# -----------------
+# Show rules for a specific ACL
+show acl-rules INGRESS_FILTER_1
+# Expected: Lists rule 20 (prio 110) then rule 10 (prio 100)
+
+# Show a specific rule within a named ACL
+show acl-rules INGRESS_FILTER_1 id 10
+# Expected: Shows details for rule 10 in INGRESS_FILTER_1
+
+# Show rules for another ACL
+show acl-rules EGRESS_POLICY_X
+# Expected: Lists rule 5
+
+# 5. Apply Named ACLs to Interfaces
+# ---------------------------------
+# Configure interface 1 (Gi0/1) and apply INGRESS_FILTER_1 to its ingress direction
+# and EGRESS_POLICY_X to its egress direction.
+interface 1 ip access-group INGRESS_FILTER_1 in
+# Expected: ACL 'INGRESS_FILTER_1' applied to interface 1 ingress.
+interface 1 ip access-group EGRESS_POLICY_X out
+# Expected: ACL 'EGRESS_POLICY_X' applied to interface 1 egress.
+
+# Verify by showing interface configuration
+show interface 1
+# Expected output for interface 1 should now include:
+#   Ingress ACL: INGRESS_FILTER_1
+#   Egress ACL: EGRESS_POLICY_X
+
+# Attempt to apply a non-existent ACL (should fail)
+interface 1 ip access-group NON_EXISTENT_ACL in
+# Expected: Error: Failed to apply ACL 'NON_EXISTENT_ACL' ... (ACL may not exist)
+
+# 6. Observe ACLs in Action (Conceptual)
+# --------------------------------------
+# - A TCP packet from 192.168.1.10 to any host on port 80, arriving on interface 1,
+#   should be DENIED by INGRESS_FILTER_1 (rule 10).
+# - A UDP packet to 8.8.8.8 on port 53, arriving on interface 1,
+#   should be PERMITTED by INGRESS_FILTER_1 (rule 20).
+# - If a permitted packet is then forwarded out of interface 1, and its destination MAC
+#   is 00:DE:AD:BE:EF:00, it should be DENIED by EGRESS_POLICY_X (rule 5).
+
+# 7. Remove ACL from Interface
+# ----------------------------
+no interface 1 ip access-group in
+# Expected: ACL removed from interface 1 ingress.
+show interface 1
+# Expected: Ingress ACL: Not Set
+
+no interface 1 ip access-group out
+# Expected: ACL removed from interface 1 egress.
+show interface 1
+# Expected: Egress ACL: Not Set
+
+# 8. Remove an ACL Rule
+# ---------------------
+acl INGRESS_FILTER_1 rule remove id 20
+# Expected: ACL rule 20 removed from ACL 'INGRESS_FILTER_1'.
+acl INGRESS_FILTER_1 compile
+show acl-rules INGRESS_FILTER_1
+# Expected: Only rule 10 should be listed.
+
+# 9. Delete a Named ACL
+# ---------------------
+# (Ensure ACL is not applied to any interface first, though current implementation might not check this)
+acl delete INGRESS_FILTER_1
+# Expected: ACL 'INGRESS_FILTER_1' deleted.
+acl delete EGRESS_POLICY_X
+# Expected: ACL 'EGRESS_POLICY_X' deleted.
+
+show acl-rules
+# Expected: No ACLs configured. (Or only other ACLs if more were created)
+
+# --- End of Named ACL CLI Example ---
