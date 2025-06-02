@@ -115,7 +115,7 @@ public:
         vlan_manager.process_egress(pkt, egress_port_id);
 
         // Egress ACL Processing
-        auto egress_acl_name_opt = interface_manager_.get_applied_acl_name(egress_port_id, InterfaceManager::AclDirection::EGRESS);
+        auto egress_acl_name_opt = interface_manager_.get_applied_acl_name(egress_port_id, netflow::AclDirection::EGRESS);
         if (egress_acl_name_opt.has_value() && !egress_acl_name_opt.value().empty()) {
             uint32_t redirect_port_egress_acl = 0; // Not used for egress redirect per current decision
             AclActionType egress_action = acl_manager_.evaluate(egress_acl_name_opt.value(), pkt, redirect_port_egress_acl);
@@ -217,7 +217,7 @@ public:
         Packet pkt(raw_buffer); // Original packet, ref_count managed by pkt
 
         // --- Ingress ACL Processing ---
-        auto ingress_acl_name_opt = interface_manager_.get_applied_acl_name(ingress_port_id, InterfaceManager::AclDirection::INGRESS);
+        auto ingress_acl_name_opt = interface_manager_.get_applied_acl_name(ingress_port_id, netflow::AclDirection::INGRESS);
         if (ingress_acl_name_opt.has_value() && !ingress_acl_name_opt.value().empty()) {
             uint32_t redirect_port_ingress_acl = 0;
             AclActionType ingress_action = acl_manager_.evaluate(ingress_acl_name_opt.value(), pkt, redirect_port_ingress_acl);

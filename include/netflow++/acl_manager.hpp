@@ -5,6 +5,7 @@
 #include <vector>
 #include <optional>   // For std::optional
 #include <algorithm>  // For std::sort, std::remove_if
+#include <map>        // For std::map
 #include "packet.hpp" // For MacAddress, potentially other header structs if needed for matching
 
 #include "netflow++/logger.hpp" // For SwitchLogger

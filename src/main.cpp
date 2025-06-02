@@ -249,6 +249,11 @@ int main(int argc, char* argv[]) {
 
     // --- ACL Example Configuration ---
     std::cout << "\n--- ACL Configuration Example ---" << std::endl;
+    std::string main_acl_name = "DEFAULT_INGRESS_ACL";
+    if (sw.acl_manager_.create_acl(main_acl_name)) {
+        std::cout << "Created ACL: " << main_acl_name << std::endl;
+    }
+
     netflow::AclRule acl_deny_rule;
     acl_deny_rule.rule_id = 1;
     acl_deny_rule.priority = 200; // High priority
@@ -256,8 +261,8 @@ int main(int argc, char* argv[]) {
     acl_deny_rule.src_ip = ntohl(0xC0A80101); // 192.168.1.1
     acl_deny_rule.protocol = 6; // TCP
     acl_deny_rule.action = netflow::AclActionType::DENY;
-    sw.acl_manager_.add_rule(acl_deny_rule);
-    std::cout << "Added ACL DENY rule for TCP from 192.168.1.1 (ID:1, Prio:200)." << std::endl;
+    sw.acl_manager_.add_rule(main_acl_name, acl_deny_rule);
+    std::cout << "Added ACL DENY rule to ACL '" << main_acl_name << "' for TCP from 192.168.1.1 (ID:1, Prio:200)." << std::endl;
 
     netflow::AclRule acl_redirect_rule;
     acl_redirect_rule.rule_id = 2;
@@ -267,8 +272,15 @@ int main(int argc, char* argv[]) {
     acl_redirect_rule.protocol = 17; // UDP
     acl_redirect_rule.action = netflow::AclActionType::REDIRECT;
     acl_redirect_rule.redirect_port_id = 2;
-    sw.acl_manager_.add_rule(acl_redirect_rule);
-    std::cout << "Added ACL REDIRECT rule for UDP from 192.168.1.2 to port 2 (ID:2, Prio:150)." << std::endl;
+    sw.acl_manager_.add_rule(main_acl_name, acl_redirect_rule);
+    std::cout << "Added ACL REDIRECT rule to ACL '" << main_acl_name << "' for UDP from 192.168.1.2 to port 2 (ID:2, Prio:150)." << std::endl;
+
+    sw.acl_manager_.compile_rules(main_acl_name);
+    std::cout << "Compiled ACL: " << main_acl_name << std::endl;
+
+    // To make these ACLs effective, they need to be applied to an interface, e.g.:
+    // sw.interface_manager_.apply_acl_to_interface(0, main_acl_name, netflow::AclDirection::INGRESS);
+    // std::cout << "Applied ACL " << main_acl_name << " to interface 0 ingress." << std::endl;
 
 
     // --- LACP Example Configuration ---

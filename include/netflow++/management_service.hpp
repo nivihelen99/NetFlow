@@ -82,6 +82,8 @@ private:
 
     // ACL CLI Handler (main dispatcher for 'acl' command)
     std::string handle_acl_command(const std::vector<std::string>& args);
+    // Helper for formatting ACL output for 'show acl-rules'
+    std::string format_acl_rules_output(const std::string& acl_name_filter, std::optional<uint32_t> rule_id_filter);
     // Show ACLs is handled within handle_show_command
 };
 

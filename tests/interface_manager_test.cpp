@@ -2,17 +2,31 @@
 #include "netflow++/interface_manager.hpp"
 #include "netflow++/logger.hpp"      // For SwitchLogger
 #include "netflow++/acl_manager.hpp" // For AclManager
+#include "netflow++/packet.hpp"      // For IpAddress, MacAddress if used directly in helpers
 #include <functional>
 #include <vector>
 #include <optional>
-#include <string> // For std::string in ACL tests
+#include <string>
+#include <arpa/inet.h> // For inet_pton
+
+// Helper to convert string IP to network byte order IpAddress (uint32_t)
+// Specific to this test file to avoid name clashes if linked with others that define it differently.
+bool string_to_ip_net_order_if_test(const std::string& ip_str, netflow::IpAddress& out_ip) {
+    struct in_addr addr;
+    if (inet_pton(AF_INET, ip_str.c_str(), &addr) == 1) {
+        out_ip = addr.s_addr; // Already in network byte order
+        return true;
+    }
+    return false;
+}
+
 
 // Test fixture for InterfaceManager tests
 class InterfaceManagerTest : public ::testing::Test {
 protected:
-    netflow::SwitchLogger logger_{netflow::LogLevel::DEBUG}; // Instantiate logger
-    netflow::AclManager acl_manager_{logger_};             // Instantiate AclManager
-    netflow::InterfaceManager ifManager{logger_, acl_manager_}; // Pass dependencies
+    netflow::SwitchLogger logger_{netflow::LogLevel::DEBUG};
+    netflow::AclManager acl_manager_{logger_};
+    netflow::InterfaceManager ifManager{logger_, acl_manager_};
 
     uint32_t test_port_id = 1;
     uint32_t test_port_id_2 = 2;
@@ -20,14 +34,12 @@ protected:
     std::string test_acl_name_2 = "egress_test_acl";
 
     void SetUp() override {
-        // Ensure ports exist for tests that need them
         ifManager.configure_port(test_port_id, {});
         ifManager.configure_port(test_port_id_2, {});
 
-        // Create dummy ACLs in AclManager for apply tests
         ASSERT_TRUE(acl_manager_.create_acl(test_acl_name_1));
         ASSERT_TRUE(acl_manager_.create_acl(test_acl_name_2));
-        acl_manager_.compile_rules(test_acl_name_1); // Not strictly necessary for binding, but good practice
+        acl_manager_.compile_rules(test_acl_name_1);
         acl_manager_.compile_rules(test_acl_name_2);
     }
 };
@@ -38,10 +50,15 @@ TEST_F(InterfaceManagerTest, SetAndGetAdminStatus) {
     config.admin_up = true;
     ifManager.configure_port(test_port_id, config);
     EXPECT_TRUE(ifManager.is_port_admin_up(test_port_id));
-    // ... (rest of test unchanged)
+    ASSERT_TRUE(ifManager.get_port_config(test_port_id).has_value());
+    EXPECT_TRUE(ifManager.get_port_config(test_port_id).value().admin_up);
+
+    config.admin_up = false;
+    ifManager.configure_port(test_port_id, config);
+    EXPECT_FALSE(ifManager.is_port_admin_up(test_port_id));
+    ASSERT_TRUE(ifManager.get_port_config(test_port_id).has_value());
+    EXPECT_FALSE(ifManager.get_port_config(test_port_id).value().admin_up);
 }
-// ... (other existing tests for port config, stats, link state remain largely unchanged,
-//  just ensure they use `ifManager` from the fixture correctly)
 
 TEST_F(InterfaceManagerTest, ConfigureFullPortAndVerify) {
     netflow::InterfaceManager::PortConfig config;
@@ -50,7 +67,6 @@ TEST_F(InterfaceManagerTest, ConfigureFullPortAndVerify) {
     config.full_duplex = true;
     config.auto_negotiation = false;
     config.mtu = 1550;
-    // Initialize ACL names to ensure they are part of the config being set
     config.ingress_acl_name = std::nullopt;
     config.egress_acl_name = std::nullopt;
     ifManager.configure_port(test_port_id, config);
@@ -63,27 +79,24 @@ TEST_F(InterfaceManagerTest, ConfigureFullPortAndVerify) {
     EXPECT_EQ(p_config.full_duplex, true);
     EXPECT_EQ(p_config.auto_negotiation, false);
     EXPECT_EQ(p_config.mtu, 1550);
-    EXPECT_FALSE(p_config.ingress_acl_name.has_value()); // Check default ACL state
+    EXPECT_FALSE(p_config.ingress_acl_name.has_value());
     EXPECT_FALSE(p_config.egress_acl_name.has_value());
 }
 
 // --- New ACL Binding Test Cases ---
 
 TEST_F(InterfaceManagerTest, ApplyAndGetAclName) {
-    // Apply ingress ACL
     ASSERT_TRUE(ifManager.apply_acl_to_interface(test_port_id, test_acl_name_1, netflow::AclDirection::INGRESS));
     std::optional<std::string> applied_ingress = ifManager.get_applied_acl_name(test_port_id, netflow::AclDirection::INGRESS);
     ASSERT_TRUE(applied_ingress.has_value());
     EXPECT_EQ(applied_ingress.value(), test_acl_name_1);
 
-    // Check PortConfig directly
     auto port_config = ifManager.get_port_config(test_port_id);
     ASSERT_TRUE(port_config.has_value());
     ASSERT_TRUE(port_config.value().ingress_acl_name.has_value());
     EXPECT_EQ(port_config.value().ingress_acl_name.value(), test_acl_name_1);
-    EXPECT_FALSE(port_config.value().egress_acl_name.has_value()); // Egress should be unset
+    EXPECT_FALSE(port_config.value().egress_acl_name.has_value());
 
-    // Apply egress ACL to a different port
     ASSERT_TRUE(ifManager.apply_acl_to_interface(test_port_id_2, test_acl_name_2, netflow::AclDirection::EGRESS));
     std::optional<std::string> applied_egress = ifManager.get_applied_acl_name(test_port_id_2, netflow::AclDirection::EGRESS);
     ASSERT_TRUE(applied_egress.has_value());
@@ -95,7 +108,6 @@ TEST_F(InterfaceManagerTest, ApplyAndGetAclName) {
     ASSERT_TRUE(port_config.value().egress_acl_name.has_value());
     EXPECT_EQ(port_config.value().egress_acl_name.value(), test_acl_name_2);
 
-    // Overwrite ingress ACL on test_port_id
     ASSERT_TRUE(ifManager.apply_acl_to_interface(test_port_id, test_acl_name_2, netflow::AclDirection::INGRESS));
     applied_ingress = ifManager.get_applied_acl_name(test_port_id, netflow::AclDirection::INGRESS);
     ASSERT_TRUE(applied_ingress.has_value());
@@ -108,16 +120,14 @@ TEST_F(InterfaceManagerTest, ApplyNonExistentAclName) {
 
     auto port_config = ifManager.get_port_config(test_port_id);
     ASSERT_TRUE(port_config.has_value());
-    EXPECT_FALSE(port_config.value().ingress_acl_name.has_value()); // Should not be set
+    EXPECT_FALSE(port_config.value().ingress_acl_name.has_value());
     EXPECT_FALSE(ifManager.get_applied_acl_name(test_port_id, netflow::AclDirection::INGRESS).has_value());
 }
 
 TEST_F(InterfaceManagerTest, RemoveAcl) {
-    // Apply an ACL first
     ASSERT_TRUE(ifManager.apply_acl_to_interface(test_port_id, test_acl_name_1, netflow::AclDirection::INGRESS));
     ASSERT_TRUE(ifManager.get_applied_acl_name(test_port_id, netflow::AclDirection::INGRESS).has_value());
 
-    // Remove it
     ASSERT_TRUE(ifManager.remove_acl_from_interface(test_port_id, netflow::AclDirection::INGRESS));
     EXPECT_FALSE(ifManager.get_applied_acl_name(test_port_id, netflow::AclDirection::INGRESS).has_value());
 
@@ -125,7 +135,6 @@ TEST_F(InterfaceManagerTest, RemoveAcl) {
     ASSERT_TRUE(port_config.has_value());
     EXPECT_FALSE(port_config.value().ingress_acl_name.has_value());
 
-    // Try removing again (should be idempotent or indicate no ACL was present)
     ASSERT_TRUE(ifManager.remove_acl_from_interface(test_port_id, netflow::AclDirection::INGRESS));
 }
 
@@ -136,11 +145,10 @@ TEST_F(InterfaceManagerTest, ApplyToNonExistentPort) {
     EXPECT_FALSE(ifManager.get_applied_acl_name(non_existent_port_id, netflow::AclDirection::INGRESS).has_value());
 }
 
-// Keep existing tests, ensuring they still pass with the new constructor if they use `ifManager`
 TEST_F(InterfaceManagerTest, GetDefaultPortStats) { /* ... unchanged ... */ }
 TEST_F(InterfaceManagerTest, IncrementAndClearPortStats) { /* ... unchanged ... */ }
 
-struct LinkStateTracker { /* ... unchanged ... */
+struct LinkStateTracker {
     bool up_called = false; bool down_called = false;
     uint32_t up_port_id = 0; uint32_t down_port_id = 0;
     void link_up_handler(uint32_t port_id) { up_called = true; up_port_id = port_id; }
@@ -151,11 +159,11 @@ TEST_F(InterfaceManagerTest, ConfigureNonExistentPort) { /* ... unchanged ... */
 TEST_F(InterfaceManagerTest, GetStatsForNonExistentPort) { /* ... unchanged ... */ }
 TEST_F(InterfaceManagerTest, GetConfigForNonExistentPort) { /* ... unchanged ... */ }
 
-// Tests for IP address management (add, remove, get) can also be kept
 TEST_F(InterfaceManagerTest, AddAndGetIpAddress) {
     netflow::IpAddress ip1, mask1;
-    netflow::string_to_ip("192.168.1.1", ip1); // Assuming string_to_ip exists from packet.hpp or a test util
-    netflow::string_to_ip("255.255.255.0", mask1);
+    // Use the locally defined helper
+    ASSERT_TRUE(string_to_ip_net_order_if_test("192.168.1.1", ip1));
+    ASSERT_TRUE(string_to_ip_net_order_if_test("255.255.255.0", mask1));
 
     ifManager.add_ip_address(test_port_id, ip1, mask1);
     auto ips = ifManager.get_interface_ip_configs(test_port_id);
