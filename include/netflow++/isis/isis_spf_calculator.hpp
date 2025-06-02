@@ -98,11 +98,50 @@ private:
     };
     std::vector<DirectNeighborInfo> get_direct_neighbor_info(const SystemID& neighbor_id) const;
 
+    // Helper to parse multicast specific TLVs from an LSP.
+    void parse_lsp_multicast_info(const LinkStatePdu& lsp,
+                                  bool& out_is_multicast_capable,
+                                  std::vector<MulticastGroupAddressInfo>& out_advertised_groups) const;
+
 
     SystemID local_system_id_;
     IsisLevel level_;
     const IsisLsdb* lsdb_; // Non-owning pointer
+    // Consider adding IsisInterfaceManager* if needed for RPF interface determination for local system
+    // const IsisInterfaceManager* if_mgr_; 
 };
+
+
+// Structure for Multicast Forwarding Entries
+struct MulticastRouteEntry {
+    IpAddress source_address{};       // Source of the multicast stream (0.0.0.0 for shared tree root / any source)
+    IpAddress group_address{};        // Multicast group address
+    uint32_t upstream_interface_id = 0; // Incoming interface (RPF interface towards source)
+                                      // 0 if this router is the source or RPF cannot be determined.
+    std::set<uint32_t> downstream_interface_ids{}; // Outgoing interfaces for this (S,G) or (*,G)
+    IsisLevel level = IsisLevel::NONE; // IS-IS level this route was derived from
+    uint32_t metric_to_source = 0; // Optional: metric to the source S or Root for (*,G)
+
+    bool operator==(const MulticastRouteEntry& other) const {
+        return source_address == other.source_address &&
+               group_address == other.group_address &&
+               upstream_interface_id == other.upstream_interface_id &&
+               downstream_interface_ids == other.downstream_interface_ids &&
+               level == other.level;
+    }
+
+    // Basic less-than for sorting/set storage
+    bool operator<(const MulticastRouteEntry& other) const {
+        if (source_address < other.source_address) return true;
+        if (source_address > other.source_address) return false;
+        if (group_address < other.group_address) return true;
+        if (group_address > other.group_address) return false;
+        if (upstream_interface_id < other.upstream_interface_id) return true;
+        if (upstream_interface_id > other.upstream_interface_id) return false;
+        return downstream_interface_ids < other.downstream_interface_ids;
+    }
+};
+
 
 } // namespace isis
 } // namespace netflow

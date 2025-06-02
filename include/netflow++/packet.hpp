@@ -252,6 +252,10 @@ struct UdpHeader {
 // Define IpAddress as uint32_t for IPv4
 using IpAddress = uint32_t;
 
+// Helper function to convert an IpAddress subnet mask to its prefix length (e.g., 255.255.255.0 -> 24)
+uint8_t ip_mask_to_prefix_length(IpAddress subnet_mask);
+
+
 // ARP Header Structure
 // Ensure ArpHeader is packed.
 #if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)

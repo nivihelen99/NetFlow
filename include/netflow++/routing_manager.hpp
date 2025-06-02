@@ -1,7 +1,10 @@
 #ifndef NETFLOW_ROUTING_MANAGER_HPP
 #define NETFLOW_ROUTING_MANAGER_HPP
 
-#include "netflow++/packet.hpp" // For IpAddress
+#ifndef NETFLOW_ROUTING_MANAGER_HPP
+#define NETFLOW_ROUTING_MANAGER_HPP
+
+#include "netflow++/packet.hpp" // For IpAddress AND ip_mask_to_prefix_length
 #include <vector>
 #include <optional>
 #include <mutex>
@@ -39,11 +42,12 @@ struct RouteEntry {
 
     // For sorting, primarily by prefix length (descending), then AD, then metric
     bool operator<(const RouteEntry& other) const {
-        uint32_t this_prefix_len = subnet_mask.to_prefix_length(); // Assuming IpAddress has this
-        uint32_t other_prefix_len = other.subnet_mask.to_prefix_length();
+        // Longest prefix match (higher prefix length is better)
+        uint8_t this_prefix_len = ip_mask_to_prefix_length(this->subnet_mask); 
+        uint8_t other_prefix_len = ip_mask_to_prefix_length(other.subnet_mask);
 
         if (this_prefix_len != other_prefix_len) {
-            return this_prefix_len > other_prefix_len; // Longer prefix is better (comes first in sort if using std::sort)
+            return this_prefix_len > other_prefix_len; // Higher prefix length means more specific, so "less" for sorting to best
         }
         if (administrative_distance != other.administrative_distance) {
             return administrative_distance < other.administrative_distance;

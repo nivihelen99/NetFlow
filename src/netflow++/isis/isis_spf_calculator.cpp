@@ -289,6 +289,112 @@ std::vector<SpfRouteEntry> IsisSpfCalculator::calculate_spf() const {
 }
 
 
+// --- Multicast SPF related implementations ---
+
+void IsisSpfCalculator::parse_lsp_multicast_info(const LinkStatePdu& lsp,
+                                               bool& out_is_multicast_capable,
+                                               std::vector<MulticastGroupAddressInfo>& out_advertised_groups) const {
+    out_is_multicast_capable = false;
+    out_advertised_groups.clear();
+
+    for (const auto& tlv : lsp.tlvs) {
+        if (tlv.type == MULTICAST_CAPABILITY_TLV_TYPE) { // Constant from isis_common.hpp
+            out_is_multicast_capable = true;
+            // Assuming MulticastCapabilityTlvValue is empty and parse function handles 0-length value
+            MulticastCapabilityTlvValue cap_val; 
+            parse_multicast_capability_tlv_value(tlv.value, cap_val); // from isis_pdu.cpp
+        } else if (tlv.type == MULTICAST_GROUP_MEMBERSHIP_TLV_TYPE) { // Constant from isis_common.hpp
+            MulticastGroupMembershipTlvValue group_val;
+            // Assuming parse_multicast_group_membership_tlv_value exists in isis_pdu.cpp
+            if (parse_multicast_group_membership_tlv_value(tlv.value, group_val)) { 
+                out_advertised_groups.insert(out_advertised_groups.end(), group_val.groups.begin(), group_val.groups.end());
+            }
+        }
+    }
+}
+
+std::vector<MulticastRouteEntry> IsisSpfCalculator::calculate_multicast_spf(
+    const std::map<SystemID, SpfNodePathInfo>& unicast_spf_results) const {
+    
+    std::vector<MulticastRouteEntry> multicast_routes;
+    if (!lsdb_) return multicast_routes;
+
+    // Step 1: Gather Multicast Information from all LSPs
+    std::map<SystemID, std::pair<bool, std::vector<MulticastGroupAddressInfo>>> all_nodes_multicast_info;
+    auto all_lsdb_entries = lsdb_->get_all_lsdb_entries(); // Assumes this method exists in IsisLsdb
+
+    for (const auto& lsdb_entry : all_lsdb_entries) {
+        if (ntohs(lsdb_entry.lsp.remainingLifetime) == 0) continue; // Skip purged LSPs
+
+        bool is_capable = false;
+        std::vector<MulticastGroupAddressInfo> groups_advertised;
+        parse_lsp_multicast_info(lsdb_entry.lsp, is_capable, groups_advertised);
+        all_nodes_multicast_info[lsdb_entry.lsp.lspId.system_id] = {is_capable, groups_advertised};
+    }
+
+    // Step 2: Simplified Source Tree Construction
+    // For each router (advertiser_id) that advertised group membership(s):
+    // If advertiser_id is the local_system_id_, then we are the source (or DR for the group).
+    // We then create MulticastRouteEntry for groups we source.
+    // Downstream interfaces are all other IS-IS enabled interfaces (highly simplified).
+
+    if (all_nodes_multicast_info.count(local_system_id_)) {
+        const auto& local_mcast_info = all_nodes_multicast_info.at(local_system_id_);
+        bool local_is_mcast_capable = local_mcast_info.first;
+        const std::vector<MulticastGroupAddressInfo>& local_advertised_groups = local_mcast_info.second;
+
+        if (local_is_mcast_capable) {
+            for (const auto& group_info : local_advertised_groups) {
+                MulticastRouteEntry m_entry;
+                
+                // If group_info.source_address is 0.0.0.0, it means local_system_id_ is the source for (*,G).
+                // We need a representative IP of local_system_id_ for the source_address field.
+                // This is complex; for now, if (*,G) is advertised by us, we set S to a placeholder or a known local IP.
+                // If (S,G) is advertised, group_info.source_address is S.
+                if (group_info.source_address == IpAddress(0) ) { // (*,G) originated by us
+                    // Try to find a suitable IP for local_system_id_ from its own unicast SPF info (e.g. a loopback if advertised)
+                    // This is a simplification. A dedicated "router ID" IP would be better.
+                    // For now, using 0.0.0.0 to signify "local source for this group".
+                    m_entry.source_address = IpAddress(0); 
+                } else { // (S,G) originated by us
+                    m_entry.source_address = group_info.source_address;
+                }
+                
+                m_entry.group_address = group_info.group_address;
+                m_entry.upstream_interface_id = 0; // Local source, no upstream IS-IS interface
+                m_entry.level = this->level_;
+                m_entry.metric_to_source = 0;
+
+                // Downstream interfaces: Placeholder - this requires IsisInterfaceManager access
+                // For this subtask, as per simplifications, we'll leave this empty.
+                // A comment will indicate where this logic would go.
+                // Example:
+                // if (isis_interface_manager_) { 
+                //     auto local_isis_interfaces = isis_interface_manager_->get_active_interface_ids_for_level(this->level_);
+                //     for(uint32_t if_id : local_isis_interfaces) {
+                //         m_entry.downstream_interface_ids.insert(if_id);
+                //     }
+                // }
+                // std::cout << "Debug: Creating mcast route for S:" << m_entry.source_address << " G:" << m_entry.group_address << std::endl;
+                multicast_routes.push_back(m_entry);
+            }
+        }
+    }
+    
+    // Note: True multicast SPF for transit routers is significantly more complex.
+    // It would involve:
+    // 1. Iterating all (S,G) or (*,G_root) pairs from `all_nodes_multicast_info`.
+    // 2. For each pair, determining the RPF interface towards S (or G_root) using `unicast_spf_results`.
+    // 3. Building a tree from S (or G_root) towards all members/receivers.
+    //    - Downstream interfaces are interfaces on this SPT towards members, excluding the RPF interface.
+    // This typically requires processing explicit join information (e.g., from PIM or IGMP via MS-ISIS extensions)
+    // rather than just capability and direct membership advertisements.
+    // The current implementation only sets up forwarding if *this* router is the source/advertiser.
+
+    return multicast_routes;
+}
+
+
 } // namespace isis
 } // namespace netflow
 
@@ -308,9 +414,12 @@ std::vector<SpfRouteEntry> IsisSpfCalculator::calculate_spf() const {
 #ifndef IP_INTERFACE_ADDRESS_TLV_TYPE
 #define IP_INTERFACE_ADDRESS_TLV_TYPE 132
 #endif
+// MULTICAST_CAPABILITY_TLV_TYPE and MULTICAST_GROUP_MEMBERSHIP_TLV_TYPE are in isis_common.hpp
 
 // Assumed parsing functions (from isis_pdu.cpp or similar)
 // parse_extended_ip_reachability_tlv_value(tlv.value, val_struct)
+// parse_multicast_capability_tlv_value(tlv.value, cap_val)
+// parse_multicast_group_membership_tlv_value(tlv.value, group_val)
 // parse_u8, parse_system_id, parse_bytes from isis_pdu.cpp's BufferReader context.
 // These might need to be exposed or reimplemented if isis_pdu.cpp's BufferReader is not accessible/suitable.
 // For this file, they are used conceptually.
