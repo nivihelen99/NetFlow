@@ -8,26 +8,36 @@
 #include <optional>   // For std::optional
 #include <sstream>    // For std::istringstream
 #include <utility>    // For std::move
-#include <cstddef>    // For std::size_t
+
+// It's good practice to forward declare if full definitions aren't needed by this header.
+// However, for handler signatures, full types might be needed.
+// For now, assume types like Packet, MacAddress etc. are not directly part of these basic structs.
+// If they were (e.g. a handler takes a Packet), then "packet.hpp" would be needed.
 
 namespace netflow {
 
 enum class HttpMethod {
-    GET, POST, PUT, DELETE, PATCH
+    GET,
+    POST,
+    PUT,
+    DELETE,
+    PATCH,
+    // OPTIONS, HEAD, etc. could be added
 };
 
 struct HttpRequest {
     std::string path;
     HttpMethod method = HttpMethod::GET;
     std::map<std::string, std::string> headers;
-    std::string body;
+    std::string body; // Could be std::vector<char> or a variant for different content types
 };
 
 struct HttpResponse {
-    int status_code = 200;
+    int status_code = 200; // Default to OK
     std::map<std::string, std::string> headers;
     std::string body;
 
+    // Convenience constructor
     HttpResponse(int code = 200,
                  std::map<std::string, std::string> hdrs = {},
                  std::string bdy = "")
@@ -38,40 +48,45 @@ class ManagementInterface {
 public:
     ManagementInterface() = default;
 
-    using OidGetter = std::function<std::string()>;
-    using OidSetter = std::function<bool(const std::string&)>;
+    // --- SNMP-like OID Handling ---
+    using OidGetter = std::function<std::string()>; // Getter returns string representation of value
+    using OidSetter = std::function<bool(const std::string&)>; // Setter takes string representation, returns success
 
     struct OidHandler {
         OidGetter getter;
-        std::optional<OidSetter> setter;
+        std::optional<OidSetter> setter; // Setter is optional (read-only OIDs)
     };
 
     void register_oid_handler(const std::string& oid, OidGetter getter, std::optional<OidSetter> setter = std::nullopt) {
         oid_handlers_[oid] = {std::move(getter), std::move(setter)};
     }
 
+    // Placeholder for actually handling an OID GET request.
     std::optional<std::string> handle_oid_get(const std::string& oid) const {
         auto it = oid_handlers_.find(oid);
         if (it != oid_handlers_.end() && it->second.getter) {
             return it->second.getter();
         }
-        return std::nullopt;
+        return std::nullopt; // OID not found or no getter
     }
 
+    // Placeholder for actually handling an OID SET request.
     bool handle_oid_set(const std::string& oid, const std::string& value) const {
         auto it = oid_handlers_.find(oid);
         if (it != oid_handlers_.end() && it->second.setter.has_value()) {
-            return it->second.setter.value()(value);
+            return it->second.setter.value()(value); // Call the setter
         }
-        return false;
+        return false; // OID not found, not settable, or setter failed
     }
 
+    // --- REST API Endpoint Handling ---
     using RestHandler = std::function<HttpResponse(const HttpRequest&)>;
 
     struct RestEndpointKey {
         std::string path;
         HttpMethod method;
 
+        // operator< for std::map key comparison
         bool operator<(const RestEndpointKey& other) const {
             if (path != other.path) {
                 return path < other.path;
@@ -84,71 +99,58 @@ public:
         rest_endpoints_[{path, method}] = std::move(handler);
     }
 
+    // Placeholder for dispatching an incoming REST request to a registered handler.
     HttpResponse handle_rest_request(const HttpRequest& request) const {
         auto it = rest_endpoints_.find({request.path, request.method});
         if (it != rest_endpoints_.end()) {
-            return it->second(request);
+            return it->second(request); // Call the registered handler
         }
+        // Default response for unhandled paths/methods
         return {404, {{"Content-Type", "text/plain"}}, "Error 404: Not Found"};
     }
 
-    using CliHandler = std::function<std::string(const std::vector<std::string>& args)>;
+    // --- CLI Command Handling ---
+    using CliHandler = std::function<std::string(const std::vector<std::string>& args)>; // Handler returns string response
 
-    void register_command(const std::vector<std::string>& command_parts, CliHandler handler) {
-        if (command_parts.empty()) return;
-        cli_commands_[command_parts] = std::move(handler);
+    void register_command(const std::string& command_name, CliHandler handler) {
+        cli_commands_[command_name] = std::move(handler);
     }
 
+    // Placeholder for parsing and dispatching a CLI command line.
     std::string handle_cli_command(const std::string& command_line) const {
         if (command_line.empty()) {
             return "Error: Empty command.";
         }
 
-        std::vector<std::string> input_parts;
+        std::vector<std::string> parts;
         std::string current_part;
         std::istringstream iss(command_line);
 
+        // Simple space-based tokenization. Doesn't handle quotes or complex arguments.
         while(iss >> current_part) {
-            input_parts.push_back(current_part);
+            parts.push_back(current_part);
         }
 
-        if (input_parts.empty()) {
-            return "Error: Empty command after parsing.";
+        if (parts.empty()) {
+            return "Error: Empty command after parsing."; // Should not happen if command_line wasn't empty
         }
 
-        std::vector<std::string> best_match_command_key;
-        const CliHandler* best_handler = nullptr;
-
-        for (auto const& [registered_command_key, handler_func] : cli_commands_) {
-            if (input_parts.size() >= registered_command_key.size()) {
-                bool prefix_match = true;
-                for (std::size_t i = 0; i < registered_command_key.size(); ++i) { // Used std::size_t
-                    if (input_parts[i] != registered_command_key[i]) {
-                        prefix_match = false;
-                        break;
-                    }
-                }
-                if (prefix_match) {
-                    if (best_handler == nullptr || registered_command_key.size() > best_match_command_key.size()) {
-                        best_match_command_key = registered_command_key;
-                        best_handler = &handler_func;
-                    }
-                }
+        const std::string& command_name = parts[0];
+        auto it = cli_commands_.find(command_name);
+        if (it != cli_commands_.end()) {
+            std::vector<std::string> args;
+            if (parts.size() > 1) {
+                args.assign(parts.begin() + 1, parts.end());
             }
+            return it->second(args); // Call the handler with arguments
         }
-
-        if (best_handler) {
-            std::vector<std::string> args(input_parts.begin() + best_match_command_key.size(), input_parts.end());
-            return (*best_handler)(args);
-        }
-        
-        return "Error: Unknown command or prefix: " + command_line + ". Type 'help' for available commands.";
+        return "Error: Unknown command '" + command_name + "'. Type 'help' for available commands.";
     }
 
 private:
     std::map<std::string, OidHandler> oid_handlers_;
     std::map<RestEndpointKey, RestHandler> rest_endpoints_;
-    std::map<std::vector<std::string>, CliHandler> cli_commands_;
+    std::map<std::string, CliHandler> cli_commands_;
 };
 
 } // namespace netflow

@@ -4,17 +4,19 @@
 #include "netflow++/packet.hpp" // For IpAddress and MacAddress
 #include "netflow++/logger.hpp" // For SwitchLogger
 #include "netflow++/acl_manager.hpp"  // For AclManager
-
-#include <cstdint>    // For uint32_t, uint64_t
-#include <vector>     // For std::vector
-#include <map>        // For std::map
-#include <functional> // For std::function
-#include <string>     // For std::string
-#include <algorithm>  // For potential use in .cpp (e.g. std::find_if)
-#include <optional>   // For std::optional
-#include <mutex>      // For std::mutex
+#include <cstdint>
+#include <vector>
+#include <map>
+#include <functional>
+#include <string>
+#include <algorithm>
+#include <optional>
+#include <mutex>
 
 namespace netflow {
+
+// Forward declaration for Switch, if needed by InterfaceManager for callbacks or other complex interactions
+// class Switch;
 
 struct InterfaceIpConfig {
     IpAddress address;
@@ -46,14 +48,15 @@ public:
         bool full_duplex = true;
         bool auto_negotiation = true;
         uint32_t mtu = 1500;
-        MacAddress mac_address; // Default constructor of MacAddress will zero-initialize
+        MacAddress mac_address;
         std::vector<InterfaceIpConfig> ip_configurations;
-        std::optional<std::string> ingress_acl_name;
-        std::optional<std::string> egress_acl_name;
-        PortConfig() = default; // Explicitly default PortConfig constructor
+        std::optional<std::string> ingress_acl_name; // ACL applied to ingress traffic
+        std::optional<std::string> egress_acl_name;  // ACL applied to egress traffic
+        PortConfig() : mac_address() {}
     };
 
-    InterfaceManager(SwitchLogger& logger, AclManager& acl_mgr);
+    // Constructor updated to accept Logger and AclManager
+    InterfaceManager(SwitchLogger& logger, AclManager& acl_mgr /*, Switch* sw_ptr = nullptr */);
 
     void add_ip_address(uint32_t interface_id, const IpAddress& address, const IpAddress& subnet_mask);
     void remove_ip_address(uint32_t interface_id, const IpAddress& address, const IpAddress& subnet_mask);
@@ -63,7 +66,7 @@ public:
     std::optional<MacAddress> get_mac_for_ip(const IpAddress& ip) const;
     bool is_ip_local_to_interface(uint32_t interface_id, const IpAddress& ip) const;
     std::optional<MacAddress> get_interface_mac(uint32_t interface_id) const;
-    std::optional<IpAddress> get_interface_ip(uint32_t interface_id) const;
+    std::optional<IpAddress> get_interface_ip(uint32_t interface_id) const; // Gets primary IP if multiple
 
     void configure_port(uint32_t port_id, const PortConfig& config);
     std::optional<PortConfig> get_port_config(uint32_t port_id) const;
@@ -82,23 +85,25 @@ public:
     std::vector<uint32_t> get_all_l3_interface_ids() const;
     std::map<uint32_t, PortConfig> get_all_port_configs() const;
 
+    // ACL binding methods
     bool apply_acl_to_interface(uint32_t port_id, const std::string& acl_name, AclDirection direction);
     bool remove_acl_from_interface(uint32_t port_id, AclDirection direction);
     std::optional<std::string> get_applied_acl_name(uint32_t port_id, AclDirection direction) const;
 
-public: 
+public: // Internal methods for stats, keep public if other components update them directly
     void _increment_rx_stats(uint32_t port_id, uint64_t bytes, bool is_error = false, bool is_drop = false);
     void _increment_tx_stats(uint32_t port_id, uint64_t bytes, bool is_error = false, bool is_drop = false);
 
 private:
     SwitchLogger& logger_;
     AclManager& acl_manager_;
+    // Switch* switch_ptr_; // If direct calls to Switch methods are needed from InterfaceManager
 
     std::map<uint32_t, PortConfig> port_configs_;
     std::map<uint32_t, PortStats> port_stats_;
     mutable std::mutex port_data_mutex_;
 
-    std::map<uint32_t, bool> simulated_link_state_; // Key: port_id, Value: true if link up
+    std::map<uint32_t, bool> simulated_link_state_;
     std::vector<std::function<void(uint32_t port_id)>> link_up_callbacks_;
     std::vector<std::function<void(uint32_t port_id)>> link_down_callbacks_;
 };

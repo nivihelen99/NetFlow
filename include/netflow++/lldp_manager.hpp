@@ -1,5 +1,4 @@
-#ifndef NETFLOW_LLDP_MANAGER_HPP
-#define NETFLOW_LLDP_MANAGER_HPP
+#pragma once
 
 #include "netflow++/lldp_defs.hpp" // Defines LldpNeighborInfo, constants, etc.
 #include <vector>
@@ -8,21 +7,14 @@
 #include <chrono>
 #include <mutex>
 #include <optional> // For potentially optional return types or parameters if needed later
-#include <cstdint>  // For uint8_t, uint32_t
-#include <cstddef>  // For std::size_t
 
-#include "netflow++/packet.hpp"
-#include "netflow++/interface_manager.hpp"
-#include "netflow++/switch.hpp"
-// #include "netflow++/config_manager.hpp" // If ConfigManager is used
-
-// Forward declarations are no longer needed for Packet, InterfaceManager, Switch
-// namespace netflow {
-// class Packet; 
-// class InterfaceManager; 
-// class Switch; 
-// // class ConfigManager; 
-// }
+// Forward declarations
+namespace netflow {
+class Packet; // Assuming Packet class is defined elsewhere
+class InterfaceManager; // Assuming InterfaceManager class is defined elsewhere
+class Switch; // Forward declaration for Switch
+// class ConfigManager; // Forward declare if used for system name/description
+}
 
 namespace netflow {
 
@@ -82,7 +74,7 @@ private:
 
     // Parses a received LLDPDU.
     // Extracts TLVs and updates neighbor information.
-    void parse_lldpdu(const uint8_t* data, std::size_t len, uint32_t ingress_port); // Used std::size_t
+    void parse_lldpdu(const uint8_t* data, size_t len, uint32_t ingress_port);
 
     // Retrieves the system name (e.g., hostname).
     // Placeholder: Implementation might get this from a ConfigManager or OS API.
@@ -97,5 +89,3 @@ private:
 };
 
 } // namespace netflow
-
-#endif // NETFLOW_LLDP_MANAGER_HPP
