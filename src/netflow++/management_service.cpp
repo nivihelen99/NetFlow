@@ -139,7 +139,7 @@ void ManagementService::register_cli_commands() {
     management_interface_.register_command(
         "show",
         [this, format_full_interface_details, format_interface_stats_only](const std::vector<std::string>& args) -> std::string {
-            if (args.empty()) return "Error: Missing arguments for 'show' command.";
+            if (args.empty()) return std::string("Error: Missing arguments for 'show' command.");
             std::string type = args[0];
             std::vector<std::string> sub_args(args.begin() + 1, args.end());
             std::ostringstream oss;
@@ -147,7 +147,7 @@ void ManagementService::register_cli_commands() {
             if (type == "interface") {
                 if (sub_args.empty()) { // show interface
                     auto all_configs = interface_manager_.get_all_port_configs();
-                    if (all_configs.empty()) return "No interfaces configured.";
+                    if (all_configs.empty()) return std::string("No interfaces configured.");
                     for (const auto& pair : all_configs) {
                         format_full_interface_details(oss, pair.first, pair.second);
                         oss << "\n";
@@ -155,7 +155,7 @@ void ManagementService::register_cli_commands() {
                 } else { // show interface <id> [stats]
                     uint32_t port_id;
                     try { port_id = std::stoul(sub_args[0]); }
-                    catch (const std::exception& e) { return "Error: Invalid interface ID."; }
+                    catch (const std::exception& e) { return std::string("Error: Invalid interface ID."); }
 
                     if (!interface_manager_.is_port_valid(port_id)) return "Error: Interface ID " + sub_args[0] + " is not valid.";
                     auto p_config_opt = interface_manager_.get_port_config(port_id);
@@ -178,32 +178,32 @@ void ManagementService::register_cli_commands() {
                     if (sub_args.size() > 2 && sub_args[1] == "id") { // <name> id <rule_id>
                         try { rule_id_filter = std::stoul(sub_args[2]); } catch(...) { /* ignore */ }
                     } else if (sub_args.size() > 1 && sub_args[1] != "id") { // <name> <something_else>
-                         return "Error: Usage: show acl-rules [<acl_name>] [id <RULE_ID>]";
+                         return std::string("Error: Usage: show acl-rules [<acl_name>] [id <RULE_ID>]");
                     }
                 } else if (!sub_args.empty() && sub_args[0] == "id") { // "id" without <acl_name>
                     if (sub_args.size() > 1) { // id <rule_id>
                          // This case is ambiguous: "show acl-rules id X" - which ACL?
                          // Current format_acl_rules_output handles empty acl_name_filter by listing names.
                          // To show specific rule ID without ACL name is not supported by current AclManager::get_rule
-                         return "Error: Must specify ACL name when filtering by rule ID. Usage: show acl-rules <acl_name> id <RULE_ID>";
+                         return std::string("Error: Must specify ACL name when filtering by rule ID. Usage: show acl-rules <acl_name> id <RULE_ID>");
                     } else { // "show acl-rules id" - missing id
-                         return "Error: Missing rule ID for 'show acl-rules id'.";
+                         return std::string("Error: Missing rule ID for 'show acl-rules id'.");
                     }
                 }
                  return format_acl_rules_output(acl_name_filter, rule_id_filter);
             }
             // ... (rest of existing show command handling) ...
-            else { return "Error: Unsupported 'show' command."; }
-            return oss.str().empty() ? "No information to display." : oss.str();
+            else { return std::string("Error: Unsupported 'show' command."); }
+            return oss.str().empty() ? std::string("No information to display.") : oss.str();
         });
 
     management_interface_.register_command("interface",
         [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return "Error: Missing interface ID or subcommand.";
+            if (args.size() < 2) return std::string("Error: Missing interface ID or subcommand.");
 
             uint32_t port_id;
             try { port_id = std::stoul(args[0]); }
-            catch (const std::exception& e) { return "Error: Invalid interface ID format."; }
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID format."); }
 
             if (!interface_manager_.is_port_valid(port_id) && args[1] != "port-channel") { // Allow creating port-channel if it doesn't exist
                  // For physical ports, they are implicitly created up to num_ports by Switch.
@@ -218,13 +218,13 @@ void ManagementService::register_cli_commands() {
                 if (sub_args.empty()) return "Error: Missing QoS configuration details for interface " + args[0];
                 return handle_interface_qos_command(port_id, sub_args);
             } else if (primary_subcommand == "ip" && sub_args.size() > 0 && sub_args[0] == "access-group") {
-                if (sub_args.size() < 3) return "Error: Usage: interface <id> ip access-group <acl_name> <in|out>";
+                if (sub_args.size() < 3) return std::string("Error: Usage: interface <id> ip access-group <acl_name> <in|out>");
                 std::string acl_name = sub_args[1];
                 std::string direction_str = sub_args[2];
                 AclDirection direction;
                 if (direction_str == "in") direction = AclDirection::INGRESS;
                 else if (direction_str == "out") direction = AclDirection::EGRESS;
-                else return "Error: Invalid direction. Must be 'in' or 'out'.";
+                else return std::string("Error: Invalid direction. Must be 'in' or 'out'.");
 
                 if (interface_manager_.apply_acl_to_interface(port_id, acl_name, direction)) {
                     return "ACL '" + acl_name + "' applied to interface " + std::to_string(port_id) + " " + direction_str + ".";
@@ -238,22 +238,22 @@ void ManagementService::register_cli_commands() {
 
     management_interface_.register_command("no",
         [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 3) return "Error: Incomplete 'no' command."; // e.g. no interface <id> ...
+            if (args.size() < 3) return std::string("Error: Incomplete 'no' command."); // e.g. no interface <id> ...
             std::string target_cmd = args[0]; // "interface"
             if (target_cmd == "interface") {
                 uint32_t port_id;
                 try { port_id = std::stoul(args[1]); }
-                catch(const std::exception& e) { return "Error: Invalid interface ID for 'no interface'."; }
+                catch(const std::exception& e) { return std::string("Error: Invalid interface ID for 'no interface'."); }
 
                 if (!interface_manager_.is_port_valid(port_id)) return "Error: Interface ID " + args[1] + " does not exist.";
 
                 if (args.size() > 3 && args[2] == "ip" && args[3] == "access-group") {
-                    if (args.size() < 5) return "Error: Usage: no interface <id> ip access-group <in|out>";
+                    if (args.size() < 5) return std::string("Error: Usage: no interface <id> ip access-group <in|out>");
                     std::string direction_str = args[4];
                     AclDirection direction;
                     if (direction_str == "in") direction = AclDirection::INGRESS;
                     else if (direction_str == "out") direction = AclDirection::EGRESS;
-                    else return "Error: Invalid direction for 'no ip access-group'. Must be 'in' or 'out'.";
+                    else return std::string("Error: Invalid direction for 'no ip access-group'. Must be 'in' or 'out'.");
 
                     if (interface_manager_.remove_acl_from_interface(port_id, direction)) {
                         return "ACL removed from interface " + std::to_string(port_id) + " " + direction_str + ".";
@@ -273,12 +273,12 @@ void ManagementService::register_cli_commands() {
     });
 
     // ... (other registrations: mac, spanning-tree, lacp, lldp global, help, clear) ...
-    management_interface_.register_command( "clear",  [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "";});
-    management_interface_.register_command("mac", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "mac placeholder"; });
-    management_interface_.register_command("spanning-tree", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "stp placeholder"; });
-    management_interface_.register_command("lacp", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "lacp placeholder"; });
-    management_interface_.register_command("lldp", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "lldp placeholder"; });
-    management_interface_.register_command("help", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "help placeholder"; });
+    management_interface_.register_command( "clear",  [this](const std::vector<std::string>& args) -> std::string { /* ... */ return std::string("");});
+    management_interface_.register_command("mac", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return std::string("mac placeholder"); });
+    management_interface_.register_command("spanning-tree", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return std::string("stp placeholder"); });
+    management_interface_.register_command("lacp", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return std::string("lacp placeholder"); });
+    management_interface_.register_command("lldp", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return std::string("lldp placeholder"); });
+    management_interface_.register_command("help", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return std::string("help placeholder"); });
 }
 
 // ... (rest of file as before) ...
