@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+namespace netflow {
 namespace isis {
 
 // ISIS Protocol Discriminator
@@ -149,5 +150,6 @@ constexpr int ISIS_ERROR_CHECKSUM_FAILED = -5;
 constexpr int ISIS_ERROR_AUTH_FAILED = -6;
 
 } // namespace isis
+} // namespace netflow
 
 #endif // ISIS_PDU_CONSTANTS_HPP
