@@ -3,6 +3,8 @@
 
 #include <cstdint>
 
+
+
 // Platform detection
 #ifdef _WIN32
     #include <winsock2.h>
@@ -34,7 +36,7 @@
     #define IS_BIG_ENDIAN (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
 #endif
 
-namespace isis {
+namespace netflow {
 namespace byte_swap {
 
 // Compiler-specific byte swap intrinsics
@@ -212,7 +214,7 @@ inline void write_le32(uint8_t* buffer, uint32_t value) noexcept {
 }
 
 } // namespace byte_swap
-} // namespace isis
+} // namespace netflow
 
 // Convenience macros for common operations
 #define ISIS_NTOHS(x) isis::byte_swap::ntohs(x)
@@ -221,5 +223,6 @@ inline void write_le32(uint8_t* buffer, uint32_t value) noexcept {
 #define ISIS_HTONL(x) isis::byte_swap::htonl(x)
 #define ISIS_NTOHLL(x) isis::byte_swap::ntohll(x)
 #define ISIS_HTONLL(x) isis::byte_swap::htonll(x)
+
 
 #endif // BYTE_SWAP_HPP
