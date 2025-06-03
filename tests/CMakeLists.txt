@@ -195,3 +195,21 @@ add_executable(icmp_processor_test icmp_processor_test.cpp)
 target_link_libraries(icmp_processor_test PRIVATE netflow_switching_lib GTest::gtest_main)
 gtest_discover_tests(icmp_processor_test)
 target_include_directories(icmp_processor_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for IsisManager tests
+add_executable(isis_manager_test isis_manager_test.cpp)
+target_link_libraries(isis_manager_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(isis_manager_test)
+target_include_directories(isis_manager_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for IsisLsdb tests
+add_executable(isis_lsdb_test isis_lsdb_test.cpp)
+target_link_libraries(isis_lsdb_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(isis_lsdb_test)
+target_include_directories(isis_lsdb_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# Add executable for IsisPdu tests
+add_executable(isis_pdu_test isis_pdu_test.cpp)
+target_link_libraries(isis_pdu_test PRIVATE netflow_switching_lib GTest::gtest_main)
+gtest_discover_tests(isis_pdu_test)
+target_include_directories(isis_pdu_test PRIVATE ${CMAKE_SOURCE_DIR}/include)
