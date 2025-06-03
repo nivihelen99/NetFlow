@@ -106,6 +106,7 @@ private:
     const MacAddress ALL_IS_ISS_MAC = MacAddress("09:00:2B:00:00:05"); // IS announcement (deprecated by IEEE)
 
     // Private helper methods
+    void internal_set_overload_bit(bool overload_status); // Declaration added
     void trigger_spf_calculation(IsisLevel level);
 
 };

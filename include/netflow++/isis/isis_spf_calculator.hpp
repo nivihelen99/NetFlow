@@ -20,6 +20,37 @@
 namespace netflow {
 namespace isis {
 
+// Structure for Multicast Forwarding Entries
+// Moved before IsisSpfCalculator to resolve declaration order issues
+struct MulticastRouteEntry {
+    IpAddress source_address{};       // Source of the multicast stream (0.0.0.0 for shared tree root / any source)
+    IpAddress group_address{};        // Multicast group address
+    uint32_t upstream_interface_id = 0; // Incoming interface (RPF interface towards source)
+                                      // 0 if this router is the source or RPF cannot be determined.
+    std::set<uint32_t> downstream_interface_ids{}; // Outgoing interfaces for this (S,G) or (*,G)
+    IsisLevel level = IsisLevel::NONE; // IS-IS level this route was derived from
+    uint32_t metric_to_source = 0; // Optional: metric to the source S or Root for (*,G)
+
+    bool operator==(const MulticastRouteEntry& other) const {
+        return source_address == other.source_address &&
+               group_address == other.group_address &&
+               upstream_interface_id == other.upstream_interface_id &&
+               downstream_interface_ids == other.downstream_interface_ids &&
+               level == other.level;
+    }
+
+    // Basic less-than for sorting/set storage
+    bool operator<(const MulticastRouteEntry& other) const {
+        if (source_address < other.source_address) return true;
+        if (source_address > other.source_address) return false;
+        if (group_address < other.group_address) return true;
+        if (group_address > other.group_address) return false;
+        if (upstream_interface_id < other.upstream_interface_id) return true;
+        if (upstream_interface_id > other.upstream_interface_id) return false;
+        return downstream_interface_ids < other.downstream_interface_ids;
+    }
+};
+
 // Structure to hold SPF calculation results for each reachable IP prefix.
 // This can be adapted to/from a common RouteEntry structure later.
 struct SpfRouteEntry {
@@ -80,6 +111,10 @@ public:
     // Calculates SPF and returns a list of routes.
     std::vector<SpfRouteEntry> calculate_spf() const;
 
+    // Calculates Multicast SPF and returns a list of multicast routes.
+    std::vector<MulticastRouteEntry> calculate_multicast_spf(
+        const std::map<SystemID, SpfNodePathInfo>& unicast_spf_results) const;
+
 private:
     // Helper to parse relevant TLVs from an LSP.
     void parse_lsp_links(const LinkStatePdu& lsp, 
@@ -112,36 +147,7 @@ private:
 };
 
 
-// Structure for Multicast Forwarding Entries
-struct MulticastRouteEntry {
-    IpAddress source_address{};       // Source of the multicast stream (0.0.0.0 for shared tree root / any source)
-    IpAddress group_address{};        // Multicast group address
-    uint32_t upstream_interface_id = 0; // Incoming interface (RPF interface towards source)
-                                      // 0 if this router is the source or RPF cannot be determined.
-    std::set<uint32_t> downstream_interface_ids{}; // Outgoing interfaces for this (S,G) or (*,G)
-    IsisLevel level = IsisLevel::NONE; // IS-IS level this route was derived from
-    uint32_t metric_to_source = 0; // Optional: metric to the source S or Root for (*,G)
-
-    bool operator==(const MulticastRouteEntry& other) const {
-        return source_address == other.source_address &&
-               group_address == other.group_address &&
-               upstream_interface_id == other.upstream_interface_id &&
-               downstream_interface_ids == other.downstream_interface_ids &&
-               level == other.level;
-    }
-
-    // Basic less-than for sorting/set storage
-    bool operator<(const MulticastRouteEntry& other) const {
-        if (source_address < other.source_address) return true;
-        if (source_address > other.source_address) return false;
-        if (group_address < other.group_address) return true;
-        if (group_address > other.group_address) return false;
-        if (upstream_interface_id < other.upstream_interface_id) return true;
-        if (upstream_interface_id > other.upstream_interface_id) return false;
-        return downstream_interface_ids < other.downstream_interface_ids;
-    }
-};
-
+// Removed MulticastRouteEntry from here as it's moved to the top.
 
 } // namespace isis
 } // namespace netflow

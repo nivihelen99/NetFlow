@@ -1,5 +1,8 @@
 #include "netflow++/isis/isis_spf_calculator.hpp"
-#include "netflow++/isis/isis_pdu_constants.hpp" // For TLV type constants
+// #include "netflow++/isis/isis_pdu_constants.hpp" // TLV constants now from isis_common.hpp
+#include "netflow++/isis/isis_common.hpp"      // For TLV type constants from isis_common.hpp
+#include "netflow++/isis/isis_utils.hpp"       // For BufferReader, parse_u8, parse_system_id, parse_bytes
+#include "netflow++/isis/isis_pdu.hpp"         // For TLV value parsing functions like parse_extended_ip_reachability_tlv_value, etc.
 #include "netflow++/byte_swap.hpp"             // For ntohl, ntohs
 
 #include <iostream> // For debugging
@@ -57,36 +60,36 @@ void IsisSpfCalculator::parse_lsp_links(const LinkStatePdu& lsp,
 
     for (const auto& tlv : lsp.tlvs) {
         // IS Reachability (Type 2 for L1/L2, or 22 for Extended IS for L2)
-        if (tlv.type == IS_REACHABILITY_TLV_TYPE || tlv.type == EXTENDED_IS_REACHABILITY_TLV_TYPE) {
-            BufferReader reader(tlv.value);
-            while (reader.offset < reader.size) {
+        if (tlv.type == ISIS_TLV_IS_REACHABILITY || tlv.type == ISIS_TLV_EXTENDED_IS_REACHABILITY) { // Corrected constants
+            netflow::isis::BufferReader reader(tlv.value); // Explicit namespace
+            while (reader.offset < reader.size_) { // Use member size_
                 // Type 2: Metric (1) + Reserved (1) + SystemID (6) + Reserved (1) ...
                 // Type 22: Metric (3) + SystemID (7: SysID+Pseudonode) + SubTLVs
                 // This parsing needs to be accurate based on TLV type.
                 // Simplified parsing for Type 2 concept:
-                if (tlv.type == IS_REACHABILITY_TLV_TYPE && reader.can_read(8)) { // 1 metric + 1 res + 6 sysid
+                if (tlv.type == ISIS_TLV_IS_REACHABILITY && reader.can_read(8)) { // 1 metric + 1 res + 6 sysid // Corrected constant
                     uint8_t metric_val;
-                    parse_u8(reader, metric_val); // Metric
-                    reader.advance(1); // Skip reserved byte
+                    netflow::isis::parse_u8(reader, metric_val); // Metric // Explicit namespace
+                    uint8_t dummy_reserved; netflow::isis::parse_u8(reader, dummy_reserved); // Skip reserved byte by reading it
 
                     SystemID neighbor_sys_id;
-                    parse_system_id(reader, neighbor_sys_id);
+                    netflow::isis::parse_system_id(reader, neighbor_sys_id); // Explicit namespace
                     
                     if (out_neighbors.find(neighbor_sys_id) == out_neighbors.end() || metric_val < out_neighbors[neighbor_sys_id]) {
                         out_neighbors[neighbor_sys_id] = metric_val;
                     }
-                } else if (tlv.type == EXTENDED_IS_REACHABILITY_TLV_TYPE && reader.can_read(10)) { // 3 metric + 7 sysid_pn
+                } else if (tlv.type == ISIS_TLV_EXTENDED_IS_REACHABILITY && reader.can_read(10)) { // 3 metric + 7 sysid_pn // Corrected constant
                      uint32_t metric_val = 0;
                      // Read 3 bytes for metric (e.g. into uint32_t)
                      uint8_t m_bytes[3];
-                     parse_bytes(reader, m_bytes, 3);
+                     netflow::isis::parse_bytes(reader, m_bytes, 3); // Explicit namespace
                      metric_val = (static_cast<uint32_t>(m_bytes[0]) << 16) | 
                                   (static_cast<uint32_t>(m_bytes[1]) << 8)  | 
                                   (static_cast<uint32_t>(m_bytes[2]));
 
                     SystemID neighbor_sys_id; // 6 bytes
                     std::array<uint8_t, 7> neighbor_lan_id; // 7 bytes (SysID + PN)
-                    parse_bytes(reader, neighbor_lan_id.data(), 7);
+                    netflow::isis::parse_bytes(reader, neighbor_lan_id.data(), 7); // Explicit namespace
                     std::copy(neighbor_lan_id.begin(), neighbor_lan_id.begin() + 6, neighbor_sys_id.begin());
                     // We are interested in paths to other routers (SystemIDs), not pseudonodes here directly.
                     // If neighbor_lan_id[6] != 0, it's a pseudonode. We connect to the router part.
@@ -105,11 +108,11 @@ void IsisSpfCalculator::parse_lsp_links(const LinkStatePdu& lsp,
             }
         }
         // IP Reachability (Type 128 for Internal, 130 for External - deprecated, 135 for Extended IP)
-        else if (tlv.type == IP_INTERNAL_REACH_TLV_TYPE || tlv.type == EXTENDED_IP_REACHABILITY_TLV_TYPE) {
+        else if (tlv.type == IP_INTERNAL_REACH_TLV_TYPE || tlv.type == EXTENDED_IP_REACHABILITY_TLV_TYPE) { // Constants from isis_common.hpp
             // This parsing was sketched in isis_pdu.cpp, should be robust there.
             // For now, a simplified conceptual parsing.
             ExtendedIpReachabilityTlvValue val_struct;
-            if (parse_extended_ip_reachability_tlv_value(tlv.value, val_struct)) { // Assumes this function exists and works
+            if (netflow::isis::parse_extended_ip_reachability_tlv_value(tlv.value, val_struct)) { // Explicit namespace
                 out_ip_prefixes.insert(out_ip_prefixes.end(), val_struct.reachabilityEntries.begin(), val_struct.reachabilityEntries.end());
             }
         }
@@ -176,7 +179,7 @@ std::vector<SpfRouteEntry> IsisSpfCalculator::calculate_spf() const {
                 // For connected routes, next_hop is self, egress_interface needs to be found.
                 // This requires knowing which local interface hosts this prefix.
                 // For now, leave next_hop_ips and egress_interface_ids empty or mark as 'directly connected'.
-                route.next_hop_ips.insert(IpAddress("0.0.0.0")); // Special marker for connected
+                route.next_hop_ips.insert(IpAddress(0)); // Special marker for connected // Corrected
             } else {
                 route.next_hop_ips = current_path_info.first_hop_router_ips;
                 route.egress_interface_ids = current_path_info.local_egress_interface_ids;
@@ -214,7 +217,7 @@ std::vector<SpfRouteEntry> IsisSpfCalculator::calculate_spf() const {
                     auto adj_lsp_opt = lsdb_->get_lsp(adj_lsp_id);
                     if (adj_lsp_opt) {
                         for (const auto& tlv : adj_lsp_opt->tlvs) {
-                            if (tlv.type == IP_INTERFACE_ADDRESS_TLV_TYPE && !tlv.value.empty()) {
+                            if (tlv.type == IP_INTERNAL_REACH_TLV_TYPE && !tlv.value.empty()) { // Corrected Constant
                                 uint32_t adj_ip_val_net;
                                 std::memcpy(&adj_ip_val_net, tlv.value.data(), sizeof(uint32_t));
                                 spf_tree[adj_node_id].first_hop_router_ips.insert(IpAddress(ntohl(adj_ip_val_net)));
@@ -271,17 +274,14 @@ std::vector<SpfRouteEntry> IsisSpfCalculator::calculate_spf() const {
     routes.clear();
     for(const auto& pair : best_routes_map) {
         // Filter out 0.0.0.0 next hops if other valid ones exist for ECMP
-        if (pair.second.next_hop_ips.size() > 1) {
-            auto it = pair.second.next_hop_ips.find(IpAddress("0.0.0.0"));
-            if (it != pair.second.next_hop_ips.end()) {
-                 // If it's not the only next_hop, remove it. If it is the only one, it's a connected route.
-                if (pair.second.next_hop_ips.size() > 1) { // Check again after potential erase
-                    // This logic is tricky. If 0.0.0.0 is present with others, it's ambiguous.
-                    // For now, if any non-0.0.0.0 exists, prefer that.
-                }
+        SpfRouteEntry temp_route = pair.second; // Copy to modify
+        if (temp_route.next_hop_ips.size() > 1) {
+            auto it = temp_route.next_hop_ips.find(IpAddress(0)); // Corrected
+            if (it != temp_route.next_hop_ips.end()) {
+                temp_route.next_hop_ips.erase(it); // Remove 0.0.0.0 if other IPs exist
             }
         }
-        routes.push_back(pair.second);
+        routes.push_back(temp_route);
     }
 
 
@@ -302,11 +302,11 @@ void IsisSpfCalculator::parse_lsp_multicast_info(const LinkStatePdu& lsp,
             out_is_multicast_capable = true;
             // Assuming MulticastCapabilityTlvValue is empty and parse function handles 0-length value
             MulticastCapabilityTlvValue cap_val; 
-            parse_multicast_capability_tlv_value(tlv.value, cap_val); // from isis_pdu.cpp
+            netflow::isis::parse_multicast_capability_tlv_value(tlv.value, cap_val); // from isis_pdu.cpp // Explicit namespace
         } else if (tlv.type == MULTICAST_GROUP_MEMBERSHIP_TLV_TYPE) { // Constant from isis_common.hpp
             MulticastGroupMembershipTlvValue group_val;
             // Assuming parse_multicast_group_membership_tlv_value exists in isis_pdu.cpp
-            if (parse_multicast_group_membership_tlv_value(tlv.value, group_val)) { 
+            if (netflow::isis::parse_multicast_group_membership_tlv_value(tlv.value, group_val)) { // Explicit namespace
                 out_advertised_groups.insert(out_advertised_groups.end(), group_val.groups.begin(), group_val.groups.end());
             }
         }
@@ -329,7 +329,7 @@ std::vector<MulticastRouteEntry> IsisSpfCalculator::calculate_multicast_spf(
         bool is_capable = false;
         std::vector<MulticastGroupAddressInfo> groups_advertised;
         parse_lsp_multicast_info(lsdb_entry.lsp, is_capable, groups_advertised);
-        all_nodes_multicast_info[lsdb_entry.lsp.lspId.system_id] = {is_capable, groups_advertised};
+        all_nodes_multicast_info[lsdb_entry.lsp.lspId.systemId] = {is_capable, groups_advertised}; // Corrected .system_id to .systemId
     }
 
     // Step 2: Simplified Source Tree Construction
@@ -399,21 +399,21 @@ std::vector<MulticastRouteEntry> IsisSpfCalculator::calculate_multicast_spf(
 } // namespace netflow
 
 // Constants for TLV parsing (should be in a common header like isis_pdu_constants.hpp or isis_common.hpp)
-#ifndef IS_REACHABILITY_TLV_TYPE
-#define IS_REACHABILITY_TLV_TYPE 2
-#endif
-#ifndef EXTENDED_IS_REACHABILITY_TLV_TYPE
-#define EXTENDED_IS_REACHABILITY_TLV_TYPE 22
-#endif
-#ifndef IP_INTERNAL_REACH_TLV_TYPE
-#define IP_INTERNAL_REACH_TLV_TYPE 128
-#endif
-#ifndef EXTENDED_IP_REACHABILITY_TLV_TYPE
-#define EXTENDED_IP_REACHABILITY_TLV_TYPE 135
-#endif
-#ifndef IP_INTERFACE_ADDRESS_TLV_TYPE
-#define IP_INTERFACE_ADDRESS_TLV_TYPE 132
-#endif
+// #ifndef IS_REACHABILITY_TLV_TYPE
+// #define IS_REACHABILITY_TLV_TYPE 2
+// #endif
+// #ifndef EXTENDED_IS_REACHABILITY_TLV_TYPE
+// #define EXTENDED_IS_REACHABILITY_TLV_TYPE 22
+// #endif
+// #ifndef IP_INTERNAL_REACH_TLV_TYPE
+// #define IP_INTERNAL_REACH_TLV_TYPE 128
+// #endif
+// #ifndef EXTENDED_IP_REACHABILITY_TLV_TYPE
+// #define EXTENDED_IP_REACHABILITY_TLV_TYPE 135
+// #endif
+// #ifndef IP_INTERFACE_ADDRESS_TLV_TYPE
+// #define IP_INTERFACE_ADDRESS_TLV_TYPE 132
+// #endif
 // MULTICAST_CAPABILITY_TLV_TYPE and MULTICAST_GROUP_MEMBERSHIP_TLV_TYPE are in isis_common.hpp
 
 // Assumed parsing functions (from isis_pdu.cpp or similar)
@@ -423,4 +423,4 @@ std::vector<MulticastRouteEntry> IsisSpfCalculator::calculate_multicast_spf(
 // parse_u8, parse_system_id, parse_bytes from isis_pdu.cpp's BufferReader context.
 // These might need to be exposed or reimplemented if isis_pdu.cpp's BufferReader is not accessible/suitable.
 // For this file, they are used conceptually.
-```
+// Stray backticks removed.

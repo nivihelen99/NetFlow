@@ -12,6 +12,7 @@ target_include_directories(netflow_port_lib INTERFACE ${CMAKE_SOURCE_DIR}/includ
 # --- NetFlow Switching Library ---
 # This library will contain compiled components related to switching.
 add_library(netflow_switching_lib STATIC
+    netflow++/packet.cpp # Added new packet utility file
     netflow++/config_manager.cpp
     netflow++/stp_manager.cpp
     netflow++/lacp_manager.cpp # lacp_manager.cpp should also be here from previous work
@@ -26,6 +27,14 @@ add_library(netflow_switching_lib STATIC
     netflow++/lldp_manager.cpp       # Added LLDP Manager source
     netflow++/qos_manager.cpp      # Added QoS Manager source
     netflow++/acl_manager.cpp      # Added ACL Manager source
+    netflow++/isis/isis_interface_manager.cpp
+    netflow++/isis/isis_lsdb.cpp
+    netflow++/isis/isis_manager.cpp
+    netflow++/isis/isis_pdu.cpp
+    netflow++/isis/isis_spf_calculator.cpp
+    netflow++/isis/isis_utils.cpp
+    netflow++/isis/isis_pdu_parsing.cpp
+    netflow++/isis/isis_pdu_serialization.cpp
 )
 
 # Make sure the libraries can find their own headers if they were in src,

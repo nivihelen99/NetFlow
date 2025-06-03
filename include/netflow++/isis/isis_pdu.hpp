@@ -2,6 +2,7 @@
 #define NETFLOW_ISIS_PDU_HPP
 
 #include "isis_common.hpp"
+#include "netflow++/packet.hpp" // For IpAddress
 #include <vector>
 #include <cstdint>
 
@@ -161,6 +162,22 @@ struct MulticastGroupAddressInfo {
 struct MulticastGroupMembershipTlvValue {
     std::vector<MulticastGroupAddressInfo> groups{};
 };
+
+// --- TLV Value Deserialization Function Declarations ---
+// These functions parse the value field of a TLV.
+// Definitions are in isis_pdu.cpp
+
+// Parses the value of an Area Addresses TLV (Type 1)
+bool parse_area_addresses_tlv_value(const std::vector<uint8_t>& value_bytes, AreaAddressesTlvValue& out_value);
+
+// Parses the value of an Extended IP Reachability TLV (Type 135)
+bool parse_extended_ip_reachability_tlv_value(const std::vector<uint8_t>& value_bytes, ExtendedIpReachabilityTlvValue& out_value);
+
+// Parses the value of a Multicast Capability TLV (Type 230)
+bool parse_multicast_capability_tlv_value(const std::vector<uint8_t>& value_bytes, MulticastCapabilityTlvValue& out_value);
+
+// Parses the value of a Multicast Group Membership TLV (Type 231)
+bool parse_multicast_group_membership_tlv_value(const std::vector<uint8_t>& value_bytes, MulticastGroupMembershipTlvValue& out_value);
 
 
 } // namespace isis

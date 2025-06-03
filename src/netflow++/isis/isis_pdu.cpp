@@ -104,7 +104,7 @@ static bool parse_lsp_id(BufferReader& reader, LspId& id) {
 // length: Length of the data.
 // checksum_field_offset_in_data: Byte offset of the 2-byte checksum field within 'data'.
 //                                These two bytes in 'data' are treated as zero during calculation.
-static uint16_t calculate_fletcher_checksum(const uint8_t* data, size_t length, size_t checksum_field_offset_in_data) {
+uint16_t calculate_fletcher_checksum(const uint8_t* data, size_t length, size_t checksum_field_offset_in_data) {
     uint32_t c0 = 0, c1 = 0; // Use uint32_t to prevent overflow during intermediate sums before modulo
 
     for (size_t i = 0; i < length; ++i) {
@@ -552,7 +552,7 @@ bool parse_lan_hello_pdu(const std::vector<uint8_t>& buffer, CommonPduHeader& ou
     if (out_pdu.pduLength > buffer.size()) return false; // Declared PDU length exceeds available buffer.
     
     // Cross-check with commonHeader.lengthIndicator
-    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, 255u))) {
+    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, static_cast<uint16_t>(255u)))) {
         // Optional: Log a warning about mismatch if not 0xFF
         // For now, we trust pduLength.
     }
@@ -603,7 +603,7 @@ bool parse_point_to_point_hello_pdu(const std::vector<uint8_t>& buffer, CommonPd
     if (out_pdu.pduLength < reader.offset) return false;
     if (out_pdu.pduLength > buffer.size()) return false;
 
-    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, 255u))) {
+    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, static_cast<uint16_t>(255u)))) {
         // Optional: Log warning
     }
      if (out_header.lengthIndicator == 0xFF && out_pdu.pduLength <= 255) {
@@ -657,7 +657,7 @@ bool parse_link_state_pdu(const std::vector<uint8_t>& buffer, CommonPduHeader& o
     if (out_pdu.pduLength > buffer.size()) return false; // Declared LSP length exceeds available buffer.
     
     // Cross-check with commonHeader.lengthIndicator
-    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, 255u))) {
+    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, static_cast<uint16_t>(255u)))) {
         // Optional: Log warning
     }
     if (out_header.lengthIndicator == 0xFF && out_pdu.pduLength <= 255) {
@@ -705,7 +705,7 @@ bool parse_complete_sequence_numbers_pdu(const std::vector<uint8_t>& buffer, Com
     if (out_pdu.pduLength < reader.offset) return false;
     if (out_pdu.pduLength > buffer.size()) return false;
 
-    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, 255u))) {
+    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, static_cast<uint16_t>(255u)))) {
         // Optional: Log warning
     }
     if (out_header.lengthIndicator == 0xFF && out_pdu.pduLength <= 255) {
@@ -743,7 +743,7 @@ bool parse_partial_sequence_numbers_pdu(const std::vector<uint8_t>& buffer, Comm
     if (out_pdu.pduLength < reader.offset) return false;
     if (out_pdu.pduLength > buffer.size()) return false;
 
-    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, 255u))) {
+    if (out_header.lengthIndicator != 0xFF && out_header.lengthIndicator != static_cast<uint8_t>(std::min(out_pdu.pduLength, static_cast<uint16_t>(255u)))) {
         // Optional: Log warning
     }
     if (out_header.lengthIndicator == 0xFF && out_pdu.pduLength <= 255) {
@@ -793,11 +793,11 @@ std::vector<uint8_t> serialize_multicast_group_membership_tlv_value(const Multic
     std::vector<uint8_t> buffer;
     for (const auto& group_info : value.groups) {
         // Serialize group_address (IpAddress is uint32_t in host order, convert to network)
-        uint32_t group_addr_net = htonl(group_info.group_address.to_uint32()); // Assumes IpAddress has to_uint32()
+        uint32_t group_addr_net = htonl(group_info.group_address); // Corrected: Removed .to_uint32()
         append_bytes(buffer, reinterpret_cast<const uint8_t*>(&group_addr_net), sizeof(group_addr_net));
 
         // Serialize source_address (IpAddress is uint32_t in host order, convert to network)
-        uint32_t source_addr_net = htonl(group_info.source_address.to_uint32());
+        uint32_t source_addr_net = htonl(group_info.source_address); // Corrected: Removed .to_uint32()
         append_bytes(buffer, reinterpret_cast<const uint8_t*>(&source_addr_net), sizeof(source_addr_net));
     }
     return buffer;

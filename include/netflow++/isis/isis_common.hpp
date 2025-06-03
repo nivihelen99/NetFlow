@@ -65,6 +65,11 @@ constexpr uint8_t MULTICAST_GROUP_MEMBERSHIP_TLV_TYPE = 231; // Advertises group
 
 // P2P Adjacency State TLV Type (RFC 5303)
 constexpr uint8_t P2P_ADJACENCY_STATE_TLV_TYPE = 240;
+
+// Standard IS Reachability TLV types
+constexpr uint8_t ISIS_TLV_IS_REACHABILITY = 2; // Same as IS_NEIGHBORS_LAN_TLV_TYPE, commonly used for L1 IS Reachability
+constexpr uint8_t ISIS_TLV_EXTENDED_IS_REACHABILITY = 22; // Standard for Extended IS Reachability
+
 // Note: LSP_ENTRIES_TLV_TYPE is already defined above as 9.
 
 } // namespace isis

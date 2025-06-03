@@ -4,10 +4,12 @@
 #include "packet_buffer.hpp"
 #include <cstdint>
 #include <vector>
+#include <array>    // For std::array used in MacAddress::octets()
 #include <optional> // Potentially useful for optional headers
-#include <cstring>  // For memcpy, memmove
+#include <cstring>  // For memcpy, memmove, strlen
 #include <algorithm> // For std::copy, std::fill, std::equal
 #include <stdexcept> // For exceptions
+#include <cstdio>   // For sscanf
 
 // For network byte order functions like ntohs, htons.
 // On Linux/POSIX, this is the typical header.
@@ -90,8 +92,46 @@ struct MacAddress {
         std::copy(mac_bytes, mac_bytes + 6, bytes);
     }
 
+    // Constructor from string "XX:XX:XX:XX:XX:XX"
+    MacAddress(const char* mac_str) {
+        std::fill(bytes, bytes + 6, 0); // Initialize to zero
+        if (mac_str && std::strlen(mac_str) == 17) {
+            unsigned int vals[6];
+            if (sscanf(mac_str, "%x:%x:%x:%x:%x:%x", &vals[0], &vals[1], &vals[2], &vals[3], &vals[4], &vals[5]) == 6) {
+                for (int i = 0; i < 6; ++i) {
+                    bytes[i] = static_cast<uint8_t>(vals[i]);
+                }
+            }
+            // Else, bytes remain zero or could throw an error
+        }
+        // Else, bytes remain zero or could throw an error for invalid format/length
+    }
+
     bool operator==(const MacAddress& other) const {
         return std::equal(bytes, bytes + 6, other.bytes);
+    }
+
+    // Alias for bytes array
+    const std::array<uint8_t, 6>& octets() const {
+        return *reinterpret_cast<const std::array<uint8_t, 6>*>(bytes);
+    }
+    std::array<uint8_t, 6>& octets() {
+        return *reinterpret_cast<std::array<uint8_t, 6>*>(bytes);
+    }
+
+    bool is_zero() const {
+        for (int i = 0; i < 6; ++i) {
+            if (bytes[i] != 0) return false;
+        }
+        return true;
+    }
+
+    uint64_t to_uint64() const {
+        uint64_t val = 0;
+        for (int i = 0; i < 6; ++i) {
+            val = (val << 8) | bytes[i];
+        }
+        return val;
     }
 };
 
@@ -251,6 +291,9 @@ struct UdpHeader {
 
 // Define IpAddress as uint32_t for IPv4
 using IpAddress = uint32_t;
+
+// Utility function to convert an IPv4 subnet mask to prefix length
+uint8_t ip_mask_to_prefix_length(IpAddress subnet_mask);
 
 // ARP Header Structure
 // Ensure ArpHeader is packed.

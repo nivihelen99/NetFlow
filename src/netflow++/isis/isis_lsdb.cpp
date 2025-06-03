@@ -3,6 +3,7 @@
 #include "netflow++/isis/isis_common.hpp"       // For CommonPduHeader
 #include "netflow++/isis/isis_pdu_constants.hpp" // For TLV types etc.
 #include "netflow++/byte_swap.hpp" // For ntohs, htons etc.
+#include "netflow++/isis/isis_utils.hpp"       // Added for BufferReader and parsing utilities
 
 #include <iostream> // For debugging
 #include <cstring>  // For std::memcpy
@@ -235,7 +236,7 @@ void IsisLsdb::flood_lsp(const LspId& lsp_id, std::optional<uint32_t> received_o
     {
         std::lock_guard<std::mutex> lock(mutex_);
         auto it = lsdb_.find(lsp_id);
-        if (it == lsdb_.end() || it->second.lsp.pduLengthLsp == 0) { // pduLengthLsp check for valid LSP
+        if (it == lsdb_.end() || it->second.lsp.pduLength == 0) { // pduLength check for valid LSP
             return; // LSP not found or invalid
         }
         entry_opt = it->second; // Make a copy to use outside lock if needed for serialization
@@ -263,10 +264,10 @@ void IsisLsdb::flood_lsp(const LspId& lsp_id, std::optional<uint32_t> received_o
 
         MacAddress dest_mac;
         if (if_config_opt->circuit_type == CircuitType::BROADCAST) {
-            bool is_dis_on_this_if = isis_interface_manager_->is_elected_dis(interface_id);
+            bool is_dis_on_this_if = isis_interface_manager_->is_elected_dis(interface_id); // First declaration
             // On LANs:
             // - DIS floods to AllL1ISs/AllL2ISs.
-            bool is_dis_on_this_if = isis_interface_manager_->is_elected_dis(interface_id);
+            // bool is_dis_on_this_if = isis_interface_manager_->is_elected_dis(interface_id); // This line was the redeclaration and is now correctly commented out/removed by previous step.
             if (is_dis_on_this_if) {
                 // DIS floods to multicast on this LAN segment
                 dest_mac = (level_ == IsisLevel::L1) ? ALL_L1_ISS_MAC : ALL_L2_ISS_MAC;
@@ -353,8 +354,8 @@ void IsisLsdb::handle_received_csnp(const CompleteSequenceNumbersPdu& csnp, uint
     // Iterate through TLVs in CSNP, assuming they are LSP Entry TLVs (Type 9, or similar concept)
     for (const auto& tlv : csnp.tlvs) {
         if (tlv.type == LSP_ENTRIES_TLV_TYPE) { // This constant needs to be well-defined for actual LSP entries
-            BufferReader reader(tlv.value);
-            while(reader.offset < reader.size) {
+            BufferReader reader(tlv.value.data(), tlv.value.size());
+            while(reader.offset < reader.size_) {
                 LspEntry csnp_entry;
                 // This parsing needs to be robust. Assuming direct LspEntry structures here.
                 if (!parse_u16(reader, csnp_entry.lifetime)) break;
@@ -484,8 +485,8 @@ void IsisLsdb::handle_received_psnp(const PartialSequenceNumbersPdu& psnp, uint3
     // Iterate through TLVs in PSNP, assuming they are LSP Entry TLVs
     for (const auto& tlv : psnp.tlvs) {
         if (tlv.type == LSP_ENTRIES_TLV_TYPE) { // This constant needs to be well-defined
-            BufferReader reader(tlv.value);
-            while(reader.offset < reader.size) {
+            BufferReader reader(tlv.value.data(), tlv.value.size());
+            while(reader.offset < reader.size_) {
                 LspEntry requested_entry_summary;
                 // Parse LspEntry summary from TLV value
                 if (!parse_u16(reader, requested_entry_summary.lifetime)) break;
@@ -850,30 +851,8 @@ MacAddress IsisLsdb::get_destination_mac_for_level() const {
     return MacAddress{}; // Should not happen
 }
 
-// Helper functions (stubs for isis_pdu.cpp to provide, or implement locally if simple enough)
-// These are used in CSNP/PSNP sending logic and need to write to a std::vector<uint8_t>
-static void serialize_u16(std::vector<uint8_t>& buffer, uint16_t value) {
-    // Assumes value is already in network byte order if coming from PDU struct fields
-    // Or, if it's host order, do htons here.
-    // For this file, assume it's PRE-ORDERED (network) if from existing PDU fields,
-    // or needs ordering if it's a fresh value like a counter.
-    // The LspEntry summaries are built from existing PDU fields, so they should be network order.
-    buffer.push_back(static_cast<uint8_t>(value >> 8));
-    buffer.push_back(static_cast<uint8_t>(value & 0xFF));
-}
-
-static void serialize_u32(std::vector<uint8_t>& buffer, uint32_t value) {
-    buffer.push_back(static_cast<uint8_t>(value >> 24));
-    buffer.push_back(static_cast<uint8_t>(value >> 16));
-    buffer.push_back(static_cast<uint8_t>(value >> 8));
-    buffer.push_back(static_cast<uint8_t>(value & 0xFF));
-}
-
-static void serialize_lsp_id(std::vector<uint8_t>& buffer, const LspId& id) {
-    buffer.insert(buffer.end(), id.systemId.begin(), id.systemId.end());
-    buffer.push_back(id.pseudonodeIdOrLspNumber);
-}
-
+// Static helper functions (serialize_u16, serialize_u32, serialize_lsp_id)
+// were previously here and are now correctly moved to isis_utils.cpp (and declared in isis_utils.hpp).
 
 } // namespace isis
 } // namespace netflow
