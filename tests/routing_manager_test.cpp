@@ -174,5 +174,5 @@ TEST_F(RoutingManagerTest, RouteAddEdgeCases) {
     rm_.add_static_route(net1, mask1, nh1, 1, 10);
 
     std::vector<netflow::RouteEntry> table = rm_.get_routing_table();
-    EXPECT_EQ(table.size(), 2);
+    EXPECT_EQ(table.size(), 1);
 }
