@@ -74,15 +74,15 @@ static std::string format_lldp_interface_config(uint32_t port_id, const LldpPort
 
 ManagementService::ManagementService(SwitchLogger& logger,
                                      RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
-                                     netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm,
+                                     netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm, // These should be netflow:: not netflow::netflow
                                      netflow::StpManager& stpm, netflow::LacpManager& lacpm,
                                      netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
-                                     netflow::AclManager& acl_m, isis::IsisManager& isis_m) // Added IsisManager
+                                     netflow::AclManager& acl_m, netflow::isis::IsisManager& isis_m) // Corrected for IsisManager too
     : logger_(logger),
       routing_manager_(rm), interface_manager_(im), management_interface_(mi),
       vlan_manager_(vm), fdb_manager_(fdbm), stp_manager_(stpm), lacp_manager_(lacpm),
       lldp_manager_(lldpm), qos_manager_(qos_m), acl_manager_(acl_m), 
-      isis_manager_(isis_m) { // Store IsisManager
+      isis_manager_(isis_m) { 
 }
 
 // Helper function to parse SystemID (e.g., aaaa.bbbb.cccc)
@@ -406,6 +406,125 @@ std::string ManagementService::show_isis_routes_cli(const std::vector<std::strin
 
 
 void ManagementService::register_cli_commands() {
+    // --- IS-IS Global Configuration Commands ---
+    management_interface_.register_command(
+        {"configure", "router", "isis", "system-id"}, 
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing system-id value. Usage: ... system-id <SYSTEM_ID>");
+            return handle_isis_global_system_id(args); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "area", "add"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area add <AREA_ID>");
+            return handle_isis_global_area(args, true); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "area", "remove"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area remove <AREA_ID>");
+            return handle_isis_global_area(args, false); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "level"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing level value. Usage: ... level <l1|l2|l1-l2>");
+            return handle_isis_global_level(args); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "overload-bit", "set"},
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing on/off value. Usage: ... overload-bit set <on|off>");
+            return handle_isis_global_overload_bit(args); 
+        });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "enable"},
+        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(true); });
+
+    management_interface_.register_command(
+        {"configure", "router", "isis", "shutdown"},
+        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(false); });
+
+    // --- IS-IS Interface Configuration Commands ---
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "enable"}, 
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing interface ID for 'isis enable'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            std::vector<std::string> level_args; 
+            if (args.size() > 1) level_args.push_back(args[1]);
+            return handle_isis_interface_enable(if_id, level_args);
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "disable"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.empty()) return std::string("Error: Missing interface ID for 'isis disable'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_disable(if_id);
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "circuit-type"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or circuit type for 'isis circuit-type'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_circuit_type(if_id, {args[1]});
+        });
+    
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "hello-interval"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or interval for 'isis hello-interval'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_hello_interval(if_id, {args[1]});
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "hello-multiplier"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or multiplier for 'isis hello-multiplier'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_hello_multiplier(if_id, {args[1]});
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "priority"}, 
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or priority for 'isis priority'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return handle_isis_interface_priority(if_id, {args[1]});
+        });
+
+    // --- Show IS-IS Commands ---
+    management_interface_.register_command({"show", "isis", "summary"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_summary_cli(args); });
+    management_interface_.register_command({"show", "isis", "neighbors"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_neighbors_cli(args); });
+    management_interface_.register_command({"show", "isis", "interface"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_interface_cli(args); });
+    management_interface_.register_command({"show", "isis", "database"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_database_cli(args); });
+    management_interface_.register_command({"show", "isis", "routes"},
+        [this](const std::vector<std::string>& args) -> std::string { return show_isis_routes_cli(args); });
+
     auto format_full_interface_details =
         [this](std::ostringstream& oss, uint32_t port_id, const netflow::InterfaceManager::PortConfig& config){
         oss << "Interface " << port_id << ":\n";
@@ -522,9 +641,9 @@ void ManagementService::register_cli_commands() {
                 if (sub_args.size() < 3) return "Error: Usage: interface <id> ip access-group <acl_name> <in|out>";
                 std::string acl_name = sub_args[1];
                 std::string direction_str = sub_args[2];
-                AclDirection direction;
-                if (direction_str == "in") direction = AclDirection::INGRESS;
-                else if (direction_str == "out") direction = AclDirection::EGRESS;
+                netflow::AclDirection direction; // Corrected namespace
+                if (direction_str == "in") direction = netflow::AclDirection::INGRESS; // Corrected namespace
+                else if (direction_str == "out") direction = netflow::AclDirection::EGRESS; // Corrected namespace
                 else return "Error: Invalid direction. Must be 'in' or 'out'.";
 
                 if (interface_manager_.apply_acl_to_interface(port_id, acl_name, direction)) {
@@ -551,9 +670,9 @@ void ManagementService::register_cli_commands() {
                 if (args.size() > 3 && args[2] == "ip" && args[3] == "access-group") {
                     if (args.size() < 5) return "Error: Usage: no interface <id> ip access-group <in|out>";
                     std::string direction_str = args[4];
-                    AclDirection direction;
-                    if (direction_str == "in") direction = AclDirection::INGRESS;
-                    else if (direction_str == "out") direction = AclDirection::EGRESS;
+                    netflow::AclDirection direction; // Corrected namespace
+                    if (direction_str == "in") direction = netflow::AclDirection::INGRESS; // Corrected namespace
+                    else if (direction_str == "out") direction = netflow::AclDirection::EGRESS; // Corrected namespace
                     else return "Error: Invalid direction for 'no ip access-group'. Must be 'in' or 'out'.";
 
                     if (interface_manager_.remove_acl_from_interface(port_id, direction)) {
@@ -745,53 +864,72 @@ void ManagementService::register_cli_commands() {
         [this](const std::vector<std::string>& args_full) { return handle_isis_global_enable(false); });
 
     // --- IS-IS Interface Configuration Commands ---
+    // Key: {"configure", "interface", <interface_id_val_from_user>, "isis", "enable"}
+    // Lambda args: [level_opt]
+    // This structure is problematic for map key. Instead, register fixed part, parse ID in handler.
+    // Corrected structure: Key is fixed command prefix. Handler parses ID and further args.
+
     management_interface_.register_command(
-        {"configure", "interface", "<INTERFACE_ID>", "isis", "enable"},
-        [this](const std::vector<std::string>& args_full) { 
-            if (args_full.size() < 5) return "Error: Not enough arguments. Usage: configure interface <id> isis enable [level-1|level-2|l1-l2]";
-            uint32_t if_id; try { if_id = utils::safe_stoul(args_full[2]); } catch (const std::exception& e) { return "Error: Invalid interface ID: " + args_full[2]; }
-            std::vector<std::string> handler_args; if(args_full.size() > 5) handler_args.push_back(args_full[5]);
-            return handle_isis_interface_enable(if_id, handler_args);
+        {"configure", "interface", "isis", "enable"}, // Args to lambda: {<id>, [level_opt]}
+        [this](const std::vector<std::string>& args) -> std::string { 
+            if (args.empty()) return std::string("Error: Missing interface ID for 'isis enable'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            std::vector<std::string> level_args; 
+            if (args.size() > 1) level_args.push_back(args[1]);
+            return this->handle_isis_interface_enable(if_id, level_args);
         });
 
     management_interface_.register_command(
-        {"configure", "interface", "<INTERFACE_ID>", "isis", "disable"},
-        [this](const std::vector<std::string>& args_full) {
-            if (args_full.size() != 5) return "Error: Usage: configure interface <id> isis disable";
-            uint32_t if_id; try { if_id = utils::safe_stoul(args_full[2]); } catch (const std::exception& e) { return "Error: Invalid interface ID: " + args_full[2]; }
-            return handle_isis_interface_disable(if_id);
+        {"configure", "interface", "isis", "disable"}, // Args to lambda: {<id>}
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.empty()) return std::string("Error: Missing interface ID for 'isis disable'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return this->handle_isis_interface_disable(if_id);
         });
 
     management_interface_.register_command(
-        {"configure", "interface", "<INTERFACE_ID>", "isis", "circuit-type", "<broadcast|point-to-point>"},
-        [this](const std::vector<std::string>& args_full) {
-            if (args_full.size() != 7) return "Error: Usage: configure interface <id> isis circuit-type <broadcast|point-to-point>";
-            uint32_t if_id; try { if_id = utils::safe_stoul(args_full[2]); } catch (const std::exception& e) { return "Error: Invalid interface ID: " + args_full[2]; }
-            return handle_isis_interface_circuit_type(if_id, {args_full[6]});
+        {"configure", "interface", "isis", "circuit-type"}, // Args to lambda: {<id>, <type>}
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or circuit type for 'isis circuit-type'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return this->handle_isis_interface_circuit_type(if_id, {args[1]});
         });
     
     management_interface_.register_command(
-        {"configure", "interface", "<INTERFACE_ID>", "isis", "hello-interval", "<seconds>"},
-        [this](const std::vector<std::string>& args_full) {
-            if (args_full.size() != 7) return "Error: Usage: configure interface <id> isis hello-interval <seconds>";
-            uint32_t if_id; try { if_id = utils::safe_stoul(args_full[2]); } catch (const std::exception& e) { return "Error: Invalid interface ID: " + args_full[2]; }
-            return handle_isis_interface_hello_interval(if_id, {args_full[6]});
-        });
-    management_interface_.register_command(
-        {"configure", "interface", "<INTERFACE_ID>", "isis", "hello-multiplier", "<count>"},
-        [this](const std::vector<std::string>& args_full) {
-            if (args_full.size() != 7) return "Error: Usage: configure interface <id> isis hello-multiplier <count>";
-            uint32_t if_id; try { if_id = utils::safe_stoul(args_full[2]); } catch (const std::exception& e) { return "Error: Invalid interface ID: " + args_full[2]; }
-            return handle_isis_interface_hello_multiplier(if_id, {args_full[6]});
-        });
-    management_interface_.register_command(
-        {"configure", "interface", "<INTERFACE_ID>", "isis", "priority", "<value>"},
-        [this](const std::vector<std::string>& args_full) {
-            if (args_full.size() != 7) return "Error: Usage: configure interface <id> isis priority <value>";
-            uint32_t if_id; try { if_id = utils::safe_stoul(args_full[2]); } catch (const std::exception& e) { return "Error: Invalid interface ID: " + args_full[2]; }
-            return handle_isis_interface_priority(if_id, {args_full[6]});
+        {"configure", "interface", "isis", "hello-interval"}, // Args to lambda: {<id>, <seconds>}
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or interval for 'isis hello-interval'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return this->handle_isis_interface_hello_interval(if_id, {args[1]});
         });
 
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "hello-multiplier"}, // Args to lambda: {<id>, <count>}
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or multiplier for 'isis hello-multiplier'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return this->handle_isis_interface_hello_multiplier(if_id, {args[1]});
+        });
+
+    management_interface_.register_command(
+        {"configure", "interface", "isis", "priority"}, // Args to lambda: {<id>, <value>}
+        [this](const std::vector<std::string>& args) -> std::string {
+            if (args.size() < 2) return std::string("Error: Missing interface ID or priority for 'isis priority'.");
+            uint32_t if_id; 
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+            return this->handle_isis_interface_priority(if_id, {args[1]});
+        });
 
     // --- Show IS-IS Commands ---
     management_interface_.register_command({"show", "isis", "summary"},

@@ -7,6 +7,8 @@
 #include <vector>    // For parse_vlan_list
 #include <set>       // For parse_vlan_list
 #include <sstream>   // For parse_vlan_list
+#include <iomanip>   // For std::setfill, std::setw
+#include <cstdint>   // For uint16_t, uint8_t
 
 namespace netflow {
 namespace utils {

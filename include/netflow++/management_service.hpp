@@ -14,6 +14,7 @@
 #include "netflow++/logger.hpp"            // Include Logger
 #include "netflow++/packet.hpp"            // For IpAddress
 #include <string>
+#include <vector>    // Added for std::vector
 #include <optional>
 #include <sstream> // For formatting error messages
 
