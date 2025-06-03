@@ -236,9 +236,31 @@ void IsisInterfaceManager::handle_received_hello(uint32_t interface_id,
     
     // Area Address check for L1 Hellos
     if (hello_level == IsisLevel::L1) {
-        if (!check_area_match(if_state.config.area_id, pdu.tlvs)) {
+        const AreaAddress* area_to_use_for_check = &if_state.config.area_id;
+        if (if_state.config.area_id.empty()) { // Interface has no specific L1 area
+            if (!local_area_addresses_.empty()) {
+                area_to_use_for_check = &local_area_addresses_[0]; // Use first global area
+            } else {
+                // This router has no L1 area configured at all. Cannot form L1 adjacency.
+                // std::cout << "L1 LAN Hello on if " << interface_id << " but this router has no L1 area configured." << std::endl;
+                // If an old adjacency existed, ensure it's removed or downed.
+                auto existing_adj_it = if_state.adjacencies.find(pdu.sourceId);
+                if (existing_adj_it != if_state.adjacencies.end()) {
+                    update_adjacency_state(existing_adj_it->second, AdjacencyState::DOWN, true);
+                    // Consider if_state.adjacencies.erase(existing_adj_it);
+                }
+                return; // Reject Hello
+            }
+        }
+
+        if (area_to_use_for_check->empty() || !check_area_match(*area_to_use_for_check, pdu.tlvs)) {
             // std::cout << "Area mismatch for L1 LAN Hello from " << source_mac.to_string() << " on if " << interface_id << std::endl;
-            return;
+            auto existing_adj_it = if_state.adjacencies.find(pdu.sourceId);
+            if (existing_adj_it != if_state.adjacencies.end()) {
+                update_adjacency_state(existing_adj_it->second, AdjacencyState::DOWN, true);
+                // Consider if_state.adjacencies.erase(existing_adj_it);
+            }
+            return; // Reject Hello
         }
     }
 
@@ -261,8 +283,7 @@ void IsisInterfaceManager::handle_received_hello(uint32_t interface_id,
     adj->holding_time_seconds = ntohs(pdu.holdingTime); // Assuming pdu fields are raw network order
     adj->last_hello_received_time = std::chrono::steady_clock::now();
     adj->neighbor_priority = pdu.priority;
-    adj->lan_id = SystemID{}; // Store full LAN ID from Hello: pdu.lanId (7 bytes)
-    std::copy(pdu.lanId.begin(), pdu.lanId.end(), std::begin(adj->lan_id.value()));
+    adj->neighbor_learned_lan_id = pdu.lanId; // Store the received 7-byte LAN ID
 
 
     // Determine established level
@@ -281,25 +302,20 @@ void IsisInterfaceManager::handle_received_hello(uint32_t interface_id,
     // True 2-way check involves seeing ourselves in their IS Neighbors TLV (TLV Type 2).
     // For now, a simpler model: if we receive their Hello, they are at least INITIALIZING/UP from our PoV.
     bool two_way_confirmed = false;
+    // The redundant L1 area check block that was here due to previous diff issue is now consolidated above.
+
     for(const auto& tlv : pdu.tlvs) {
-        if (tlv.type == IS_NEIGHBORS_LAN_TLV_TYPE) { // IS Neighbors TLV
-            IsNeighborsTlvValue is_neighbors_val;
-            // This parse function needs to be available from isis_pdu.cpp
-            // if (parse_is_neighbors_tlv_value(tlv.value, is_neighbors_val)) { 
-            // For now, iterate raw bytes: list of 6-byte MACs or SystemIDs
-            for(size_t i = 0; i + 6 <= tlv.value.size(); i += 6) {
-                 // Here we'd check if our SystemID or MAC is listed.
-                 // For LAN Hellos, IS Neighbors TLV (type 2) contains MAC addresses of neighbors.
-                 // We'd need our own MAC address for the interface.
-                 auto our_if_details = underlying_interface_manager_.get_interface_details(interface_id);
-                 if (our_if_details && our_if_details->mac_address.has_value()) {
+        if (tlv.type == IS_NEIGHBORS_LAN_TLV_TYPE) {
+            auto our_if_details = underlying_interface_manager_.get_interface_details(interface_id);
+            if (our_if_details && our_if_details->mac_address.has_value()) {
+                for(size_t i = 0; (i + 6) <= tlv.value.size(); i += 6) {
                     if (std::equal(our_if_details->mac_address.value().octets.begin(), 
                                    our_if_details->mac_address.value().octets.end(), 
                                    tlv.value.begin() + i)) {
                         two_way_confirmed = true;
                         break;
                     }
-                 }
+                }
             }
             if(two_way_confirmed) break;
         }
@@ -308,10 +324,27 @@ void IsisInterfaceManager::handle_received_hello(uint32_t interface_id,
     if (two_way_confirmed) {
          update_adjacency_state(*adj, AdjacencyState::UP, true);
     } else {
-        // If not explicitly confirmed 2-way, we can still mark as INITIALIZING or UP
-        // depending on policy. For now, let's be optimistic for LAN.
-        update_adjacency_state(*adj, AdjacencyState::UP, true); // Or INITIALIZING if stricter
+        // If already UP and lost 2-way, go to INITIALIZING. Otherwise, stay/go INITIALIZING.
+        // Standard: if you see neighbor but don't see yourself listed, state is Initializing.
+        // If it was UP and we are no longer listed, it means they dropped us.
+        if (adj->state == AdjacencyState::UP) {
+            update_adjacency_state(*adj, AdjacencyState::INITIALIZING, true);
+        } else if (adj->state == AdjacencyState::DOWN) { // New or previously down adj
+            update_adjacency_state(*adj, AdjacencyState::INITIALIZING, true);
+        }
+        // If already INITIALIZING and still no two-way, it remains INITIALIZING until timeout or two-way.
     }
+
+    // Populate adj->lan_id from pdu.lanId. This is the DIS's LAN ID.
+    // If pdu.lanId is valid (e.g. not all zeros if that's a convention for "unknown")
+    // This logic was for the old adj->lan_id (SystemID type).
+    // Now, neighbor_learned_lan_id (array<uint8_t, 7>) is directly assigned pdu.lanId.
+    // The check for pdu_lan_id_is_valid can still be useful before using its content in DIS election.
+    // bool pdu_lan_id_is_valid = false;
+    // for(size_t i=0; i<6; ++i) { /* check if pdu.lanId systemID part is non-zero */ }
+    // if(pdu_lan_id_is_valid) {
+    //    // adj->neighbor_learned_lan_id = pdu.lanId; // Already done above.
+    // }
 
 
     // If adjacency came up or neighbor priority changed, DIS election might be affected.
@@ -339,22 +372,40 @@ void IsisInterfaceManager::handle_received_hello(uint32_t interface_id,
     if (pdu.sourceId == local_system_id_) return; // Loopback
 
     // For P2P, level is implicitly L1/L2 based on configuration, no L1/L2 specific PDU types for PTP IIH
-    // The PTP IIH PDU Type (0x11) is used for L1, L2 or L1_L2 based on TLVs and configuration.
-    // We establish based on configured level.
-    IsisLevel configured_level = if_state.config.level;
-    if (configured_level == IsisLevel::NONE) return;
+    // The PTP IIH PDU Type (0x11) is used for L1, L2 or L1_L2.
+    // circuitType field in PTP IIH (0x01=L1, 0x02=L2, 0x03=L1/L2) indicates sender's capability on this circuit.
+    IsisLevel pdu_circuit_level_capability = IsisLevel::NONE;
+    if (pdu.circuitType == 0x01) pdu_circuit_level_capability = IsisLevel::L1;
+    else if (pdu.circuitType == 0x02) pdu_circuit_level_capability = IsisLevel::L2;
+    else if (pdu.circuitType == 0x03) pdu_circuit_level_capability = IsisLevel::L1_L2;
 
+    IsisLevel interface_configured_level = if_state.config.level;
+    if (interface_configured_level == IsisLevel::NONE) return;
 
-    // Area Address check for L1 component of P2P adjacencies
-    if (configured_level == IsisLevel::L1 || configured_level == IsisLevel::L1_L2) {
-        if (!check_area_match(if_state.config.area_id, pdu.tlvs)) {
-            // std::cout << "Area mismatch for P2P L1 Hello from " << source_mac.to_string() << " on if " << interface_id << std::endl;
-            // If it's L1_L2, we might still form L2 part. For now, strict: if L1 configured, area must match.
-            if (configured_level == IsisLevel::L1) return; 
-            // If L1_L2 and area mismatch, maybe only L2 can come up? Complex.
-            // For now, if L1 is involved and area mismatches, reject.
-            return; 
+    // Determine actual level of adjacency based on mutual capability
+    IsisLevel effective_adj_level = IsisLevel::NONE;
+    if (interface_configured_level == IsisLevel::L1 || interface_configured_level == IsisLevel::L1_L2) {
+        if (pdu_circuit_level_capability == IsisLevel::L1 || pdu_circuit_level_capability == IsisLevel::L1_L2) {
+            // L1 Area match is critical for L1 adjacency component
+            if (!check_area_match(if_state.config.area_id.empty() ? local_area_addresses_[0] : if_state.config.area_id, pdu.tlvs)) {
+                // If L1 area mis-match, L1 part of adjacency cannot come up.
+                if (interface_configured_level == IsisLevel::L1) return; // Pure L1 interface, reject.
+                                                                        // For L1/L2, L2 might still come up.
+            } else {
+                 effective_adj_level = IsisLevel::L1; // At least L1 can come up
+            }
         }
+    }
+    if (interface_configured_level == IsisLevel::L2 || interface_configured_level == IsisLevel::L1_L2) {
+        if (pdu_circuit_level_capability == IsisLevel::L2 || pdu_circuit_level_capability == IsisLevel::L1_L2) {
+            if (effective_adj_level == IsisLevel::L1) effective_adj_level = IsisLevel::L1_L2; // Upgrade to L1_L2
+            else if (effective_adj_level == IsisLevel::NONE) effective_adj_level = IsisLevel::L2; // Only L2
+        }
+    }
+
+    if (effective_adj_level == IsisLevel::NONE) { // No compatible level for adjacency
+        // std::cout << "No compatible level for P2P adjacency with " << system_id_to_string(pdu.sourceId) << std::endl;
+        return;
     }
     
     auto adj_it = if_state.adjacencies.find(pdu.sourceId);
@@ -380,26 +431,58 @@ void IsisInterfaceManager::handle_received_hello(uint32_t interface_id,
     // lan_id and neighbor_priority are not typically used for P2P adjacencies.
 
     // P2P Adjacency State (RFC 5303 / ISO 10589 section 9.6)
-    // States: Down, Initializing, Up.
-    // P2P Adjacency TLV (Type 240) is key for three-way handshake.
-    // For now, simplified: receiving a valid Hello moves to UP.
-    // A more complete implementation uses the three-way handshake:
-    // 1. Adjacency state is Down.
-    // 2. On receipt of IIH from new neighbour -> Initializing. Send IIH with Adjacency Three-Way TLV state "Initializing".
-    // 3. On receipt of IIH with Adjacency Three-Way TLV state "Initializing" (and matching neighbor system ID) -> Up. Send IIH with TLV state "Up".
-    // 4. On receipt of IIH with Adjacency Three-Way TLV state "Up" -> Confirm Up.
-    
-    adj->three_way_match = check_p2p_adjacency_three_way_state(pdu, if_state);
+    adj->level_established = effective_adj_level; // Update established level
+    adj->neighbor_elcid_known = false; // Reset before parsing TLV
+    adj->reported_state_by_neighbor = AdjacencyStateReportedByNeighbor::UNKNOWN;
 
-    if (adj->three_way_match) {
-        update_adjacency_state(*adj, AdjacencyState::UP, false);
-    } else {
-        // If not yet three-way match, keep it initializing.
-        // If it was UP and three-way match is lost, it should go DOWN.
+    bool tlv240_found = false;
+    uint32_t local_elcid_for_comparison = interface_id; // Our ELCID
+
+    for (const auto& tlv : pdu.tlvs) {
+        if (tlv.type == P2P_ADJACENCY_STATE_TLV_TYPE && tlv.length >= 5) { // State (1) + Neighbor's ELCID (4)
+            tlv240_found = true;
+            uint8_t neighbor_reported_state_byte = tlv.value[0];
+            if (neighbor_reported_state_byte == 0x01) adj->reported_state_by_neighbor = AdjacencyStateReportedByNeighbor::DOWN_NEIGHBOR;
+            else if (neighbor_reported_state_byte == 0x02) adj->reported_state_by_neighbor = AdjacencyStateReportedByNeighbor::INITIALIZING_NEIGHBOR;
+            else if (neighbor_reported_state_byte == 0x03) adj->reported_state_by_neighbor = AdjacencyStateReportedByNeighbor::UP_NEIGHBOR;
+
+            std::memcpy(&adj->neighbor_extended_local_circuit_id, tlv.value.data() + 1, 4);
+            adj->neighbor_extended_local_circuit_id = ntohl(adj->neighbor_extended_local_circuit_id);
+            adj->neighbor_elcid_known = true;
+
+            if (tlv.length >= 11) { // Neighbor also reports who they see (NeighborSystemID + NeighborELCID)
+                SystemID reported_neighbor_sysid;
+                std::copy(tlv.value.begin() + 5, tlv.value.begin() + 11, reported_neighbor_sysid.begin());
+
+                uint32_t reported_neighbor_elcid_for_us_net;
+                std::memcpy(&reported_neighbor_elcid_for_us_net, tlv.value.data() + 11, 4);
+                uint32_t reported_neighbor_elcid_for_us_host = ntohl(reported_neighbor_elcid_for_us_net);
+
+                if (reported_neighbor_sysid == local_system_id_ && reported_neighbor_elcid_for_us_host == local_elcid_for_comparison) {
+                    // Neighbor's TLV correctly identifies us.
+                    if (adj->reported_state_by_neighbor == AdjacencyStateReportedByNeighbor::UP_NEIGHBOR ||
+                        adj->reported_state_by_neighbor == AdjacencyStateReportedByNeighbor::INITIALIZING_NEIGHBOR) {
+                        update_adjacency_state(*adj, AdjacencyState::UP, false);
+                    } else if (adj->reported_state_by_neighbor == AdjacencyStateReportedByNeighbor::DOWN_NEIGHBOR) {
+                        update_adjacency_state(*adj, AdjacencyState::INITIALIZING, false);
+                    }
+                } else { // Neighbor sees someone else, or us with wrong ELCID
+                    update_adjacency_state(*adj, AdjacencyState::INITIALIZING, false);
+                }
+            } else { // TLV is too short to contain who neighbor sees. Treat as one-way.
+                 update_adjacency_state(*adj, AdjacencyState::INITIALIZING, false);
+            }
+            break;
+        }
+    }
+
+    if (!tlv240_found) { // No TLV 240 from neighbor
+        // This is a one-way declaration. We see them, but they don't confirm seeing us.
+        // If adj was UP, it means we lost three-way confirmation.
         if (adj->state == AdjacencyState::UP) {
-             update_adjacency_state(*adj, AdjacencyState::DOWN, false); // Lost three-way
-        } else {
-             update_adjacency_state(*adj, AdjacencyState::INITIALIZING, false);
+            update_adjacency_state(*adj, AdjacencyState::DOWN, false); // Or INITIALIZING, but DOWN is safer if TLV disappears
+        } else { // Was DOWN or INITIALIZING
+            update_adjacency_state(*adj, AdjacencyState::INITIALIZING, false);
         }
     }
 }
@@ -463,31 +546,27 @@ void IsisInterfaceManager::send_hello(uint32_t interface_id, IsisInterfaceState&
     common_header.idLength = 0; // Indicates 6-byte SystemID
     common_header.maxAreaAddresses = static_cast<uint8_t>(local_area_addresses_.size() > 0 ? local_area_addresses_.size() : (if_state.config.area_id.empty() ? 0 : 1));
 
-
     // --- Area Addresses TLV (Type 1) ---
-    TLV area_tlv;
-    area_tlv.type = AREA_ADDRESSES_TLV_TYPE;
-    AreaAddressesTlvValue area_tlv_value;
-    if (!if_state.config.area_id.empty()) { // Interface specific area for L1
-        area_tlv_value.areaAddresses.push_back(if_state.config.area_id);
-    } else if (!local_area_addresses_.empty()){ // Global areas if interface specific not set
-         area_tlv_value.areaAddresses.insert(area_tlv_value.areaAddresses.end(), local_area_addresses_.begin(), local_area_addresses_.end());
-    }
-    // If L2 only, Area Address TLV might be omitted or contain all configured areas.
-    // Standard says L2 IIHs SHOULD NOT contain area addresses TLV. L1 IIHs MUST.
-    // For L1/L2, it should contain area addresses for L1 operation.
-
-    if (!area_tlv_value.areaAddresses.empty()) {
-         // Serialize area_tlv_value into area_tlv.value
-         // This requires a serialize_area_addresses_tlv_value from isis_pdu.cpp
-         // For now, manual serialization:
-         for(const auto& area : area_tlv_value.areaAddresses) {
-             area_tlv.value.push_back(static_cast<uint8_t>(area.size()));
-             area_tlv.value.insert(area_tlv.value.end(), area.begin(), area.end());
-         }
-         area_tlv.length = static_cast<uint8_t>(area_tlv.value.size());
+    TLV area_tlv; // Will be populated if needed
+    AreaAddressesTlvValue area_tlv_value_content;
+    if (!if_state.config.area_id.empty()) {
+        area_tlv_value_content.areaAddresses.push_back(if_state.config.area_id);
+    } else { // Use global areas if interface specific not set, or if needed for L1 component of L1/L2
+        area_tlv_value_content.areaAddresses = local_area_addresses_;
     }
 
+    bool add_area_tlv_to_lan_l1 = (if_state.config.level == IsisLevel::L1 || if_state.config.level == IsisLevel::L1_L2) && !area_tlv_value_content.areaAddresses.empty();
+    // For P2P, condition will be checked later based on circuitType.
+
+    if (!area_tlv_value_content.areaAddresses.empty()) {
+        area_tlv.type = AREA_ADDRESSES_TLV_TYPE;
+        // Manual serialization as before, or use serialize_area_addresses_tlv_value if it exists and is preferred.
+        for(const auto& area : area_tlv_value_content.areaAddresses) {
+            area_tlv.value.push_back(static_cast<uint8_t>(area.size()));
+            area_tlv.value.insert(area_tlv.value.end(), area.begin(), area.end());
+        }
+        area_tlv.length = static_cast<uint8_t>(area_tlv.value.size());
+    }
 
     // --- Protocols Supported TLV (NLPID, Type 129) ---
     TLV protocols_tlv;
@@ -520,30 +599,31 @@ void IsisInterfaceManager::send_hello(uint32_t interface_id, IsisInterfaceState&
         lan_pdu.priority = if_state.config.priority;
         
         // LAN ID: Current DIS SystemID (6 bytes) + Pseudonode ID (1 byte)
-        // If we are DIS, use our own system ID + our chosen pseudonode ID (e.g., interface index or 1)
-        // If we are not DIS, use the elected DIS's LAN ID.
+        // If we are DIS, use our own system ID + our chosen pseudonode ID.
+        // if_state.actual_lan_id should be populated by perform_dis_election when is_dis is true.
+        // If we are not DIS, use the elected DIS's LAN ID (if_state.current_dis_lan_id).
         // If no DIS elected yet, this might be zero or our own ID with a zero pseudonode.
-        std::fill(lan_pdu.lanId.begin(), lan_pdu.lanId.end(), 0); // Zero out first
         if (if_state.is_dis) {
-            std::copy(local_system_id_.begin(), local_system_id_.end(), lan_pdu.lanId.begin());
-            lan_pdu.lanId[6] = static_cast<uint8_t>(interface_id & 0xFF); // Example pseudonode ID
-            if_state.actual_lan_id = lan_pdu.lanId; // Store our LAN ID
-        } else { // Use current_dis_lan_id if known and non-zero
-            bool is_zero = true;
-            for(size_t i=0; i < 6; ++i) if(if_state.current_dis_lan_id[i] != 0) is_zero = false;
-            if(!is_zero) {
-                std::copy(if_state.current_dis_lan_id.begin(), if_state.current_dis_lan_id.end(), lan_pdu.lanId.begin());
-            } else { // No DIS known, use our ID and 0 pseudonode
+            lan_pdu.lanId = if_state.actual_lan_id;
+        } else {
+            bool dis_lan_id_is_set = false;
+            for(size_t i=0; i < 6; ++i) if(if_state.current_dis_lan_id[i] != 0) dis_lan_id_is_set = true;
+            if(dis_lan_id_is_set) {
+                lan_pdu.lanId = if_state.current_dis_lan_id;
+            } else { // No DIS known, or current_dis_lan_id is zeroed
                  std::copy(local_system_id_.begin(), local_system_id_.end(), lan_pdu.lanId.begin());
                  lan_pdu.lanId[6] = 0; // Default pseudonode ID when no DIS or self not DIS
             }
         }
         
-        if (!area_tlv_value.areaAddresses.empty()) lan_pdu.tlvs.push_back(area_tlv); // Only if L1 or L1/L2
+        // Area TLV for L1 LAN Hello
+        if (add_area_tlv_to_lan_l1 && area_tlv.length > 0) {
+             lan_pdu.tlvs.push_back(area_tlv);
+        }
         lan_pdu.tlvs.push_back(protocols_tlv);
         lan_pdu.tlvs.push_back(ip_interface_tlv);
 
-        // IS Neighbors TLV (Type 2 for LAN IIH) - list of MAC addresses of neighbors in UP state
+        // IS Neighbors TLV (Type 2 for LAN IIH) - list of 6-byte MAC addresses of UP neighbors
         TLV is_neighbors_lan_tlv;
         is_neighbors_lan_tlv.type = IS_NEIGHBORS_LAN_TLV_TYPE;
         for(const auto& adj_pair : if_state.adjacencies) {
@@ -564,26 +644,39 @@ void IsisInterfaceManager::send_hello(uint32_t interface_id, IsisInterfaceState&
         // Send L1 Hello
         if (if_state.config.level == IsisLevel::L1 || if_state.config.level == IsisLevel::L1_L2) {
             lan_pdu.commonHeader.pduType = L1_LAN_IIH_TYPE;
-            lan_pdu.circuitType = 0x01; // L1 only
-            if (if_state.config.level == IsisLevel::L1_L2) lan_pdu.circuitType = 0x03; // L1/L2
+            lan_pdu.circuitType = (if_state.config.level == IsisLevel::L1_L2) ? 0x03 : 0x01;
             
-            std::vector<uint8_t> serialized_pdu = serialize_lan_hello_pdu(lan_pdu); // From isis_pdu.cpp
-            send_pdu_callback_(interface_id, ALL_L1_ISS_MAC, serialized_pdu);
+            // Ensure Area TLV is present for L1/L1_L2, and other TLVs are correctly set for L1
+            // If lan_pdu.tlvs was cleared or modified for L2, rebuild for L1 if necessary.
+            // For simplicity, assume lan_pdu.tlvs is built once, then Area TLV conditionally removed for pure L2.
+            // The current logic for add_area_tlv_to_lan_l1 handles its presence.
+
+            std::vector<uint8_t> serialized_l1_pdu = serialize_lan_hello_pdu(lan_pdu);
+            send_pdu_callback_(interface_id, ALL_L1_ISS_MAC, serialized_l1_pdu);
         }
         // Send L2 Hello
         if (if_state.config.level == IsisLevel::L2 || if_state.config.level == IsisLevel::L1_L2) {
+            // Potentially re-use lan_pdu structure but modify for L2 specifics
             lan_pdu.commonHeader.pduType = L2_LAN_IIH_TYPE;
-            lan_pdu.circuitType = 0x02; // L2 only
-            if (if_state.config.level == IsisLevel::L1_L2) lan_pdu.circuitType = 0x03; // L1/L2
+            lan_pdu.circuitType = (if_state.config.level == IsisLevel::L1_L2) ? 0x03 : 0x02;
             
-            // L2 Hellos SHOULD NOT include Area Address TLV. Remove if present.
-            if (if_state.config.level == IsisLevel::L2) { // If strictly L2
-                auto it_area = std::remove_if(lan_pdu.tlvs.begin(), lan_pdu.tlvs.end(), [](const TLV& t){ return t.type == AREA_ADDRESSES_TLV_TYPE; });
-                lan_pdu.tlvs.erase(it_area, lan_pdu.tlvs.end());
+            // L2 Hellos SHOULD NOT include Area Address TLV.
+            // If it was added for L1 component of L1/L2, remove it now for L2 Hello.
+            // If strictly L2, add_area_tlv_to_lan_l1 was false, so it wasn't added.
+            if (if_state.config.level == IsisLevel::L1_L2 && add_area_tlv_to_lan_l1) { // Was L1/L2 and Area TLV was added for L1 part
+                auto it_area = std::remove_if(lan_pdu.tlvs.begin(), lan_pdu.tlvs.end(),
+                                            [](const TLV& t){ return t.type == AREA_ADDRESSES_TLV_TYPE; });
+                if (it_area != lan_pdu.tlvs.end()) lan_pdu.tlvs.erase(it_area, lan_pdu.tlvs.end());
+            } else if (if_state.config.level == IsisLevel::L2) { // Strictly L2
+                 // Ensure area_tlv is not there (it shouldn't have been added if add_area_tlv_to_lan_l1 was false)
+                auto it_area = std::remove_if(lan_pdu.tlvs.begin(), lan_pdu.tlvs.end(),
+                                            [](const TLV& t){ return t.type == AREA_ADDRESSES_TLV_TYPE; });
+                if (it_area != lan_pdu.tlvs.end()) lan_pdu.tlvs.erase(it_area, lan_pdu.tlvs.end());
             }
 
-            std::vector<uint8_t> serialized_pdu = serialize_lan_hello_pdu(lan_pdu);
-            send_pdu_callback_(interface_id, ALL_L2_ISS_MAC, serialized_pdu);
+
+            std::vector<uint8_t> serialized_l2_pdu = serialize_lan_hello_pdu(lan_pdu);
+            send_pdu_callback_(interface_id, ALL_L2_ISS_MAC, serialized_l2_pdu);
         }
 
     } else { // P2P
@@ -593,59 +686,72 @@ void IsisInterfaceManager::send_hello(uint32_t interface_id, IsisInterfaceState&
         // Circuit type for PTP IIH indicates L1/L2 capability of sender on this circuit
         if (if_state.config.level == IsisLevel::L1) ptp_pdu.circuitType = 0x01;
         else if (if_state.config.level == IsisLevel::L2) ptp_pdu.circuitType = 0x02;
-        else if (if_state.config.level == IsisLevel::L1_L2) ptp_pdu.circuitType = 0x03;
-        else ptp_pdu.circuitType = 0x00; // None
+        else if (if_state.config.level == IsisLevel::L1_L2) ptp_pdu.circuitType = 0x03; // L1 and L2 capable
+        else ptp_pdu.circuitType = 0x00; // Should not happen if ISIS is enabled
 
 
         ptp_pdu.sourceId = local_system_id_;
         ptp_pdu.holdingTime = htons(holding_time);
         ptp_pdu.localCircuitId = static_cast<uint8_t>(interface_id & 0xFF); // Example, should be unique per P2P link on system
 
-        if (ptp_pdu.circuitType == 0x01 || ptp_pdu.circuitType == 0x03) { // L1 or L1L2 PTP IIH
-             if (!area_tlv_value.areaAddresses.empty()) ptp_pdu.tlvs.push_back(area_tlv);
+        // Area Address TLV for P2P Hellos: only if L1 or L1/L2 capable (circuitType 0x01 or 0x03)
+        if ((ptp_pdu.circuitType == 0x01 || ptp_pdu.circuitType == 0x03) && area_tlv.length > 0) {
+             ptp_pdu.tlvs.push_back(area_tlv);
         }
         ptp_pdu.tlvs.push_back(protocols_tlv);
         ptp_pdu.tlvs.push_back(ip_interface_tlv);
 
-        // P2P Adjacency TLV (Type 240)
+        // P2P Adjacency State TLV (Type 240)
         TLV p2p_adj_tlv;
-        p2p_adj_tlv.type = P2P_ADJACENCY_STATE_TLV_TYPE; // Defined as 240 in RFC 5303
-        // Value: Adjacency State (1 byte), Extended Local Circuit ID (4 bytes), Neighbor SystemID (6), Neighbor Ext Local Circuit ID (4)
-        // For sending a Hello, we need to know the state of our adjacency with the potential neighbor.
-        // This is complex as we might have multiple potential neighbors on a P2P link if it's misconfigured as multipoint.
-        // Assuming only one main adjacency per P2P interface for now.
-        if (!if_state.adjacencies.empty()) {
-            const IsisAdjacency& first_adj = if_state.adjacencies.begin()->second; // Take the first one
+        p2p_adj_tlv.type = P2P_ADJACENCY_STATE_TLV_TYPE;
+        uint32_t local_elcid = htonl(interface_id); // Use interface_id for ELCID, ensure uniqueness
+
+        if (if_state.adjacencies.empty()) { // No adjacency yet
+            p2p_adj_tlv.value.push_back(0x01); // Adjacency State: Down
+            const uint8_t* elc_bytes = reinterpret_cast<const uint8_t*>(&local_elcid);
+            p2p_adj_tlv.value.insert(p2p_adj_tlv.value.end(), elc_bytes, elc_bytes + 4);
+        } else {
+            const IsisAdjacency& first_adj = if_state.adjacencies.begin()->second; // Assuming one primary adjacency for P2P
             if (first_adj.state == AdjacencyState::UP) p2p_adj_tlv.value.push_back(0x03); // Up
             else if (first_adj.state == AdjacencyState::INITIALIZING) p2p_adj_tlv.value.push_back(0x02); // Initializing
             else p2p_adj_tlv.value.push_back(0x01); // Down
             
-            // Our Extended Local Circuit ID (placeholder 1)
-            uint32_t ext_local_cid_be = htonl(1); 
-            const uint8_t* elc_bytes = reinterpret_cast<const uint8_t*>(&ext_local_cid_be);
+            const uint8_t* elc_bytes = reinterpret_cast<const uint8_t*>(&local_elcid);
             p2p_adj_tlv.value.insert(p2p_adj_tlv.value.end(), elc_bytes, elc_bytes + 4);
 
-            // Neighbor System ID and Neighbor Extended Local Circuit ID are often zero when sending initial hellos
-            // or filled if known from previous received P2P Hello with this TLV.
-            // For now, just state and our local circuit ID.
-            // This TLV should be exactly 15 bytes if fully populated, or 5 if only state + local C ID.
-            // RFC 5303: Length is variable. If neighbor unknown, only local info.
-            // Let's send only state and our Local Circuit ID.
-            p2p_adj_tlv.length = static_cast<uint8_t>(p2p_adj_tlv.value.size());
-             if (p2p_adj_tlv.length > 0) ptp_pdu.tlvs.push_back(p2p_adj_tlv);
+            if ((first_adj.state == AdjacencyState::INITIALIZING || first_adj.state == AdjacencyState::UP) && first_adj.neighbor_elcid_known) {
+                p2p_adj_tlv.value.insert(p2p_adj_tlv.value.end(), first_adj.neighbor_system_id.begin(), first_adj.neighbor_system_id.end());
+                uint32_t neighbor_elcid_net = htonl(first_adj.neighbor_extended_local_circuit_id);
+                const uint8_t* neighbor_elc_bytes = reinterpret_cast<const uint8_t*>(&neighbor_elcid_net);
+                p2p_adj_tlv.value.insert(p2p_adj_tlv.value.end(), neighbor_elc_bytes, neighbor_elc_bytes + 4);
+            }
         }
+        p2p_adj_tlv.length = static_cast<uint8_t>(p2p_adj_tlv.value.size());
+        if (p2p_adj_tlv.length > 0) ptp_pdu.tlvs.push_back(p2p_adj_tlv);
         
-        std::vector<uint8_t> serialized_pdu = serialize_point_to_point_hello_pdu(ptp_pdu); // From isis_pdu.cpp
+        std::vector<uint8_t> serialized_pdu = serialize_point_to_point_hello_pdu(ptp_pdu);
         
-        // Determine destination MAC for P2P. Could be specific learned MAC or multicast.
-        // Standard P2P often uses AllL1ISs/AllL2ISs/AllISs MACs depending on physical layer.
-        // Ethernet P2P links might use unicast MAC of neighbor if known, or multicast.
-        MacAddress dest_mac = if_state.config.p2p_destination_mac; // Use configured one
-        if (if_state.config.level == IsisLevel::L1) dest_mac = ALL_L1_ISS_MAC;
-        else if (if_state.config.level == IsisLevel::L2) dest_mac = ALL_L2_ISS_MAC;
-        else if (if_state.config.level == IsisLevel::L1_L2) dest_mac = ALL_L1_ISS_MAC; // Or send two hellos, one to L1 MAC, one to L2 MAC.
-                                                                                    // For now, just one to L1 MAC.
-        
+        MacAddress dest_mac;
+        bool p2p_dest_mac_is_unicast = !if_state.config.p2p_destination_mac.is_zero() &&
+                                       !(if_state.config.p2p_destination_mac.octets[0] & 0x01); // Basic multicast check
+
+        if (p2p_dest_mac_is_unicast) {
+            dest_mac = if_state.config.p2p_destination_mac;
+        } else {
+            if (if_state.config.level == IsisLevel::L1) dest_mac = ALL_L1_ISS_MAC;
+            else if (if_state.config.level == IsisLevel::L2) dest_mac = ALL_L2_ISS_MAC;
+            else if (if_state.config.level == IsisLevel::L1_L2) {
+                 // For L1/L2 P2P, send PTP IIH with circuitType 0x03 (L1/L2 capable)
+                 // Standard practice is to send to AllL1ISs or AllP2PISs.
+                 // Sending two separate Hellos (one L1, one L2) is also an option but more complex.
+                 // Here, we send one L1/L2 PTP IIH. Choosing ALL_L1_ISS_MAC or ALL_L2_ISS_MAC.
+                 // Or a generic AllP2PISs if available. For now, stick to L1/L2 specific.
+                 dest_mac = ALL_L1_ISS_MAC; // Or ALL_L2_ISS_MAC, or alternate based on actual PDU content level if sending two.
+                                          // Since ptp_pdu.circuitType is 0x03, it's an L1/L2 Hello.
+            } else {
+                 dest_mac = ALL_L1_ISS_MAC; // Fallback, though circuitType would be 0x00 (None)
+            }
+        }
         send_pdu_callback_(interface_id, dest_mac, serialized_pdu);
     }
 }
@@ -731,7 +837,7 @@ void IsisInterfaceManager::perform_dis_election(uint32_t interface_id, IsisInter
     // Update current_dis_lan_id (SystemID of DIS + Pseudonode ID)
     // Pseudonode ID is chosen by the DIS. Often 1, or interface index.
     // For simplicity, if we are DIS, use pseudonode 1.
-    // If another is DIS, we learn their pseudonode ID from their Hellos (adj.lan_id).
+    // If another is DIS, we learn their pseudonode ID from their Hellos (adj.neighbor_learned_lan_id).
     std::fill(if_state.current_dis_lan_id.begin(), if_state.current_dis_lan_id.end(), 0);
     std::copy(elected_dis_system_id.begin(), elected_dis_system_id.end(), if_state.current_dis_lan_id.begin());
 
@@ -742,8 +848,22 @@ void IsisInterfaceManager::perform_dis_election(uint32_t interface_id, IsisInter
     } else {
         // Find the adjacency for the elected DIS to get their pseudonode ID
         auto dis_adj_it = if_state.adjacencies.find(elected_dis_system_id);
-        if (dis_adj_it != if_state.adjacencies.end() && dis_adj_it->second.lan_id.has_value()) {
-            if_state.current_dis_lan_id[6] = dis_adj_it->second.lan_id.value()[6]; // Use pseudonode from DIS's Hello
+        if (dis_adj_it != if_state.adjacencies.end() && dis_adj_it->second.neighbor_learned_lan_id.has_value()) {
+            // Ensure the learned LAN ID's SystemID part matches the elected_dis_system_id
+            bool learned_lan_id_matches_dis = true;
+            for(size_t i=0; i<6; ++i) {
+                if (dis_adj_it->second.neighbor_learned_lan_id.value()[i] != elected_dis_system_id[i]) {
+                    learned_lan_id_matches_dis = false;
+                    break;
+                }
+            }
+            if (learned_lan_id_matches_dis) {
+                 if_state.current_dis_lan_id[6] = dis_adj_it->second.neighbor_learned_lan_id.value()[6]; // Use pseudonode from DIS's Hello
+            } else {
+                 // This case should ideally not happen if data is consistent.
+                 // DIS's Hello should have its own SystemID in the LAN ID.
+                 if_state.current_dis_lan_id[6] = 0; // Mismatch, treat pseudonode as unknown
+            }
         } else {
             if_state.current_dis_lan_id[6] = 0; // Unknown pseudonode ID if DIS not adjacent or LAN ID not in Hello
         }
@@ -752,7 +872,10 @@ void IsisInterfaceManager::perform_dis_election(uint32_t interface_id, IsisInter
     
     if (old_dis_status != if_state.is_dis) {
         // std::cout << "DIS status changed on interface " << interface_id << ". New DIS: " << (if_state.is_dis ? "self" : system_id_to_string(elected_dis_system_id)) << std::endl;
-        // This change would typically trigger LSP regeneration by the main ISIS process.
+        // TODO: Signal DIS status change to the main IS-IS Manager.
+        // This is important because a change in DIS status (gaining or losing DIS role)
+        // requires the router to regenerate its own LSPs to add/remove pseudonode TLVs
+        // and potentially adjust adjacencies advertised.
     }
 }
 
@@ -860,3 +983,38 @@ bool IsisInterfaceManager::check_p2p_adjacency_three_way_state(const PointToPoin
 // Note: parse_area_addresses_tlv_value and parse_is_neighbors_tlv_value are assumed to be
 // available from isis_pdu.cpp or a similar PDU parsing utility library.
 // For this implementation, small local parsers or direct byte access is used.
+
+std::optional<MacAddress> IsisInterfaceManager::get_dis_mac_address(uint32_t interface_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto if_state_it = interface_states_.find(interface_id);
+    if (if_state_it == interface_states_.end() || if_state_it->second.config.circuit_type != CircuitType::BROADCAST) {
+        return std::nullopt; // Not a broadcast interface or not configured
+    }
+
+    const IsisInterfaceState& if_state = if_state_it->second;
+    if (if_state.is_dis) { // If we are DIS, this query might be for "the DIS", which is self.
+                           // For the purpose of a non-DIS sending to the DIS, this means no external DIS MAC.
+        return std::nullopt;
+    }
+
+    SystemID dis_system_id;
+    bool dis_known = false;
+    // Check if the SystemID part of current_dis_lan_id (which is 7 bytes from SystemID+PseudonodeID) is non-zero
+    // current_dis_lan_id is std::array<uint8_t, 7> as per IsisInterfaceState definition in the .hpp
+    for(size_t i=0; i < 6; ++i) {
+        if(if_state.current_dis_lan_id[i] != 0) {
+            dis_known = true;
+            break;
+        }
+    }
+    if (!dis_known) return std::nullopt; // DIS not known or LAN ID SystemID part is all zeros
+
+    std::copy(if_state.current_dis_lan_id.begin(), if_state.current_dis_lan_id.begin() + 6, dis_system_id.begin());
+
+    auto adj_it = if_state.adjacencies.find(dis_system_id);
+    if (adj_it != if_state.adjacencies.end()) {
+        return adj_it->second.neighbor_mac_address; // MAC address of the DIS adjacency
+    }
+
+    return std::nullopt; // DIS system ID known but no corresponding adjacency found (e.g. DIS is not adjacent or recently changed)
+}

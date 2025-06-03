@@ -40,6 +40,14 @@ enum class AdjacencyState {
     UP            // Adjacency established (e.g. 2-way for LAN, or P2P up)
 };
 
+// Enum for state reported by neighbor in P2P Adjacency TLV
+enum class AdjacencyStateReportedByNeighbor {
+    UNKNOWN,
+    DOWN_NEIGHBOR,
+    INITIALIZING_NEIGHBOR,
+    UP_NEIGHBOR
+};
+
 struct IsisInterfaceConfig {
     uint32_t interface_id = 0;
     bool isis_enabled = false;
@@ -69,6 +77,10 @@ struct IsisAdjacency {
     uint8_t neighbor_priority = 0; // If LAN adjacency
     std::optional<IpAddress> neighbor_ip_address{}; // From IP Interface Address TLV in Hello
     bool three_way_match = false; // For P2P, indicates a three-way state match
+    // Fields for P2P Adjacency State TLV (Type 240)
+    uint32_t neighbor_extended_local_circuit_id = 0; // Neighbor's ELCID, learned from their Hello
+    bool neighbor_elcid_known = false;               // Flag indicating if neighbor's ELCID has been learned
+    AdjacencyStateReportedByNeighbor reported_state_by_neighbor = AdjacencyStateReportedByNeighbor::UNKNOWN; // State of our adj as reported by neighbor in their P2P Hello TLV
 };
 
 struct IsisInterfaceState {
@@ -122,6 +134,7 @@ public:
     bool is_interface_up_and_isis_enabled(uint32_t interface_id) const;
     bool is_elected_dis(uint32_t interface_id) const;
     std::optional<std::array<uint8_t, 7>> get_lan_id(uint32_t interface_id) const;
+    std::optional<MacAddress> get_dis_mac_address(uint32_t interface_id) const;
 
 
 private:
