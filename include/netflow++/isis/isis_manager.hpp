@@ -71,7 +71,7 @@ public:
 
 private:
     void periodic_tasks_loop();
-    LinkStatePdu generate_lsp(IsisLevel level, uint8_t lsp_number = 0);
+    Lsp generate_lsp(IsisLevel level, uint8_t lsp_number = 0); // Changed LinkStatePdu to Lsp
     void on_adjacency_change(const IsisAdjacency& adj, bool is_up);
     
     // Callback wrapper for IsisInterfaceManager and IsisLsdb

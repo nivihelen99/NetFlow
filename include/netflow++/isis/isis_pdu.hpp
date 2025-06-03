@@ -1,153 +1,187 @@
 #ifndef NETFLOW_ISIS_PDU_HPP
 #define NETFLOW_ISIS_PDU_HPP
 
-#include "isis_common.hpp"
-#include <vector>
-#include <cstdint>
+#include "isis_common.hpp" // Provides SystemID, Tlv, std::array, etc.
+#include <vector>          // For std::vector
+#include <cstdint>         // For uint8_t, uint16_t, uint32_t
+#include <string>          // For std::string (e.g. LspId::to_string)
+#include <numeric>         // For std::accumulate (if used for checksums)
+#include <algorithm>       // For std::copy (if used)
+// <array> is included by isis_common.hpp
 
 namespace netflow {
 namespace isis {
 
 // --- TLV Value Structures ---
 
-// Value for Area Addresses TLV (Type 1)
 struct AreaAddressesTlvValue {
-    std::vector<AreaAddress> areaAddresses;
+    std::vector<AreaAddress> area_addresses;
 };
 
-// Value for IS Neighbors TLV (Type 6 for PTP IIH, Type 2 for LAN IIH)
-// This TLV simply contains a list of SystemIDs of neighbors.
-// For LAN IIH (Type 2), it's a list of 6-byte MAC addresses.
-// For PTP IIH (Type 6), it's a list of 6-byte SystemIDs.
-// We'll use a generic structure here.
 struct IsNeighborsTlvValue {
-    std::vector<std::array<uint8_t, 6>> neighbors; // Could be MACs or SystemIDs
+    std::vector<SystemID> neighbor_system_ids;
 };
 
-// Structure for an IP address (prefix) and metric for TLVs 128 and 135
-struct IpReachabilityInfo {
-    uint32_t ipAddress; // IP Address
-    uint32_t subnetMask; // Subnet Mask for TLV 128, Prefix Length for TLV 135
-    uint32_t metric;
-    // TLV 128 has: Default Metric (1 byte), Delay Metric (1 byte), Expense Metric (1 byte), Error Metric (1 byte)
-    // We'll simplify to a single metric for now, or use a more complex structure if needed.
-    // For TLV 135, the metric is 4 bytes.
+struct IpInternalReachabilityEntry {
+    uint8_t default_metric;
+    uint32_t ip_address;
+    uint32_t ip_mask;
+
+    IpInternalReachabilityEntry() : default_metric(0), ip_address(0), ip_mask(0) {}
 };
 
-// Value for IP Internal Reachability TLV (Type 128)
 struct IpInternalReachTlvValue {
-    std::vector<IpReachabilityInfo> reachabilityEntries;
+    std::vector<IpInternalReachabilityEntry> entries;
 };
 
-// Value for Extended IP Reachability TLV (Type 135)
+struct ExtendedIpReachabilityEntry {
+    uint32_t metric;
+    uint8_t prefix_length;
+    std::vector<uint8_t> prefix;
+    std::vector<Tlv> sub_tlvs;
+
+    ExtendedIpReachabilityEntry() : metric(0), prefix_length(0) {}
+};
+
 struct ExtendedIpReachabilityTlvValue {
-    std::vector<IpReachabilityInfo> reachabilityEntries;
-    // This TLV can also contain sub-TLVs for more detailed information.
-    // std::vector<TLV> subTlvs; // Optional: for future extension
+    std::vector<ExtendedIpReachabilityEntry> entries;
+};
+
+struct ExtendedIsReachabilityNeighbor {
+    SystemID neighbor_id;
+    uint32_t metric;
+    std::vector<Tlv> sub_tlvs;
+};
+
+struct ExtendedIsReachabilityTlvValue {
+    std::vector<ExtendedIsReachabilityNeighbor> neighbors;
+};
+
+// Information for a single multicast group (and optional source)
+// Potentially part of a Multicast Group Membership TLV value
+struct MulticastGroupAddressInfo {
+    IpAddress group_address{}; // Multicast group address (e.g., 224.x.x.x - 239.x.x.x)
+                               // IpAddress is typically uint32_t from packet.hpp via isis_common.hpp
+    IpAddress source_address{}; // Source address for (S,G) or 0.0.0.0 for (*,G)
+
+    // Default constructor is fine.
+    // Add comparison operators if it's used as a key in maps or in sets directly.
+    bool operator==(const MulticastGroupAddressInfo& other) const {
+        return group_address == other.group_address && source_address == other.source_address;
+    }
+    bool operator<(const MulticastGroupAddressInfo& other) const {
+        if (group_address < other.group_address) return true;
+        if (other.group_address < group_address) return false;
+        return source_address < other.source_address;
+    }
 };
 
 
 // --- PDU Structures ---
 
-// LAN Hello PDU (Level 1 and Level 2)
 struct LanHelloPdu {
-    CommonPduHeader commonHeader;
-    uint8_t circuitType; // Level 1 or Level 2
-    SystemID sourceId;   // SystemID of the sending IS
-    uint16_t holdingTime;
-    // PDU Length is in commonHeader.lengthIndicator
+    uint8_t circuit_type;
+    SystemID source_id;
+    uint16_t holding_time;
+    uint16_t pdu_length;
     uint8_t priority;
-    std::array<uint8_t, 7> lanId; // SystemID (6 bytes) + Pseudonode ID (1 byte)
-    std::vector<TLV> tlvs;
-};
+    std::array<uint8_t, SYSTEM_ID_LENGTH + 1> lan_id;
+    std::vector<Tlv> tlvs;
 
-// Point-to-Point Hello PDU
-struct PointToPointHelloPdu {
-    CommonPduHeader commonHeader;
-    uint8_t circuitType; // Always 0x03 for PTP? Check standard. Usually indicates L1/L2 capability.
-    SystemID sourceId;
-    uint16_t holdingTime;
-    // PDU Length is in commonHeader.lengthIndicator
-    uint8_t localCircuitId;
-    std::vector<TLV> tlvs;
-};
-
-// LSP ID structure
-struct LspId {
-    SystemID systemId;
-    uint8_t pseudonodeIdOrLspNumber; // Pseudonode ID for L1/L2, LSP number for PTP
-};
-
-// Link State PDU (LSP)
-struct LinkStatePdu {
-    CommonPduHeader commonHeader; // pduType will be L1_LSP_TYPE or L2_LSP_TYPE
-    // PDU Length is in commonHeader.lengthIndicator, but LSP itself has a length field too.
-    uint16_t pduLengthLsp; // Length of the LSP itself, starting from Remaining Lifetime
-    uint16_t remainingLifetime;
-    LspId lspId;
-    uint32_t sequenceNumber;
-    uint16_t checksum;
-    uint8_t pAttOlIsTypeBits; // P (Partition Repair), ATT (Attached), OL (Overload), IS Type (L1/L2)
-    std::vector<TLV> tlvs;
-};
-
-// LSP Entry structure (for CSNP and PSNP)
-struct LspEntry {
-    uint16_t lifetime;
-    LspId lspId;
-    uint32_t sequenceNumber;
-    uint16_t checksum;
-};
-
-// Complete Sequence Numbers PDU (CSNP)
-struct CompleteSequenceNumbersPdu {
-    CommonPduHeader commonHeader; // pduType will be L1_CSNP_TYPE or L2_CSNP_TYPE
-    // PDU Length is in commonHeader.lengthIndicator
-    SystemID sourceId; // SystemID + CircuitID (0 for non-broadcast)
-    LspId startLspId;
-    LspId endLspId;
-    std::vector<TLV> tlvs; // Standard CSNPs use TLV type 9 (conceptually) for LSP Entries
-                           // However, modern implementations might just list LspEntry structures directly
-                           // or use other TLVs. For now, using TLVs is more flexible.
-                           // If LSP entries are directly included, the structure would be:
-                           // std::vector<LspEntry> lspEntries;
-};
-
-// Partial Sequence Numbers PDU (PSNP)
-struct PartialSequenceNumbersPdu {
-    CommonPduHeader commonHeader; // pduType will be L1_PSNP_TYPE or L2_PSNP_TYPE
-    // PDU Length is in commonHeader.lengthIndicator
-    SystemID sourceId; // SystemID + CircuitID (0 for non-broadcast)
-    std::vector<TLV> tlvs; // Similar to CSNP, TLV type 9 (conceptually) or direct entries.
-                           // std::vector<LspEntry> lspEntries;
-};
-
-
-// --- Multicast TLV Value Structures ---
-
-// Value for Multicast Capability TLV (Type 230 as per isis_common.hpp example)
-// For now, its presence indicates capability. Could have flags for specific features.
-struct MulticastCapabilityTlvValue {
-    // bool supports_source_specific_trees; // Example future extension
-    // For this subtask, an empty struct is sufficient.
-    // The TLV itself will have type=MULTICAST_CAPABILITY_TLV_TYPE and length=0.
-};
-
-// Information for a single multicast group (and optional source)
-struct MulticastGroupAddressInfo {
-    IpAddress group_address{}; // Multicast group address (e.g., 224.x.x.x - 239.x.x.x)
-    IpAddress source_address{}; // Source address for (S,G) or 0.0.0.0 for (*,G)
-
-    bool operator==(const MulticastGroupAddressInfo& other) const {
-        return group_address == other.group_address && source_address == other.source_address;
+    LanHelloPdu() : circuit_type(0), holding_time(0), pdu_length(0), priority(64) {
+        source_id.fill(0);
+        lan_id.fill(0);
     }
 };
 
-// Value for Multicast Group Membership TLV (Type 231 as per isis_common.hpp example)
-struct MulticastGroupMembershipTlvValue {
-    std::vector<MulticastGroupAddressInfo> groups{};
+struct PtpHelloPdu {
+    uint8_t circuit_type;
+    SystemID source_id;
+    uint16_t holding_time;
+    uint16_t pdu_length;
+    uint8_t local_circuit_id;
+    std::vector<Tlv> tlvs;
+
+    PtpHelloPdu() : circuit_type(0), holding_time(0), pdu_length(0), local_circuit_id(0) {
+        source_id.fill(0);
+    }
 };
 
+struct LspId {
+    SystemID system_id;
+    uint8_t pseudonode_id;
+    uint8_t lsp_number;
+
+    LspId() : pseudonode_id(0), lsp_number(0) {
+        system_id.fill(0);
+    }
+
+    bool operator<(const LspId& other) const {
+        if (system_id < other.system_id) return true;
+        if (other.system_id < system_id) return false;
+        if (pseudonode_id < other.pseudonode_id) return true;
+        if (other.pseudonode_id < pseudonode_id) return false;
+        return lsp_number < other.lsp_number;
+    }
+
+    bool operator==(const LspId& other) const {
+        return system_id == other.system_id &&
+               pseudonode_id == other.pseudonode_id &&
+               lsp_number == other.lsp_number;
+    }
+    // std::string to_string() const; // Example: Implement in .cpp
+};
+
+struct Lsp {
+    uint16_t pdu_length;
+    uint16_t remaining_lifetime;
+    LspId lsp_id;
+    uint32_t sequence_number;
+    uint16_t checksum;
+    uint8_t p_bit : 1;
+    uint8_t att_bits : 4;
+    uint8_t ol_bit : 1;
+    uint8_t is_type : 2;
+    std::vector<Tlv> tlvs;
+
+    Lsp() :
+        pdu_length(0), remaining_lifetime(0), /* lsp_id default constructed */
+        sequence_number(0), checksum(0),
+        p_bit(0), att_bits(0), ol_bit(0), is_type(0) {}
+};
+
+struct LspEntry {
+    uint16_t remaining_lifetime;
+    LspId lsp_id;
+    uint32_t sequence_number;
+    uint16_t checksum;
+
+    LspEntry() : remaining_lifetime(0), /* lsp_id default constructed */ sequence_number(0), checksum(0) {}
+};
+
+struct CsnPdu {
+    uint16_t pdu_length;
+    SystemID source_id;
+    LspId start_lsp_id;
+    LspId end_lsp_id;
+    std::vector<LspEntry> lsp_entries;
+    std::vector<Tlv> tlvs;
+
+    CsnPdu() : pdu_length(0) {
+        source_id.fill(0);
+    }
+};
+
+struct PsnPdu {
+    uint16_t pdu_length;
+    SystemID source_id;
+    std::vector<LspEntry> lsp_entries;
+    std::vector<Tlv> tlvs;
+
+    PsnPdu() : pdu_length(0) {
+        source_id.fill(0);
+    }
+};
 
 } // namespace isis
 } // namespace netflow

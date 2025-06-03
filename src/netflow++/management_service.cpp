@@ -1,95 +1,62 @@
 #include "netflow++/management_service.hpp"
-#include "netflow++/interface_manager.hpp"
-#include "netflow++/vlan_manager.hpp"
-#include "netflow++/forwarding_database.hpp"
-#include "netflow++/stp_manager.hpp"
-#include "netflow++/lacp_manager.hpp"
-#include "netflow++/qos_manager.hpp"
-#include "netflow++/acl_manager.hpp"
-#include "netflow++/isis/isis_manager.hpp" // For IsisManager
-#include "netflow++/isis/isis_common.hpp"  // For IsisLevel, SystemID, AreaAddress types
-#include "netflow++/isis/isis_pdu.hpp"     // For LspId for show commands (potentially)
-#include "netflow++/packet.hpp"
-#include "netflow++/utils.hpp" // Added for safe_stoul, safe_stoi, parse_vlan_list, to_hex_string
-#include <sstream>
-#include <vector>
-#include <string>
-#include <iomanip>
-#include <arpa/inet.h>
-#include <algorithm>
-#include <map>
-#include <set>
-#include <cstdio>
-#include <functional>
+#include "netflow++/interface_manager.hpp" // Included for types like InterfaceManager::PortConfig, netflow::AclDirection
+#include "netflow++/vlan_manager.hpp"      // Included for VlanManager type
+#include "netflow++/forwarding_database.hpp" // Included for ForwardingDatabase type
+#include "netflow++/stp_manager.hpp"       // Included for StpManager type
+#include "netflow++/lacp_manager.hpp"      // Included for LacpManager and related types
+#include "netflow++/qos_manager.hpp"       // Included for QosManager type, SchedulerType
+#include "netflow++/acl_manager.hpp"       // Included for AclManager, AclRule, AclActionType
+#include "netflow++/isis/isis_manager.hpp" // For netflow::isis::IsisManager
+#include "netflow++/isis/isis_common.hpp"  // For netflow::isis::IsisLevel, SystemID, AreaAddress, SYSTEM_ID_LENGTH
+#include "netflow++/isis/isis_pdu.hpp"     // For PDU types if needed by CLI show commands
+#include "netflow++/packet.hpp"            // For IpAddress, MacAddress
+#include "netflow++/utils.hpp"             // For utility functions
 
+#include <sstream>    // For std::ostringstream, std::istringstream
+#include <vector>     // For std::vector
+#include <string>     // For std::string, std::to_string
+#include <iomanip>    // For std::hex, std::setfill, std::setw
+#include <arpa/inet.h> // For inet_pton, inet_ntoa (used in helpers)
+#include <algorithm>  // For std::transform, std::find_if etc. (general utility)
+#include <map>        // For std::map (general utility)
+#include <set>        // For std::set (used in vlan list parsing helper)
+#include <cstdio>     // For sscanf (used in string_to_mac helper)
+#include <functional> // For std::function (though ManagementInterface handles this)
+#include <stdexcept>  // For std::exception in stoul/stoi try-catch blocks
+
+// Anonymous namespace for local helper functions
 namespace {
-// ... (helpers: string_to_ip_net_order, parse_vlan_id, etc. - unchanged)
-bool string_to_ip_net_order(const std::string& ip_str, netflow::IpAddress& out_ip) {
-    struct in_addr addr;
-    if (inet_pton(AF_INET, ip_str.c_str(), &addr) == 1) {
-        out_ip = addr.s_addr;
-        return true;
-    }
-    return false;
-}
-bool parse_vlan_id(const std::string& s, uint16_t& vlan_id) { try { unsigned long val = std::stoul(s); if (val >=1 && val <= 4094) { vlan_id = static_cast<uint16_t>(val); return true; } } catch(...) {} return false;}
-bool parse_vlan_list(const std::string& s, std::set<uint16_t>& vlan_set) { /* ... */ return true; }
-static bool string_to_mac(const std::string& mac_str, netflow::MacAddress& out_mac) {
+
+// string_to_mac helper used by some CLI commands if needed
+static bool string_to_mac_local(const std::string& mac_str, netflow::MacAddress& out_mac) {
     if (mac_str.length() != 17) return false;
     unsigned int bytes[6];
-    if (sscanf(mac_str.c_str(), "%2x:%2x:%2x:%2x:%2x:%2x",
+    if (sscanf(mac_str.c_str(), "%02x:%02x:%02x:%02x:%02x:%02x",
                &bytes[0], &bytes[1], &bytes[2], &bytes[3], &bytes[4], &bytes[5]) == 6) {
         for (int i = 0; i < 6; ++i) {
+            if (bytes[i] > 0xFF) return false;
             out_mac.bytes[i] = static_cast<uint8_t>(bytes[i]);
         }
         return true;
     }
     return false;
- }
-std::string uint64_mac_to_string(uint64_t mac_val) { /* ... */ return ""; }
-std::string macaddr_to_string(const netflow::MacAddress& mac) {
+}
+
+// macaddr_to_string helper used by some CLI commands
+std::string macaddr_to_string_local(const netflow::MacAddress& mac) {
     std::ostringstream oss;
     oss << std::hex << std::setfill('0');
-    for(int i=0; i<6; ++i) {
+    for (int i = 0; i < 6; ++i) {
         oss << std::setw(2) << static_cast<int>(mac.bytes[i]);
-        if (i<5) oss << ":";
+        if (i < 5) oss << ":";
     }
     return oss.str();
 }
-static std::string format_lacp_state_flags(uint8_t state_byte) { /* ... */ return ""; }
-std::string lacp_mux_state_to_string(netflow::LacpPortInfo::MuxMachineState state) { /* ... */ return ""; }
-std::string lacp_rx_state_to_string(netflow::LacpPortInfo::RxMachineState state) { /* ... */ return ""; }
-} // namespace
-
-namespace netflow {
-
-static std::string ip_to_string_util_net_order(netflow::IpAddress net_ip_addr) {
-    struct in_addr addr;
-    addr.s_addr = net_ip_addr;
-    return inet_ntoa(addr);
-}
-static std::string format_lldp_neighbors(const std::vector<LldpNeighborInfo>& neighbors, bool detail) { /* ... */ return ""; }
-static std::string format_lldp_interface_config(uint32_t port_id, const LldpPortConfig& config) { /* ... */ return ""; }
-
-
-ManagementService::ManagementService(SwitchLogger& logger,
-                                     RoutingManager& rm, InterfaceManager& im, ManagementInterface& mi,
-                                     netflow::VlanManager& vm, netflow::ForwardingDatabase& fdbm, // These should be netflow:: not netflow::netflow
-                                     netflow::StpManager& stpm, netflow::LacpManager& lacpm,
-                                     netflow::LldpManager& lldpm, netflow::QosManager& qos_m,
-                                     netflow::AclManager& acl_m, netflow::isis::IsisManager& isis_m) // Corrected for IsisManager too
-    : logger_(logger),
-      routing_manager_(rm), interface_manager_(im), management_interface_(mi),
-      vlan_manager_(vm), fdb_manager_(fdbm), stp_manager_(stpm), lacp_manager_(lacpm),
-      lldp_manager_(lldpm), qos_manager_(qos_m), acl_manager_(acl_m), 
-      isis_manager_(isis_m) { 
-}
 
 // Helper function to parse SystemID (e.g., aaaa.bbbb.cccc)
-// Moved from previous attempt as it's needed here.
-static std::optional<isis::SystemID> parse_system_id_cli(const std::string& s) {
-    isis::SystemID sys_id;
-    std::fill(sys_id.begin(), sys_id.end(), 0); // Initialize
+static std::optional<netflow::isis::SystemID> parse_system_id_cli(const std::string& s) {
+    netflow::isis::SystemID sys_id;
+    std::fill(sys_id.begin(), sys_id.end(), 0);
     std::vector<std::string> parts;
     std::stringstream ss_parser(s);
     std::string part;
@@ -101,36 +68,32 @@ static std::optional<isis::SystemID> parse_system_id_cli(const std::string& s) {
     std::vector<uint8_t> bytes;
     for (const std::string& p_str : parts) {
         if (p_str.length() != 4) return std::nullopt;
-        for (size_t i = 0; i < p_str.length(); i += 2) {
+        for (std::size_t i = 0; i < p_str.length(); i += 2) {
             std::string byte_str = p_str.substr(i, 2);
-            auto byte_val_opt = netflow::utils::safe_stoul("0x" + byte_str); // safe_stoul handles hex with 0x
+            auto byte_val_opt = netflow::utils::safe_stoul("0x" + byte_str);
             if (!byte_val_opt || *byte_val_opt > 255) return std::nullopt;
             bytes.push_back(static_cast<uint8_t>(*byte_val_opt));
         }
     }
-    if (bytes.size() != 6) return std::nullopt;
+    if (bytes.size() != netflow::isis::SYSTEM_ID_LENGTH) return std::nullopt;
     std::copy(bytes.begin(), bytes.end(), sys_id.begin());
     return sys_id;
 }
 
 // Helper function to parse AreaAddress (e.g., 49.0001.0002)
-static std::optional<isis::AreaAddress> parse_area_address_cli(const std::string& s) {
-    isis::AreaAddress area_addr_bytes;
+static std::optional<netflow::isis::AreaAddress> parse_area_address_cli(const std::string& s) {
+    netflow::isis::AreaAddress area_addr_bytes;
     std::vector<std::string> parts;
     std::stringstream ss_parser(s);
     std::string part;
-    // Allow parts to be separated by '.' or just be a continuous hex string
+    
     if (s.find('.') != std::string::npos) {
         while(std::getline(ss_parser, part, '.')) {
             parts.push_back(part);
         }
     } else {
-        // Handle continuous hex string like "490001" or "4900010002"
-        // AFI is 1 byte, rest is area ID. Max total 1+NET(max 10) = 11 bytes for address family + NET
-        // Or up to 13 bytes for full NSAP.
-        // For simplicity, assume it's a sequence of hex octets.
-        if (s.length() % 2 != 0 || s.empty() || s.length() > 26) return std::nullopt; // Max 13 bytes = 26 hex chars
-        for (size_t i = 0; i < s.length(); i += 2) {
+        if (s.length() % 2 != 0 || s.empty() || s.length() > 40) return std::nullopt; // Max 20 bytes = 40 hex
+        for (std::size_t i = 0; i < s.length(); i += 2) {
             parts.push_back(s.substr(i,2));
         }
     }
@@ -139,256 +102,465 @@ static std::optional<isis::AreaAddress> parse_area_address_cli(const std::string
 
     for (const std::string& p_str : parts) {
         // If original string had no dots, p_str are 2-char hex strings.
-        // If original had dots, p_str can be longer, e.g. "0001".
-        if (p_str.length() % 2 != 0 && p_str.length() > 2) return std::nullopt; // like "001" for a part
+        // If original had dots, p_str can be longer, e.g. "0001". Ensure these are even length.
+        if (p_str.length() % 2 != 0 ) return std::nullopt; 
         
-        for (size_t i = 0; i < p_str.length(); i += 2) {
+        for (std::size_t i = 0; i < p_str.length(); i += 2) {
             std::string byte_str = p_str.substr(i, 2);
             auto byte_val_opt = netflow::utils::safe_stoul("0x" + byte_str);
             if (!byte_val_opt || *byte_val_opt > 255) return std::nullopt;
             area_addr_bytes.push_back(static_cast<uint8_t>(*byte_val_opt));
         }
     }
-    if (area_addr_bytes.empty() || area_addr_bytes.size() > 13) return std::nullopt;
+    // Max AreaAddress size check (e.g. up to 20 for NSAP like)
+    if (area_addr_bytes.empty() || area_addr_bytes.size() > 20) return std::nullopt; 
     return area_addr_bytes;
 }
 
-
-std::string ManagementService::handle_interface_qos_command(uint32_t port_id, const std::vector<std::string>& qos_args) {
-    // ... (condensed, as before)
-    return "QoS for interface " + std::to_string(port_id) + " processed.";
-}
-std::string ManagementService::handle_show_qos_command(const std::vector<std::string>& args) {
-    // ... (condensed, as before)
-    return "Show QoS output.";
-}
-std::string ManagementService::handle_clear_qos_command(const std::vector<std::string>& args) {
-    // ... (condensed, as before)
-    return "Clear QoS stats processed.";
+static std::string system_id_to_cli_string(const netflow::isis::SystemID& sys_id) {
+    // Format as XXXX.XXXX.XXXX
+    std::string temp = netflow::utils::to_hex_string(sys_id, '\0');
+    if (temp.length() == 12) { 
+        return temp.substr(0,4) + "." + temp.substr(4,4) + "." + temp.substr(8,4);
+    }
+    return temp; 
 }
 
-std::string ManagementService::handle_acl_command(const std::vector<std::string>& args) {
-    // ... (implementation from previous step, condensed for brevity)
-    return "ACL command processed.";
+static std::string area_address_to_cli_string(const netflow::isis::AreaAddress& area) {
+    // Format as XX.XXXX.XXXX...
+    if (area.empty()) return "";
+    std::string result = netflow::utils::to_hex_string({area[0]}, '\0');
+    if (area.size() > 1) {
+        for (std::size_t i = 1; i < area.size(); ++i) {
+            if ((i-1) % 2 == 0) result += ".";
+            char buf[3];
+            sprintf(buf, "%02x", area[i]);
+            result += buf;
+        }
+    }
+    return result;
 }
 
-std::string ManagementService::format_acl_rules_output(const std::string& acl_name_filter, std::optional<uint32_t> rule_id_filter) {
-    // ... (implementation from previous step, condensed for brevity)
-    return "ACL rules output.";
+} // namespace
+
+namespace netflow {
+
+// Constructor definition
+ManagementService::ManagementService(SwitchLogger& logger,
+                                     RoutingManager& rm, 
+                                     InterfaceManager& im, 
+                                     ManagementInterface& mi,
+                                     netflow::VlanManager& vm, 
+                                     netflow::ForwardingDatabase& fdbm,
+                                     netflow::StpManager& stpm, 
+                                     netflow::LacpManager& lacpm,
+                                     netflow::LldpManager& lldpm, 
+                                     netflow::QosManager& qos_m,
+                                     netflow::AclManager& acl_m, 
+                                     netflow::isis::IsisManager& isis_m)
+    : logger_(logger),
+      routing_manager_(rm), 
+      interface_manager_(im), 
+      management_interface_(mi),
+      vlan_manager_(vm), 
+      fdb_manager_(fdbm), 
+      stp_manager_(stpm), 
+      lacp_manager_(lacpm),
+      lldp_manager_(lldpm), 
+      qos_manager_(qos_m), 
+      acl_manager_(acl_m),
+      isis_manager_(isis_m) {
 }
 
-// --- IS-IS Handler Method Implementations ---
-// (These handlers were added in the previous step and are assumed to be correct)
-std::string ManagementService::handle_isis_global_system_id(const std::vector<std::string>& args) {
-    // Expected: <SYSTEM_ID> (args[0])
-    if (args.empty()) return std::string("Error: Missing system-id value.");
+std::optional<std::string> netflow::ManagementService::add_route(
+    const IpAddress& network, const IpAddress& mask, const IpAddress& next_hop,
+    uint32_t interface_id, int metric) {
+    routing_manager_.add_static_route(network, mask, next_hop, interface_id, metric);
+    return std::nullopt;
+}
+
+std::optional<std::string> netflow::ManagementService::remove_route(
+    const IpAddress& network, const IpAddress& mask) {
+    routing_manager_.remove_static_route(network, mask);
+    return std::nullopt;
+}
+
+std::optional<std::string> netflow::ManagementService::add_interface_ip(
+    uint32_t interface_id, const IpAddress& ip_address, const IpAddress& subnet_mask) {
+    interface_manager_.add_ip_address(interface_id, ip_address, subnet_mask);
+    return std::nullopt;
+}
+
+std::optional<std::string> netflow::ManagementService::remove_interface_ip(
+    uint32_t interface_id, const IpAddress& ip_address, const IpAddress& subnet_mask) {
+    interface_manager_.remove_ip_address(interface_id, ip_address, subnet_mask);
+    return std::nullopt;
+}
+
+std::string netflow::ManagementService::handle_interface_qos_command(uint32_t port_id, const std::vector<std::string>& qos_args) {
+    if (qos_args.empty()) return "Error: No QoS parameters specified.";
+    QosConfig new_config;
+    std::string scheduler_str = qos_args[0];
+    if (scheduler_str == "strict-priority") new_config.scheduler = SchedulerType::STRICT_PRIORITY;
+    else if (scheduler_str == "wrr") new_config.scheduler = SchedulerType::WEIGHTED_ROUND_ROBIN;
+    else if (scheduler_str == "drr") new_config.scheduler = SchedulerType::DEFICIT_ROUND_ROBIN;
+    else return "Error: Unknown scheduler type '" + scheduler_str + "'. Use strict-priority, wrr, or drr.";
+
+    std::size_t current_arg_idx = 1; // Use std::size_t
+    while(current_arg_idx < qos_args.size()) {
+        const std::string& param = qos_args[current_arg_idx];
+        if (param == "queues" && current_arg_idx + 1 < qos_args.size()) {
+            auto num_q = utils::safe_stoul(qos_args[++current_arg_idx]);
+            if (!num_q || *num_q == 0 || *num_q > 8) return "Error: Invalid number of queues (must be 1-8).";
+            new_config.num_queues = static_cast<uint8_t>(*num_q);
+        } else if (param == "depth" && current_arg_idx + 1 < qos_args.size()) {
+            auto depth = utils::safe_stoul(qos_args[++current_arg_idx]);
+            if (!depth || *depth == 0 || *depth > 65535) return "Error: Invalid max queue depth.";
+            new_config.max_queue_depth = static_cast<uint32_t>(*depth);
+        } else if (param == "weights" && new_config.scheduler != SchedulerType::STRICT_PRIORITY) {
+            new_config.queue_weights.clear();
+            for (uint8_t i = 0; i < new_config.num_queues; ++i) {
+                if (++current_arg_idx < qos_args.size()) {
+                    auto weight = utils::safe_stoul(qos_args[current_arg_idx]);
+                    if (!weight || *weight == 0) return "Error: Invalid queue weight (must be >0).";
+                    new_config.queue_weights.push_back(static_cast<uint32_t>(*weight));
+                } else return "Error: Insufficient weight values provided for queues.";
+            }
+        } else if (param == "rate") {
+             new_config.rate_limits_kbps.clear();
+            for (uint8_t i = 0; i < new_config.num_queues; ++i) {
+                if (++current_arg_idx < qos_args.size()) {
+                    auto rate = utils::safe_stoul(qos_args[current_arg_idx]);
+                     // Allow 0 for unlimited, check for parse failure if safe_stoul returns nullopt for non-numeric
+                    if (!rate && qos_args[current_arg_idx] != "0") return "Error: Invalid rate limit value. Must be a number or 0 for unlimited.";
+                    new_config.rate_limits_kbps.push_back(rate ? static_cast<uint32_t>(*rate) : 0);
+                } else return "Error: Insufficient rate limit values provided for queues.";
+            }
+        } else {
+            return "Error: Unknown QoS parameter '" + param + "' or missing value.";
+        }
+        current_arg_idx++;
+    }
+    new_config.validate_and_prepare();
+    qos_manager_.configure_port_qos(port_id, new_config);
+    return "QoS configuration applied to interface " + std::to_string(port_id) + ".";
+}
+
+std::string netflow::ManagementService::handle_show_qos_command(const std::vector<std::string>& args) {
+    std::ostringstream oss;
+    if (args.empty() || args[0] != "interface" || args.size() < 2) {
+        oss << "Error: Usage: show qos interface <interface_id>\n";
+        return oss.str();
+    }
+    auto if_id_opt = utils::safe_stoul(args[1]);
+    if (!if_id_opt) return "Error: Invalid interface ID '" + args[1] + "'.";
+    uint32_t port_id = static_cast<uint32_t>(*if_id_opt);
+
+    auto qos_config_opt = qos_manager_.get_port_qos_config(port_id);
+    if (!qos_config_opt) {
+        return "No QoS configuration found for interface " + std::to_string(port_id) + ".\n";
+    }
+    const auto& config = qos_config_opt.value();
+    oss << "QoS Configuration for Interface " << port_id << ":\n";
+    oss << "  Scheduler: ";
+    switch(config.scheduler) {
+        case SchedulerType::STRICT_PRIORITY: oss << "Strict Priority\n"; break;
+        case SchedulerType::WEIGHTED_ROUND_ROBIN: oss << "Weighted Round Robin\n"; break;
+        case SchedulerType::DEFICIT_ROUND_ROBIN: oss << "Deficit Round Robin\n"; break;
+        default: oss << "Unknown\n"; break;
+    }
+    oss << "  Number of Queues: " << static_cast<int>(config.num_queues) << "\n";
+    oss << "  Max Queue Depth (per queue): " << config.max_queue_depth << " packets\n";
+    
+    if (config.scheduler != SchedulerType::STRICT_PRIORITY && !config.queue_weights.empty()) {
+        oss << "  Queue Weights: ";
+        for (std::size_t i = 0; i < config.queue_weights.size(); ++i) {
+            oss << config.queue_weights[i] << (i == config.queue_weights.size() - 1 ? "" : " ");
+        }
+        oss << "\n";
+    }
+    if (!config.rate_limits_kbps.empty()) {
+        oss << "  Rate Limits (kbps): ";
+        for (std::size_t i = 0; i < config.rate_limits_kbps.size(); ++i) {
+            oss << (config.rate_limits_kbps[i] == 0 ? "Unlimited" : std::to_string(config.rate_limits_kbps[i])) 
+                << (i == config.rate_limits_kbps.size() - 1 ? "" : " ");
+        }
+        oss << "\n";
+    }
+    oss << "  Queue Statistics:\n";
+    oss << "    ID | Enqueued | Dequeued | Dropped(Full) | Dropped(NoCfg) | Current Depth\n";
+    oss << "    ---|----------|----------|---------------|----------------|---------------\n";
+    for (uint8_t q_id = 0; q_id < config.num_queues; ++q_id) {
+        auto stats_opt = qos_manager_.get_queue_stats(port_id, q_id);
+        if (stats_opt) {
+            const auto& s = stats_opt.value();
+            oss << std::setw(5) << static_cast<int>(q_id) << " | "
+                << std::setw(8) << s.packets_enqueued << " | "
+                << std::setw(8) << s.packets_dequeued << " | "
+                << std::setw(13) << s.packets_dropped_full << " | "
+                << std::setw(14) << s.packets_dropped_no_config << " | "
+                << std::setw(13) << s.current_depth << "\n";
+        } else {
+            oss << std::setw(5) << static_cast<int>(q_id) << " | " << "Statistics not available.\n";
+        }
+    }
+    return oss.str();
+}
+
+std::string netflow::ManagementService::handle_clear_qos_command(const std::vector<std::string>& args) {
+    if (args.empty() || args[0] != "interface" || args.size() < 2) {
+        return "Error: Usage: clear qos interface <interface_id> [stats]";
+    }
+    return "Placeholder: QoS statistics cleared for interface (functionality to be added to QosManager).\n";
+}
+
+std::string netflow::ManagementService::handle_acl_command(const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing ACL subcommand. Usage: acl <create|delete|add-rule|remove-rule|clear-rules> ...";
+    const std::string& subcommand = args[0];
+
+    if (subcommand == "create") {
+        if (args.size() < 2) return "Error: Usage: acl create <acl_name>";
+        if (acl_manager_.create_acl(args[1])) return "ACL '" + args[1] + "' created.";
+        else return "Error: ACL '" + args[1] + "' already exists or invalid name.";
+    } else if (subcommand == "delete") {
+        if (args.size() < 2) return "Error: Usage: acl delete <acl_name>";
+        if (acl_manager_.delete_acl(args[1])) return "ACL '" + args[1] + "' deleted.";
+        else return "Error: ACL '" + args[1] + "' not found.";
+    } else if (subcommand == "add-rule") {
+        if (args.size() < 8) return "Error: Insufficient arguments for 'acl add-rule'. Minimum: acl add-rule <name> rule <id> priority <prio> action <type>";
+        const std::string& acl_name = args[1];
+        if (args[2] != "rule") return "Error: Expected 'rule' keyword.";
+        auto rule_id_opt = utils::safe_stoul(args[3]);
+        if (!rule_id_opt) return "Error: Invalid rule ID.";
+        if (args[4] != "priority") return "Error: Expected 'priority' keyword.";
+        auto priority_opt = utils::safe_stoi(args[5]);
+        if (!priority_opt) return "Error: Invalid priority value.";
+        if (args[6] != "action") return "Error: Expected 'action' keyword.";
+        
+        AclRule rule(static_cast<uint32_t>(*rule_id_opt), *priority_opt, AclActionType::DENY);
+        std::string action_str = args[7];
+        if (action_str == "permit") rule.action = AclActionType::PERMIT;
+        else if (action_str == "deny") rule.action = AclActionType::DENY;
+        else return "Error: Invalid action. Use 'permit' or 'deny'.";
+        
+        if (acl_manager_.add_rule(acl_name, rule)) return "Rule " + args[3] + " added to ACL '" + acl_name + "'.";
+        else return "Error: Failed to add rule to ACL '" + acl_name + "'.";
+    } else if (subcommand == "remove-rule") {
+        if (args.size() < 4 || args[2] != "rule") return "Error: Usage: acl remove-rule <acl_name> rule <rule_id>";
+        auto rule_id_opt = utils::safe_stoul(args[3]);
+        if (!rule_id_opt) return "Error: Invalid rule ID.";
+        if (acl_manager_.remove_rule(args[1], static_cast<uint32_t>(*rule_id_opt))) return "Rule " + args[3] + " removed from ACL '" + args[1] + "'.";
+        else return "Error: Rule " + args[3] + " not found in ACL '" + args[1] + "'.";
+    } else if (subcommand == "clear-rules") {
+        if (args.size() < 2) return "Error: Usage: acl clear-rules <acl_name>";
+        acl_manager_.clear_rules(args[1]);
+        return "All rules cleared from ACL '" + args[1] + "'.";
+    }
+    return "Error: Unknown ACL subcommand '" + subcommand + "'.";
+}
+
+std::string netflow::ManagementService::format_acl_rules_output(const std::string& acl_name_filter, std::optional<uint32_t> rule_id_filter) {
+    std::ostringstream oss;
+    auto all_acls = acl_manager_.get_all_named_acls();
+    if (all_acls.empty()) return "No ACLs configured.\n";
+
+    for (const auto& acl_pair : all_acls) {
+        if (!acl_name_filter.empty() && acl_pair.first != acl_name_filter) {
+            continue;
+        }
+        oss << "ACL: " << acl_pair.first << "\n";
+        if (acl_pair.second.empty()) {
+            oss << "  No rules.\n";
+        } else {
+            for (const auto& rule : acl_pair.second) {
+                if (rule_id_filter.has_value() && rule.rule_id != rule_id_filter.value()) {
+                    continue;
+                }
+                oss << "  Rule ID: " << rule.rule_id << ", Priority: " << rule.priority;
+                oss << ", Action: ";
+                switch (rule.action) {
+                    case AclActionType::PERMIT: oss << "Permit"; break;
+                    case AclActionType::DENY: oss << "Deny"; break;
+                    case AclActionType::REDIRECT: oss << "Redirect"; 
+                        if(rule.redirect_port_id) oss << " to port " << rule.redirect_port_id.value();
+                        break;
+                }
+                if(rule.src_mac) oss << ", SrcMAC: " << macaddr_to_string_local(rule.src_mac.value());
+                if(rule.dst_mac) oss << ", DstMAC: " << macaddr_to_string_local(rule.dst_mac.value());
+                if(rule.ethertype) oss << ", Ethertype: 0x" << std::hex << rule.ethertype.value() << std::dec;
+                oss << "\n";
+            }
+        }
+        oss << "\n";
+        if (!acl_name_filter.empty() && rule_id_filter.has_value()) {
+            break;
+        }
+    }
+    if (oss.str().empty()) {
+        if (!acl_name_filter.empty() && rule_id_filter.has_value()) {
+            return "Rule ID " + std::to_string(rule_id_filter.value()) + " not found in ACL '" + acl_name_filter + "'.\n";
+        } else if (!acl_name_filter.empty()) {
+            return "ACL '" + acl_name_filter + "' not found or has no rules matching filter.\n";
+        }
+        return "No ACLs or rules matching filter.\n";
+    }
+    return oss.str();
+}
+
+std::string netflow::ManagementService::handle_isis_global_system_id(const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing system-id value.";
     auto sys_id_opt = parse_system_id_cli(args[0]); 
-    if (!sys_id_opt) return std::string("Error: Invalid system-id format. Expected XXXX.XXXX.XXXX");
-    this->isis_manager_.set_system_id(sys_id_opt.value()); 
-    return std::string("IS-IS system-id set.");
+    if (!sys_id_opt) return "Error: Invalid system-id format. Expected XXXX.XXXX.XXXX";
+    isis_manager_.set_system_id(sys_id_opt.value()); 
+    return "IS-IS system-id set.";
 }
 
-std::string ManagementService::handle_isis_global_area(const std::vector<std::string>& args, bool is_add) {
-    // Expected: <AREA_ID> (args[0])
-    if (args.empty()) return std::string("Error: Missing area-id value.");
+std::string netflow::ManagementService::handle_isis_global_area(const std::vector<std::string>& args, bool is_add) {
+    if (args.empty()) return "Error: Missing area-id value.";
     auto area_opt = parse_area_address_cli(args[0]); 
-    if (!area_opt) return std::string("Error: Invalid area-id format (e.g., 49.0001 or 49.0001.0002).");
+    if (!area_opt) return "Error: Invalid area-id format (e.g., 49.0001 or 49.0001.0002).";
     if (is_add) {
-        this->isis_manager_.add_area_address(area_opt.value()); 
-        return std::string("IS-IS area added.");
+        isis_manager_.add_area_address(area_opt.value()); 
+        return "IS-IS area added.";
     } else {
-        this->isis_manager_.remove_area_address(area_opt.value()); 
+        isis_manager_.remove_area_address(area_opt.value()); 
         return "IS-IS area removed.";
     }
 }
 
-std::string ManagementService::handle_isis_global_level(const std::vector<std::string>& args) {
-    // Expected: <l1|l2|l1-l2> (args[0])
-    if (args.empty()) return std::string("Error: Missing level value.");
-    isis::IsisLevel level_to_set;
-    if (args[0] == "l1") level_to_set = isis::IsisLevel::L1;
-    else if (args[0] == "l2") level_to_set = isis::IsisLevel::L2;
-    else if (args[0] == "l1-l2") level_to_set = isis::IsisLevel::L1_L2;
-    else return std::string("Error: Invalid level. Use l1, l2, or l1-l2.");
-    this->isis_manager_.set_enabled_levels(level_to_set); 
-    return std::string("IS-IS router level set.");
+std::string netflow::ManagementService::handle_isis_global_level(const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing level value.";
+    netflow::isis::IsisLevel level_to_set;
+    if (args[0] == "l1") level_to_set = netflow::isis::IsisLevel::L1;
+    else if (args[0] == "l2") level_to_set = netflow::isis::IsisLevel::L2;
+    else if (args[0] == "l1-l2") level_to_set = netflow::isis::IsisLevel::L1_L2;
+    else return "Error: Invalid level. Use l1, l2, or l1-l2.";
+    isis_manager_.set_enabled_levels(level_to_set); 
+    return "IS-IS router level set.";
 }
 
-std::string ManagementService::handle_isis_global_overload_bit(const std::vector<std::string>& args) {
-    // Expected: <on|off> (args[0])
-    if (args.empty()) return std::string("Error: Missing on/off value.");
+std::string netflow::ManagementService::handle_isis_global_overload_bit(const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing on/off value.";
     bool set_on;
     if (args[0] == "on") set_on = true;
     else if (args[0] == "off") set_on = false;
-    else return std::string("Error: Invalid value. Use on or off.");
-    this->isis_manager_.set_overload_bit_cli(set_on); 
-    return std::string("IS-IS overload-bit set.");
+    else return "Error: Invalid value. Use on or off.";
+    isis_manager_.set_overload_bit_cli(set_on); 
+    return "IS-IS overload-bit set.";
 }
 
-std::string ManagementService::handle_isis_global_enable(bool enable) {
+std::string netflow::ManagementService::handle_isis_global_enable(bool enable) {
     if (enable) {
-        if (this->isis_manager_.start()) return std::string("IS-IS protocol started."); 
-        else return std::string("Error: IS-IS failed to start. Ensure system-id and area are configured.");
+        if (isis_manager_.start()) return "IS-IS protocol started."; 
+        else return "Error: IS-IS failed to start. Ensure system-id and area are configured.";
     } else {
-        this->isis_manager_.stop(); 
+        isis_manager_.stop(); 
         return "IS-IS protocol shut down.";
     }
 }
 
-std::string ManagementService::handle_isis_interface_enable(uint32_t interface_id, const std::vector<std::string>& args) {
-    // Expected: [level-1|level-2|l1-l2] (args[0], optional)
-    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
-    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+std::string netflow::ManagementService::handle_isis_interface_enable(uint32_t interface_id, const std::vector<std::string>& args) {
+    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id); 
+    netflow::isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(netflow::isis::IsisInterfaceConfig{});
     if_conf.interface_id = interface_id; 
     if_conf.isis_enabled = true;
 
     if (!args.empty()) { 
-        if (args[0] == "level-1") if_conf.level = isis::IsisLevel::L1;
-        else if (args[0] == "level-2") if_conf.level = isis::IsisLevel::L2;
-        else if (args[0] == "level-1-2") if_conf.level = isis::IsisLevel::L1_L2;
-        else return std::string("Error: Invalid level specified. Use level-1, level-2, or level-1-2.");
+        if (args[0] == "level-1") if_conf.level = netflow::isis::IsisLevel::L1;
+        else if (args[0] == "level-2") if_conf.level = netflow::isis::IsisLevel::L2;
+        else if (args[0] == "level-1-2") if_conf.level = netflow::isis::IsisLevel::L1_L2;
+        else return "Error: Invalid level specified. Use level-1, level-2, or level-1-2.";
     } else { 
-        if (!current_config_opt.has_value() || if_conf.level == isis::IsisLevel::NONE) { 
-             if_conf.level = this->isis_manager_.get_global_config().enabled_levels; 
+        if (!current_config_opt.has_value() || if_conf.level == netflow::isis::IsisLevel::NONE) { 
+             if_conf.level = isis_manager_.get_global_config().enabled_levels; 
         }
     }
-    this->isis_manager_.configure_interface(interface_id, if_conf); 
-    return std::string("IS-IS enabled on interface ") + std::to_string(interface_id) + ".";
+    isis_manager_.configure_interface(interface_id, if_conf); 
+    return "IS-IS enabled on interface " + std::to_string(interface_id) + ".";
 }
 
-std::string ManagementService::handle_isis_interface_disable(uint32_t interface_id) {
-    this->isis_manager_.disable_isis_on_interface(interface_id); 
-    return std::string("IS-IS disabled on interface ") + std::to_string(interface_id) + ".";
+std::string netflow::ManagementService::handle_isis_interface_disable(uint32_t interface_id) {
+    isis_manager_.disable_isis_on_interface(interface_id); 
+    return "IS-IS disabled on interface " + std::to_string(interface_id) + ".";
 }
 
-std::string ManagementService::handle_isis_interface_circuit_type(uint32_t interface_id, const std::vector<std::string>& args) {
-    // Expected: <broadcast|point-to-point> (args[0])
-    if (args.empty()) return std::string("Error: Missing circuit type value.");
-    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
-    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+std::string netflow::ManagementService::handle_isis_interface_circuit_type(uint32_t interface_id, const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing circuit type value.";
+    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id); 
+    netflow::isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(netflow::isis::IsisInterfaceConfig{});
     if_conf.interface_id = interface_id;
     if (!if_conf.isis_enabled && !current_config_opt.has_value()) { 
-        // Check if the underlying interface exists using get_port_config
-        auto port_config_opt = this->interface_manager_.get_port_config(interface_id);
+        auto port_config_opt = interface_manager_.get_port_config(interface_id);
         if (!port_config_opt) {
-            return std::string("Error: Interface with ID ") + std::to_string(interface_id) + std::string(" not found.");
+            return "Error: Interface with ID " + std::to_string(interface_id) + " not found.";
         }
-        // Interface exists, can proceed with IS-IS config for it.
     }
 
-
-    if (args[0] == "point-to-point") if_conf.circuit_type = isis::CircuitType::P2P;
-    else if (args[0] == "broadcast") if_conf.circuit_type = isis::CircuitType::BROADCAST;
-    else return std::string("Error: Invalid circuit-type. Use point-to-point or broadcast.");
+    if (args[0] == "point-to-point") if_conf.circuit_type = netflow::isis::CircuitType::P2P;
+    else if (args[0] == "broadcast") if_conf.circuit_type = netflow::isis::CircuitType::BROADCAST;
+    else return "Error: Invalid circuit-type. Use point-to-point or broadcast.";
     
-    this->isis_manager_.configure_interface(interface_id, if_conf); 
-    return std::string("IS-IS circuit-type set on interface ") + std::to_string(interface_id) + ".";
+    isis_manager_.configure_interface(interface_id, if_conf); 
+    return "IS-IS circuit-type set on interface " + std::to_string(interface_id) + ".";
 }
 
-std::string ManagementService::handle_isis_interface_hello_interval(uint32_t interface_id, const std::vector<std::string>& args) {
-    if (args.empty()) return std::string("Error: Missing hello interval value.");
+std::string netflow::ManagementService::handle_isis_interface_hello_interval(uint32_t interface_id, const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing hello interval value.";
     std::optional<unsigned long> interval_opt = netflow::utils::safe_stoul(args[0]);
     if (!interval_opt || *interval_opt == 0 || *interval_opt > 65535) {
-        return std::string("Error: Invalid hello interval value. Must be 1-65535.");
+        return "Error: Invalid hello interval value. Must be 1-65535.";
     }
     uint16_t interval = static_cast<uint16_t>(*interval_opt);
-    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
-    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id); 
+    netflow::isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(netflow::isis::IsisInterfaceConfig{});
     if_conf.interface_id = interface_id;
     if_conf.hello_interval_seconds = interval;
-    this->isis_manager_.configure_interface(interface_id, if_conf); 
-    return std::string("IS-IS hello-interval set to ") + std::to_string(interval) + "s on interface " + std::to_string(interface_id) + ".";
+    isis_manager_.configure_interface(interface_id, if_conf); 
+    return "IS-IS hello-interval set to " + std::to_string(interval) + "s on interface " + std::to_string(interface_id) + ".";
 }
 
-std::string ManagementService::handle_isis_interface_hello_multiplier(uint32_t interface_id, const std::vector<std::string>& args) {
-    if (args.empty()) return std::string("Error: Missing hello multiplier value.");
+std::string netflow::ManagementService::handle_isis_interface_hello_multiplier(uint32_t interface_id, const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing hello multiplier value.";
     std::optional<unsigned long> multiplier_opt = netflow::utils::safe_stoul(args[0]);
-    if (!multiplier_opt || *multiplier_opt < 2 || *multiplier_opt > 255) { // Typical range for multiplier
-        return std::string("Error: Invalid hello multiplier value. Must be >= 2.");
+    if (!multiplier_opt || *multiplier_opt < 2 || *multiplier_opt > 255) {
+        return "Error: Invalid hello multiplier value. Must be >= 2.";
     }
     uint16_t multiplier = static_cast<uint16_t>(*multiplier_opt);
-    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
-    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id); 
+    netflow::isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(netflow::isis::IsisInterfaceConfig{});
     if_conf.interface_id = interface_id;
     if_conf.holding_timer_multiplier = multiplier;
-    this->isis_manager_.configure_interface(interface_id, if_conf); 
-    return std::string("IS-IS hello-multiplier set to ") + std::to_string(multiplier) + " on interface " + std::to_string(interface_id) + ".";
+    isis_manager_.configure_interface(interface_id, if_conf); 
+    return "IS-IS hello-multiplier set to " + std::to_string(multiplier) + " on interface " + std::to_string(interface_id) + ".";
 }
 
-std::string ManagementService::handle_isis_interface_priority(uint32_t interface_id, const std::vector<std::string>& args) {
-    if (args.empty()) return std::string("Error: Missing priority value.");
+std::string netflow::ManagementService::handle_isis_interface_priority(uint32_t interface_id, const std::vector<std::string>& args) {
+    if (args.empty()) return "Error: Missing priority value.";
     std::optional<unsigned long> priority_opt = netflow::utils::safe_stoul(args[0]);
     if (!priority_opt || *priority_opt > 127) {
-        return std::string("Error: Invalid priority value. Must be 0-127.");
+        return "Error: Invalid priority value. Must be 0-127.";
     }
     uint8_t priority = static_cast<uint8_t>(*priority_opt);
-    auto current_config_opt = this->isis_manager_.get_isis_interface_config(interface_id); 
-    isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(isis::IsisInterfaceConfig{});
+    auto current_config_opt = isis_manager_.get_isis_interface_config(interface_id); 
+    netflow::isis::IsisInterfaceConfig if_conf = current_config_opt.value_or(netflow::isis::IsisInterfaceConfig{});
     if_conf.interface_id = interface_id;
     if_conf.priority = priority;
-    this->isis_manager_.configure_interface(interface_id, if_conf); 
-        return "IS-IS priority set to " + std::to_string(priority) + " on interface " + std::to_string(interface_id) + ".";
-    } catch (const std::exception& e) {
-        return "Error: Invalid priority value.";
-    }
+    isis_manager_.configure_interface(interface_id, if_conf); 
+    return "IS-IS priority set to " + std::to_string(priority) + " on interface " + std::to_string(interface_id) + ".";
 }
 
-// --- Show IS-IS Command Implementations ---
-static std::string system_id_to_cli_string(const isis::SystemID& sys_id) {
-    std::stringstream ss;
-    bool first = true;
-    for (size_t i = 0; i < sys_id.size(); ++i) {
-        if (i > 0 && i % 2 == 0 && i < 6) { // Format as XXXX.XXXX.XXXX
-             // This formatting is for 6 byte system ID like cisco.
-             // Standard is just hex string. Example: aaaa.bbbb.cccc
-        }
-        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(sys_id[i]);
-    }
-    std::string temp = ss.str();
-    if (temp.length() == 12) { // 6 bytes * 2 hex chars
-        return temp.substr(0,4) + "." + temp.substr(4,4) + "." + temp.substr(8,4);
-    }
-    return temp; // Fallback for different lengths or if not 6 bytes
-}
-
-static std::string area_address_to_cli_string(const isis::AreaAddress& area) {
-    std::stringstream ss;
-    for (size_t i = 0; i < area.size(); ++i) {
-        ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(area[i]);
-        if (i < area.size() - 1) {
-            // Common display format for areas like 49.0001.00...
-            // Group by 2 bytes after the AFI (first byte)
-            if (i == 0 || (i > 0 && (i % 2 == 0))) { // This logic might need refinement based on desired format
-               // ss << ".";
-            }
-        }
-    }
-    // Example: 49.0001 will be "490001". Need to insert dots based on typical representation.
-    // For 49.0001 -> 49.00.01 (if each part is a byte group)
-    // Or AFI (1 byte), then groups of 2 bytes.
-    // 49.0001 -> 49.0001 (AFI 49, Area ID 0001)
-    // A simple hex string is also fine:
-    std::string hex_area;
-    for(uint8_t byte : area) {
-        char buf[3];
-        sprintf(buf, "%02x", byte);
-        hex_area += buf;
-    }
-    return hex_area; // Raw hex for now
-}
-
-std::string ManagementService::show_isis_summary_cli(const std::vector<std::string>& args) {
-    std::stringstream ss;
-    if (!this->isis_manager_.is_running() && !this->isis_manager_.is_globally_configured()) return std::string("IS-IS protocol is not configured nor running.\n"); 
+std::string netflow::ManagementService::show_isis_summary_cli(const std::vector<std::string>& args) {
+    std::ostringstream ss;
+    if (!isis_manager_.is_running() && !isis_manager_.is_globally_configured()) return "IS-IS protocol is not configured nor running.\n"; 
     
-    isis::IsisConfig config = this->isis_manager_.get_global_config(); 
-    ss << "IS-IS Process Summary (" << (this->isis_manager_.is_running() ? "Running" : "Shutdown (but configured)") << "):\n"; 
+    netflow::isis::IsisConfig config = isis_manager_.get_global_config(); 
+    ss << "IS-IS Process Summary (" << (isis_manager_.is_running() ? "Running" : "Shutdown (but configured)") << "):\n"; 
     ss << "  System ID: " << system_id_to_cli_string(config.system_id) << "\n";
     ss << "  Enabled Levels: ";
     switch(config.enabled_levels) {
-        case isis::IsisLevel::L1: ss << "Level-1 Only\n"; break;
-        case isis::IsisLevel::L2: ss << "Level-2 Only\n"; break;
-        case isis::IsisLevel::L1_L2: ss << "Level-1-2\n"; break;
+        case netflow::isis::IsisLevel::L1: ss << "Level-1 Only\n"; break;
+        case netflow::isis::IsisLevel::L2: ss << "Level-2 Only\n"; break;
+        case netflow::isis::IsisLevel::L1_L2: ss << "Level-1-2\n"; break;
         default: ss << "None\n"; break;
     }
     ss << "  Area Addresses:\n";
@@ -399,556 +571,195 @@ std::string ManagementService::show_isis_summary_cli(const std::vector<std::stri
     ss << "  Overload Bit: " << (config.over_load_bit_set ? "Set" : "Not Set") << "\n";
     return ss.str();
 }
-std::string ManagementService::show_isis_neighbors_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis neighbors"); }
-std::string ManagementService::show_isis_database_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis database"); }
-std::string ManagementService::show_isis_interface_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis interface"); }
-std::string ManagementService::show_isis_routes_cli(const std::vector<std::string>& args) { /* Placeholder */ return std::string("Placeholder: show isis routes"); }
 
+std::string netflow::ManagementService::show_isis_neighbors_cli(const std::vector<std::string>& args) { return "Placeholder: show isis neighbors"; }
+std::string netflow::ManagementService::show_isis_database_cli(const std::vector<std::string>& args) { return "Placeholder: show isis database"; }
+std::string netflow::ManagementService::show_isis_interface_cli(const std::vector<std::string>& args) { return "Placeholder: show isis interface"; }
+std::string netflow::ManagementService::show_isis_routes_cli(const std::vector<std::string>& args) { return "Placeholder: show isis routes"; }
 
-void ManagementService::register_cli_commands() {
-    // --- IS-IS Global Configuration Commands ---
+void netflow::ManagementService::register_cli_commands() {
     management_interface_.register_command(
-        {"configure", "router", "isis", "system-id"}, 
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing system-id value. Usage: ... system-id <SYSTEM_ID>");
-            return handle_isis_global_system_id(args); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "area", "add"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area add <AREA_ID>");
-            return handle_isis_global_area(args, true); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "area", "remove"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area remove <AREA_ID>");
-            return handle_isis_global_area(args, false); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "level"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing level value. Usage: ... level <l1|l2|l1-l2>");
-            return handle_isis_global_level(args); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "overload-bit", "set"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing on/off value. Usage: ... overload-bit set <on|off>");
-            return handle_isis_global_overload_bit(args); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "enable"},
-        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(true); });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "shutdown"},
-        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(false); });
-
-    // --- IS-IS Interface Configuration Commands ---
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "enable"}, 
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing interface ID for 'isis enable'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            std::vector<std::string> level_args; 
-            if (args.size() > 1) level_args.push_back(args[1]);
-            return handle_isis_interface_enable(if_id, level_args);
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "disable"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.empty()) return std::string("Error: Missing interface ID for 'isis disable'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_disable(if_id);
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "circuit-type"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or circuit type for 'isis circuit-type'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_circuit_type(if_id, {args[1]});
-        });
-    
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "hello-interval"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or interval for 'isis hello-interval'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_hello_interval(if_id, {args[1]});
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "hello-multiplier"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or multiplier for 'isis hello-multiplier'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_hello_multiplier(if_id, {args[1]});
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "priority"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or priority for 'isis priority'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_priority(if_id, {args[1]});
-        });
-
-    // --- Show IS-IS Commands ---
-    management_interface_.register_command({"show", "isis", "summary"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_summary_cli(args); });
-    management_interface_.register_command({"show", "isis", "neighbors"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_neighbors_cli(args); });
-    management_interface_.register_command({"show", "isis", "interface"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_interface_cli(args); });
-    management_interface_.register_command({"show", "isis", "database"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_database_cli(args); });
-    management_interface_.register_command({"show", "isis", "routes"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_routes_cli(args); });
-
-    auto format_full_interface_details =
-        [this](std::ostringstream& oss, uint32_t port_id, const netflow::InterfaceManager::PortConfig& config){
-        oss << "Interface " << port_id << ":\n";
-        oss << "  Admin Status: " << (config.admin_up ? "Up" : "Down") << "\n";
-        oss << "  Link Status: " << (interface_manager_.is_port_link_up(port_id) ? "Up" : "Down") << "\n";
-        oss << "  MAC Address: " << macaddr_to_string(config.mac_address) << "\n";
-        oss << "  MTU: " << config.mtu << "\n";
-        oss << "  Speed: " << config.speed_mbps << " Mbps\n";
-        oss << "  Duplex: " << (config.full_duplex ? "Full" : "Half") << "\n";
-        oss << "  Auto Negotiation: " << (config.auto_negotiation ? "Enabled" : "Disabled") << "\n";
-
-        auto ip_configs = interface_manager_.get_interface_ip_configs(port_id);
-        if (!ip_configs.empty()) {
-            oss << "  IP Addresses:\n";
-            for (const auto& ip_conf : ip_configs) {
-                oss << "    " << ip_to_string_util_net_order(ip_conf.address)
-                    << "/" << ip_to_string_util_net_order(ip_conf.subnet_mask) << "\n";
-            }
-        } else {
-            oss << "  IP Addresses: None\n";
-        }
-        // Display Applied ACLs
-        auto ingress_acl = interface_manager_.get_applied_acl_name(port_id, AclDirection::INGRESS);
-        oss << "  Ingress ACL: " << (ingress_acl.has_value() ? ingress_acl.value() : "Not Set") << "\n";
-        auto egress_acl = interface_manager_.get_applied_acl_name(port_id, AclDirection::EGRESS);
-        oss << "  Egress ACL: " << (egress_acl.has_value() ? egress_acl.value() : "Not Set") << "\n";
-    };
-
-    auto format_interface_stats_only = [this](std::ostringstream& oss, uint32_t port_id){ /* ... */ };
-
-
-    management_interface_.register_command(
-        "show",
-        [this, format_full_interface_details, format_interface_stats_only](const std::vector<std::string>& args) -> std::string {
-            if (args.empty()) return "Error: Missing arguments for 'show' command.";
-            std::string type = args[0];
-            std::vector<std::string> sub_args(args.begin() + 1, args.end());
+        {"show", "interface"},
+        [this](const std::vector<std::string>& args) { 
+            // Simplified: actual implementation would parse args for specific interface
             std::ostringstream oss;
-
-            if (type == "interface") {
-                if (sub_args.empty()) { // show interface
-                    auto all_configs = interface_manager_.get_all_port_configs();
-                    if (all_configs.empty()) return "No interfaces configured.";
-                    for (const auto& pair : all_configs) {
-                        format_full_interface_details(oss, pair.first, pair.second);
-                        oss << "\n";
-                    }
-                } else { // show interface <id> [stats]
-                    uint32_t port_id;
-                    try { port_id = std::stoul(sub_args[0]); }
-                    catch (const std::exception& e) { return "Error: Invalid interface ID."; }
-
-                    if (!interface_manager_.is_port_valid(port_id)) return "Error: Interface ID " + sub_args[0] + " is not valid.";
-                    auto p_config_opt = interface_manager_.get_port_config(port_id);
-                    if (!p_config_opt) return "Error: Interface " + sub_args[0] + " not configured (should not happen if valid).";
-
-                    if (sub_args.size() > 1 && sub_args[1] == "stats") {
-                        // format_interface_stats_only(oss, port_id); // Placeholder for actual stats formatting
-                        oss << "Statistics for interface " << port_id << " (placeholder).";
-                    } else {
-                        format_full_interface_details(oss, port_id, p_config_opt.value());
-                    }
-                }
+            auto all_configs = this->interface_manager_.get_all_port_configs();
+            if (all_configs.empty()) return std::string("No interfaces configured.");
+            for (const auto& pair : all_configs) {
+                 oss << "Interface " << pair.first << ": Admin " << (pair.second.admin_up ? "Up" : "Down") << "\n";
             }
-            else if (type == "qos") { return handle_show_qos_command(sub_args); }
-            else if (type == "acl-rules") {
-                std::string acl_name_filter;
-                std::optional<uint32_t> rule_id_filter;
-                if (!sub_args.empty() && sub_args[0] != "id") { // Check if first arg is not "id"
-                    acl_name_filter = sub_args[0];
-                    if (sub_args.size() > 2 && sub_args[1] == "id") { // <name> id <rule_id>
-                        try { rule_id_filter = std::stoul(sub_args[2]); } catch(...) { /* ignore */ }
-                    } else if (sub_args.size() > 1 && sub_args[1] != "id") { // <name> <something_else>
-                         return "Error: Usage: show acl-rules [<acl_name>] [id <RULE_ID>]";
-                    }
-                } else if (!sub_args.empty() && sub_args[0] == "id") { // "id" without <acl_name>
-                    if (sub_args.size() > 1) { // id <rule_id>
-                         // This case is ambiguous: "show acl-rules id X" - which ACL?
-                         // Current format_acl_rules_output handles empty acl_name_filter by listing names.
-                         // To show specific rule ID without ACL name is not supported by current AclManager::get_rule
-                         return "Error: Must specify ACL name when filtering by rule ID. Usage: show acl-rules <acl_name> id <RULE_ID>";
-                    } else { // "show acl-rules id" - missing id
-                         return "Error: Missing rule ID for 'show acl-rules id'.";
-                    }
+            return oss.str();
+        }
+    );
+    management_interface_.register_command(
+        {"show", "qos", "interface"},
+         [this](const std::vector<std::string>& args) { 
+            if(args.empty()) return "Error: Missing interface ID for 'show qos interface'.";
+            // Pass only the arguments intended for the handler (after "interface")
+            return this->handle_show_qos_command({"interface", args[0]}); 
+        }
+    );
+     management_interface_.register_command(
+        {"show", "acl-rules"},
+        [this](const std::vector<std::string>& args) {
+            std::string acl_name_filter;
+            std::optional<uint32_t> rule_id_filter;
+            if (!args.empty() && args[0] != "id") {
+                acl_name_filter = args[0];
+                if (args.size() > 2 && args[1] == "id") {
+                    try { rule_id_filter = static_cast<uint32_t>(std::stoul(args[2])); } catch(...) { /* ignore */ }
+                } else if (args.size() > 1 && args[1] != "id") {
+                     return "Error: Usage: show acl-rules [<acl_name>] [id <RULE_ID>]";
                 }
-                 return format_acl_rules_output(acl_name_filter, rule_id_filter);
+            } else if (args.size() > 1 && args[0] == "id") {
+                 return "Error: Must specify ACL name when filtering by rule ID. Usage: show acl-rules <acl_name> id <RULE_ID>";
+            } else if (args.size() == 1 && args[0] == "id") {
+                 return "Error: Missing rule ID for 'show acl-rules id'.";
             }
-            // ... (rest of existing show command handling) ...
-            else { return "Error: Unsupported 'show' command."; }
-            return oss.str().empty() ? "No information to display." : oss.str();
-        });
+            return this->format_acl_rules_output(acl_name_filter, rule_id_filter);
+        }
+    );
 
-    management_interface_.register_command("interface",
+    management_interface_.register_command(
+        {"interface", "<IF_ID>", "qos"}, // This is a key for registration, not directly for parsing
+        [this](const std::vector<std::string>& args) { // args here are those *after* the matched key prefix
+            if (args.size() < 2) return "Error: Interface ID and QoS config needed."; // args[0] is IF_ID, args[1]... is qos_args
+            uint32_t if_id;
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); }
+            catch(const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
+            return this->handle_interface_qos_command(if_id, std::vector<std::string>(args.begin() + 1, args.end()));
+        }
+    );
+    management_interface_.register_command(
+        {"interface", "<IF_ID>", "ip", "access-group", "<ACL_NAME>", "<in|out>"},
+        [this](const std::vector<std::string>& args) { // args are <IF_ID_val>, ip, access-group, <ACL_NAME_val>, <in|out_val>
+            if (args.size() != 5) return "Error: Usage: interface <id> ip access-group <acl_name> <in|out>";
+            uint32_t if_id;
+            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); }
+            catch(const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
+            
+            const std::string& acl_name = args[3];
+            const std::string& direction_str = args[4];
+            netflow::AclDirection direction;
+            if (direction_str == "in") direction = netflow::AclDirection::INGRESS;
+            else if (direction_str == "out") direction = netflow::AclDirection::EGRESS;
+            else return "Error: Invalid direction. Must be 'in' or 'out'.";
+            
+            if (this->interface_manager_.apply_acl_to_interface(if_id, acl_name, direction)) {
+                 return "ACL '" + acl_name + "' applied to interface " + std::to_string(if_id) + " " + direction_str + ".";
+            }
+            return "Error: Failed to apply ACL '" + acl_name + "' to interface " + std::to_string(if_id) + ".";
+        }
+    );
+     management_interface_.register_command(
+        {"no", "interface", "<IF_ID>", "ip", "access-group", "<in|out>"},
+        [this](const std::vector<std::string>& args) {
+            if (args.size() != 5) return "Error: Usage: no interface <id> ip access-group <in|out>";
+            uint32_t if_id;
+            try { if_id = static_cast<uint32_t>(std::stoul(args[1])); } // args[0] is "<IF_ID>", args[1] is actual ID
+            catch(const std::exception& e) { return "Error: Invalid interface ID: " + args[1]; }
+            
+            const std::string& direction_str = args[4]; // args[4] is <in|out_val>
+            netflow::AclDirection direction;
+            if (direction_str == "in") direction = netflow::AclDirection::INGRESS;
+            else if (direction_str == "out") direction = netflow::AclDirection::EGRESS;
+            else return "Error: Invalid direction. Must be 'in' or 'out'.";
+
+            if (this->interface_manager_.remove_acl_from_interface(if_id, direction)) {
+                 return "ACL removed from interface " + std::to_string(if_id) + " " + direction_str + ".";
+            }
+            return "Error: Failed to remove ACL or no ACL applied on interface " + std::to_string(if_id) + " " + direction_str + ".";
+        }
+    );
+     management_interface_.register_command(
+        {"acl"}, 
         [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return "Error: Missing interface ID or subcommand.";
+            return this->handle_acl_command(args);
+        }
+    );
 
-            uint32_t port_id;
-            try { port_id = std::stoul(args[0]); }
-            catch (const std::exception& e) { return "Error: Invalid interface ID format."; }
-
-            if (!interface_manager_.is_port_valid(port_id) && args[1] != "port-channel") { // Allow creating port-channel if it doesn't exist
-                 // For physical ports, they are implicitly created up to num_ports by Switch.
-                 // So is_port_valid should ideally check against max_ports or if it has a config.
-                 // Let's assume configure_port implicitly creates if needed.
-            }
-
-            std::string primary_subcommand = args[1];
-            std::vector<std::string> sub_args(args.begin() + 2, args.end());
-
-            if (primary_subcommand == "qos") {
-                if (sub_args.empty()) return "Error: Missing QoS configuration details for interface " + args[0];
-                return handle_interface_qos_command(port_id, sub_args);
-            } else if (primary_subcommand == "ip" && sub_args.size() > 0 && sub_args[0] == "access-group") {
-                if (sub_args.size() < 3) return "Error: Usage: interface <id> ip access-group <acl_name> <in|out>";
-                std::string acl_name = sub_args[1];
-                std::string direction_str = sub_args[2];
-                netflow::AclDirection direction; // Corrected namespace
-                if (direction_str == "in") direction = netflow::AclDirection::INGRESS; // Corrected namespace
-                else if (direction_str == "out") direction = netflow::AclDirection::EGRESS; // Corrected namespace
-                else return "Error: Invalid direction. Must be 'in' or 'out'.";
-
-                if (interface_manager_.apply_acl_to_interface(port_id, acl_name, direction)) {
-                    return "ACL '" + acl_name + "' applied to interface " + std::to_string(port_id) + " " + direction_str + ".";
-                } else {
-                    return "Error: Failed to apply ACL '" + acl_name + "' to interface " + std::to_string(port_id) + ". (Port or ACL may not exist)";
-                }
-            }
-            // ... other interface subcommands ...
-            return "Error: Unknown or incomplete command for interface " + args[0] + ".";
-        });
-
-    management_interface_.register_command("no",
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 3) return "Error: Incomplete 'no' command."; // e.g. no interface <id> ...
-            std::string target_cmd = args[0]; // "interface"
-            if (target_cmd == "interface") {
-                uint32_t port_id;
-                try { port_id = std::stoul(args[1]); }
-                catch(const std::exception& e) { return "Error: Invalid interface ID for 'no interface'."; }
-
-                if (!interface_manager_.is_port_valid(port_id)) return "Error: Interface ID " + args[1] + " does not exist.";
-
-                if (args.size() > 3 && args[2] == "ip" && args[3] == "access-group") {
-                    if (args.size() < 5) return "Error: Usage: no interface <id> ip access-group <in|out>";
-                    std::string direction_str = args[4];
-                    netflow::AclDirection direction; // Corrected namespace
-                    if (direction_str == "in") direction = netflow::AclDirection::INGRESS; // Corrected namespace
-                    else if (direction_str == "out") direction = netflow::AclDirection::EGRESS; // Corrected namespace
-                    else return "Error: Invalid direction for 'no ip access-group'. Must be 'in' or 'out'.";
-
-                    if (interface_manager_.remove_acl_from_interface(port_id, direction)) {
-                        return "ACL removed from interface " + std::to_string(port_id) + " " + direction_str + ".";
-                    } else {
-                        // This might also mean no ACL was applied, which isn't strictly an error.
-                        return "Failed to remove ACL or no ACL was applied to interface " + std::to_string(port_id) + " " + direction_str + ".";
-                    }
-                }
-                // ... other 'no interface' subcommands ...
-
-    // --- IS-IS Global Configuration Commands ---
+    // IS-IS Commands
     management_interface_.register_command(
         {"configure", "router", "isis", "system-id"}, 
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing system-id value. Usage: ... system-id <SYSTEM_ID>");
-            return handle_isis_global_system_id(args); 
-        });
-
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_system_id(args); });
     management_interface_.register_command(
         {"configure", "router", "isis", "area", "add"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area add <AREA_ID>");
-            return handle_isis_global_area(args, true); 
-        });
-
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_area(args, true); });
     management_interface_.register_command(
         {"configure", "router", "isis", "area", "remove"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing area-id value. Usage: ... area remove <AREA_ID>");
-            return handle_isis_global_area(args, false); 
-        });
-
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_area(args, false); });
     management_interface_.register_command(
         {"configure", "router", "isis", "level"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing level value. Usage: ... level <l1|l2|l1-l2>");
-            return handle_isis_global_level(args); 
-        });
-
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_level(args); });
     management_interface_.register_command(
         {"configure", "router", "isis", "overload-bit", "set"},
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing on/off value. Usage: ... overload-bit set <on|off>");
-            return handle_isis_global_overload_bit(args); 
-        });
-
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_overload_bit(args); });
     management_interface_.register_command(
         {"configure", "router", "isis", "enable"},
-        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(true); });
-
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_enable(true); });
     management_interface_.register_command(
         {"configure", "router", "isis", "shutdown"},
-        [this](const std::vector<std::string>& args) -> std::string { return handle_isis_global_enable(false); });
+        [this](const std::vector<std::string>& args) { return this->handle_isis_global_enable(false); });
 
-    // --- IS-IS Interface Configuration Commands ---
     management_interface_.register_command(
         {"configure", "interface", "isis", "enable"}, 
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing interface ID for 'isis enable'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            std::vector<std::string> level_args; 
-            if (args.size() > 1) level_args.push_back(args[1]); // Optional level
-            return handle_isis_interface_enable(if_id, level_args);
+        [this](const std::vector<std::string>& args) { 
+            if (args.empty()) return "Error: Missing interface ID.";
+            uint32_t if_id; try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
+            return this->handle_isis_interface_enable(if_id, std::vector<std::string>(args.begin() + 1, args.end()));
         });
-
     management_interface_.register_command(
         {"configure", "interface", "isis", "disable"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.empty()) return std::string("Error: Missing interface ID for 'isis disable'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_disable(if_id);
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "circuit-type"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or circuit type for 'isis circuit-type'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_circuit_type(if_id, {args[1]});
-        });
-    
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "hello-interval"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or interval for 'isis hello-interval'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_hello_interval(if_id, {args[1]});
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "hello-multiplier"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or multiplier for 'isis hello-multiplier'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_hello_multiplier(if_id, {args[1]});
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "priority"}, 
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or priority for 'isis priority'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            return handle_isis_interface_priority(if_id, {args[1]});
-        });
-
-    // --- Show IS-IS Commands ---
-    management_interface_.register_command({"show", "isis", "summary"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_summary_cli(args); });
-    management_interface_.register_command({"show", "isis", "neighbors"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_neighbors_cli(args); });
-    management_interface_.register_command({"show", "isis", "interface"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_interface_cli(args); });
-    management_interface_.register_command({"show", "isis", "database"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_database_cli(args); });
-    management_interface_.register_command({"show", "isis", "routes"},
-        [this](const std::vector<std::string>& args) -> std::string { return show_isis_routes_cli(args); });
-            }
-            // ... other 'no' commands ...
-            return "Error: 'no " + args[0] + "' command not fully implemented or unknown structure.";
-        });
-
-    management_interface_.register_command("acl", [this](const std::vector<std::string>& args) -> std::string {
-        return handle_acl_command(args);
-    });
-
-    // ... (other registrations: mac, spanning-tree, lacp, lldp global, help, clear) ...
-    management_interface_.register_command( "clear",  [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "";});
-    management_interface_.register_command("mac", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "mac placeholder"; });
-    management_interface_.register_command("spanning-tree", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "stp placeholder"; });
-    management_interface_.register_command("lacp", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "lacp placeholder"; });
-    management_interface_.register_command("lldp", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "lldp placeholder"; });
-    management_interface_.register_command("help", [this](const std::vector<std::string>& args) -> std::string { /* ... */ return "help placeholder"; });
-
-    // --- IS-IS Global Configuration Commands ---
-    management_interface_.register_command(
-        {"configure", "router", "isis", "system-id", "<SYSTEM_ID>"},
-        [this](const std::vector<std::string>& args_full) { 
-            if (args_full.size() != 5) return "Error: Usage: configure router isis system-id XX.XXXX.XXXX.XXXX.XX";
-            return handle_isis_global_system_id({args_full[4]}); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "area", "add", "<AREA_ID>"},
-        [this](const std::vector<std::string>& args_full) { 
-            if (args_full.size() != 6) return "Error: Usage: configure router isis area add <AREA_ID>";
-            return handle_isis_global_area({args_full[5]}, true); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "area", "remove", "<AREA_ID>"},
-        [this](const std::vector<std::string>& args_full) { 
-            if (args_full.size() != 6) return "Error: Usage: configure router isis area remove <AREA_ID>";
-            return handle_isis_global_area({args_full[5]}, false); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "level", "<l1|l2|l1-l2>"},
-        [this](const std::vector<std::string>& args_full) { 
-            if (args_full.size() != 5) return "Error: Usage: configure router isis level <l1|l2|l1-l2>";
-            return handle_isis_global_level({args_full[4]}); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "overload-bit", "set", "<on|off>"},
-        [this](const std::vector<std::string>& args_full) { 
-            if (args_full.size() != 7) return "Error: Usage: configure router isis overload-bit set <on|off>";
-            return handle_isis_global_overload_bit({args_full[6]}); 
-        });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "enable"},
-        [this](const std::vector<std::string>& args_full) { return handle_isis_global_enable(true); });
-
-    management_interface_.register_command(
-        {"configure", "router", "isis", "shutdown"},
-        [this](const std::vector<std::string>& args_full) { return handle_isis_global_enable(false); });
-
-    // --- IS-IS Interface Configuration Commands ---
-    // Key: {"configure", "interface", <interface_id_val_from_user>, "isis", "enable"}
-    // Lambda args: [level_opt]
-    // This structure is problematic for map key. Instead, register fixed part, parse ID in handler.
-    // Corrected structure: Key is fixed command prefix. Handler parses ID and further args.
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "enable"}, // Args to lambda: {<id>, [level_opt]}
-        [this](const std::vector<std::string>& args) -> std::string { 
-            if (args.empty()) return std::string("Error: Missing interface ID for 'isis enable'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
-            std::vector<std::string> level_args; 
-            if (args.size() > 1) level_args.push_back(args[1]);
-            return this->handle_isis_interface_enable(if_id, level_args);
-        });
-
-    management_interface_.register_command(
-        {"configure", "interface", "isis", "disable"}, // Args to lambda: {<id>}
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.empty()) return std::string("Error: Missing interface ID for 'isis disable'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+        [this](const std::vector<std::string>& args) {
+            if (args.empty()) return "Error: Missing interface ID.";
+            uint32_t if_id; try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
             return this->handle_isis_interface_disable(if_id);
         });
-
     management_interface_.register_command(
-        {"configure", "interface", "isis", "circuit-type"}, // Args to lambda: {<id>, <type>}
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or circuit type for 'isis circuit-type'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+        {"configure", "interface", "isis", "circuit-type"}, 
+        [this](const std::vector<std::string>& args) {
+            if (args.size() < 2) return "Error: Missing interface ID or circuit type.";
+            uint32_t if_id; try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
             return this->handle_isis_interface_circuit_type(if_id, {args[1]});
         });
-    
     management_interface_.register_command(
-        {"configure", "interface", "isis", "hello-interval"}, // Args to lambda: {<id>, <seconds>}
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or interval for 'isis hello-interval'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+        {"configure", "interface", "isis", "hello-interval"}, 
+        [this](const std::vector<std::string>& args) {
+            if (args.size() < 2) return "Error: Missing interface ID or interval.";
+            uint32_t if_id; try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
             return this->handle_isis_interface_hello_interval(if_id, {args[1]});
         });
-
     management_interface_.register_command(
-        {"configure", "interface", "isis", "hello-multiplier"}, // Args to lambda: {<id>, <count>}
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or multiplier for 'isis hello-multiplier'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+        {"configure", "interface", "isis", "hello-multiplier"}, 
+        [this](const std::vector<std::string>& args) {
+            if (args.size() < 2) return "Error: Missing interface ID or multiplier.";
+            uint32_t if_id; try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
             return this->handle_isis_interface_hello_multiplier(if_id, {args[1]});
         });
-
     management_interface_.register_command(
-        {"configure", "interface", "isis", "priority"}, // Args to lambda: {<id>, <value>}
-        [this](const std::vector<std::string>& args) -> std::string {
-            if (args.size() < 2) return std::string("Error: Missing interface ID or priority for 'isis priority'.");
-            uint32_t if_id; 
-            try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
-            catch (const std::exception& e) { return std::string("Error: Invalid interface ID: ") + args[0]; }
+        {"configure", "interface", "isis", "priority"}, 
+        [this](const std::vector<std::string>& args) {
+            if (args.size() < 2) return "Error: Missing interface ID or priority.";
+            uint32_t if_id; try { if_id = static_cast<uint32_t>(std::stoul(args[0])); } 
+            catch (const std::exception& e) { return "Error: Invalid interface ID: " + args[0]; }
             return this->handle_isis_interface_priority(if_id, {args[1]});
         });
 
-    // --- Show IS-IS Commands ---
     management_interface_.register_command({"show", "isis", "summary"},
-        [this](const std::vector<std::string>& args_full) { return show_isis_summary_cli(std::vector<std::string>(args_full.begin() + 2, args_full.end())); });
+        [this](const std::vector<std::string>& args) { return this->show_isis_summary_cli(args); });
     management_interface_.register_command({"show", "isis", "neighbors"},
-        [this](const std::vector<std::string>& args_full) { return show_isis_neighbors_cli(std::vector<std::string>(args_full.begin() + 2, args_full.end())); });
+        [this](const std::vector<std::string>& args) { return this->show_isis_neighbors_cli(args); });
     management_interface_.register_command({"show", "isis", "interface"},
-        [this](const std::vector<std::string>& args_full) { return show_isis_interface_cli(std::vector<std::string>(args_full.begin() + 2, args_full.end())); });
+        [this](const std::vector<std::string>& args) { return this->show_isis_interface_cli(args); });
     management_interface_.register_command({"show", "isis", "database"},
-        [this](const std::vector<std::string>& args_full) { return show_isis_database_cli(std::vector<std::string>(args_full.begin() + 2, args_full.end())); });
+        [this](const std::vector<std::string>& args) { return this->show_isis_database_cli(args); });
     management_interface_.register_command({"show", "isis", "routes"},
-        [this](const std::vector<std::string>& args_full) { return show_isis_routes_cli(std::vector<std::string>(args_full.begin() + 2, args_full.end())); });
-
+        [this](const std::vector<std::string>& args) { return this->show_isis_routes_cli(args); });
 }
-
-// ... (rest of file as before) ...
-std::optional<std::string> ManagementService::add_route(const IpAddress& n, const IpAddress& m, const IpAddress& nh, uint32_t id, int met){ /* body from previous version or new */ return std::nullopt;}
-std::optional<std::string> ManagementService::remove_route(const IpAddress& n, const IpAddress& m){ /* body from previous version or new */ return std::nullopt;}
-std::optional<std::string> ManagementService::add_interface_ip(uint32_t id, const IpAddress& ip, const IpAddress& mask){ /* body from previous version or new */ return std::nullopt;}
-std::optional<std::string> ManagementService::remove_interface_ip(uint32_t id, const IpAddress& ip, const IpAddress& mask){ /* body from previous version or new */ return std::nullopt;}
 
 } // namespace netflow

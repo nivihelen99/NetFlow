@@ -82,9 +82,9 @@ public:
 
 private:
     // Helper to parse relevant TLVs from an LSP.
-    void parse_lsp_links(const LinkStatePdu& lsp, 
+    void parse_lsp_links(const Lsp& lsp, // Changed LinkStatePdu to Lsp
                          std::map<SystemID, uint32_t>& out_neighbors, 
-                         std::vector<IpReachabilityInfo>& out_ip_prefixes) const;
+                         std::vector<ExtendedIpReachabilityEntry>& out_ip_prefixes) const; // Changed IpReachabilityInfo
 
     // Helper to convert prefix length to subnet mask
     IpAddress calculate_subnet_mask(uint8_t prefix_len) const;
@@ -99,7 +99,7 @@ private:
     std::vector<DirectNeighborInfo> get_direct_neighbor_info(const SystemID& neighbor_id) const;
 
     // Helper to parse multicast specific TLVs from an LSP.
-    void parse_lsp_multicast_info(const LinkStatePdu& lsp,
+    void parse_lsp_multicast_info(const Lsp& lsp, // Changed LinkStatePdu to Lsp
                                   bool& out_is_multicast_capable,
                                   std::vector<MulticastGroupAddressInfo>& out_advertised_groups) const;
 
