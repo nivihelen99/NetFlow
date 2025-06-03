@@ -31,25 +31,13 @@ TEST_F(BufferPoolTest, AllocateFromEmptyPool) {
     // So, the actual capacity of the PacketBuffer should be at least min_payload_capacity + initial_headroom.
     CheckBufferProperties(buf, requested_capacity + requested_headroom, requested_headroom, 0, 1);
 
-    // Manually free for this test, assuming ref_count becomes 0.
-    // If decrement_ref returns true (was 1, now 0), then free_buffer.
-    if (buf->decrement_ref()) {
-        pool_.free_buffer(buf);
-    } else {
-        // This case should not happen if allocate_buffer sets ref_count to 1
-        // and nothing else incremented it.
-        FAIL() << "Buffer ref_count was not 1 after allocation and single decrement.";
-    }
+    pool_.free_buffer(buf);
 }
 
 TEST_F(BufferPoolTest, FreeAndReallocate) {
     netflow::PacketBuffer* buf1 = pool_.allocate_buffer(100, 10);
     ASSERT_NE(buf1, nullptr);
-    if (buf1->decrement_ref()) { // ref_count becomes 0
-        pool_.free_buffer(buf1);
-    } else {
-        FAIL() << "buf1 ref_count error before freeing.";
-    }
+    pool_.free_buffer(buf1);
 
     netflow::PacketBuffer* buf2 = pool_.allocate_buffer(80, 5); // Requesting smaller capacity and headroom
     ASSERT_NE(buf2, nullptr);
@@ -60,9 +48,7 @@ TEST_F(BufferPoolTest, FreeAndReallocate) {
     EXPECT_EQ(buf1, buf2); // Buffer is reused
     CheckBufferProperties(buf2, 80 + 5, 5, 0, 1);
 
-    if (buf2->decrement_ref()) {
-        pool_.free_buffer(buf2);
-    }
+    pool_.free_buffer(buf2);
 }
 
 TEST_F(BufferPoolTest, AllocateDifferentSizes) {
@@ -72,8 +58,8 @@ TEST_F(BufferPoolTest, AllocateDifferentSizes) {
     ASSERT_NE(buf_small, nullptr);
     ASSERT_NE(buf_large, buf_small);
 
-    if (buf_large->decrement_ref()) pool_.free_buffer(buf_large); else FAIL();
-    if (buf_small->decrement_ref()) pool_.free_buffer(buf_small); else FAIL();
+    pool_.free_buffer(buf_large);
+    pool_.free_buffer(buf_small);
 
     // Pool now has a 2000-cap and a 500-cap buffer (approx sizes)
     // Request 1000. Should reuse the 2000-cap buffer.
@@ -81,13 +67,13 @@ TEST_F(BufferPoolTest, AllocateDifferentSizes) {
     ASSERT_NE(buf_medium, nullptr);
     EXPECT_EQ(buf_medium, buf_large); // Reuses the larger one
 
-    if (buf_medium->decrement_ref()) pool_.free_buffer(buf_medium); else FAIL();
+    pool_.free_buffer(buf_medium);
 }
 
 TEST_F(BufferPoolTest, NoSuitableBufferInPool) {
     netflow::PacketBuffer* buf1 = pool_.allocate_buffer(100);
     ASSERT_NE(buf1, nullptr);
-    if (buf1->decrement_ref()) pool_.free_buffer(buf1); else FAIL();
+    pool_.free_buffer(buf1);
 
     // Pool has a buffer of capacity ~100. Request a larger one.
     netflow::PacketBuffer* buf2 = pool_.allocate_buffer(200);
@@ -95,38 +81,34 @@ TEST_F(BufferPoolTest, NoSuitableBufferInPool) {
     EXPECT_NE(buf1, buf2); // New buffer should be created
     CheckBufferProperties(buf2, 200, 0, 0, 1);
 
-    if (buf2->decrement_ref()) pool_.free_buffer(buf2); else FAIL();
+    pool_.free_buffer(buf2);
 }
 
 TEST_F(BufferPoolTest, RefCountPreventsPrematureReclaim) {
-    netflow::PacketBuffer* buf1 = pool_.allocate_buffer(100);
+    netflow::PacketBuffer* buf1 = pool_.allocate_buffer(100); // pool gives buf with ref_count = 1
     ASSERT_NE(buf1, nullptr);
 
-    buf1->increment_ref(); // ref_count is now 2
+    buf1->increment_ref(); // User increments ref_count to 2, indicating another user
 
-    // This call to free_buffer will decrement ref_count to 1, but not add to available list
-    // because free_buffer is only called if decrement_ref() returned true (meaning it reached 0)
-    // The test logic should be:
-    // bool was_last_ref = buf1->decrement_ref(); // ref_count becomes 1
-    // if (was_last_ref) { pool_.free_buffer(buf1); }
-    // ASSERT_FALSE(was_last_ref); // It wasn't the last reference
-    // So, to test this, we call decrement_ref and check its return.
+    // First user is done with buf1
+    pool_.free_buffer(buf1); // Inside free_buffer, decrement_ref makes ref_count = 1. Not added to pool.
 
-    ASSERT_FALSE(buf1->decrement_ref()); // ref_count becomes 1, does not return true
-
+    // Try to allocate another buffer. Since buf1 is not in the pool (still ref_count=1),
+    // a new buffer (buf2) should be allocated or an existing different one reused.
     netflow::PacketBuffer* buf2 = pool_.allocate_buffer(100);
     ASSERT_NE(buf2, nullptr);
-    EXPECT_NE(buf1, buf2); // buf1 should still be "in use" (not in pool's available list)
+    EXPECT_NE(buf1, buf2); // buf1 should still be "in use" by the second user
 
-    ASSERT_TRUE(buf1->decrement_ref()); // ref_count becomes 0, returns true
-    pool_.free_buffer(buf1); // Now it should be returned to available list
+    // Second user is done with buf1
+    pool_.free_buffer(buf1); // Inside free_buffer, decrement_ref makes ref_count = 0. Now added to pool.
 
+    // Try to allocate another buffer. Now buf1 should be available and reused.
     netflow::PacketBuffer* buf3 = pool_.allocate_buffer(100);
     ASSERT_NE(buf3, nullptr);
     EXPECT_EQ(buf1, buf3); // buf1 is now reused
 
-    if (buf2->decrement_ref()) pool_.free_buffer(buf2); else FAIL();
-    if (buf3->decrement_ref()) pool_.free_buffer(buf3); else FAIL();
+    pool_.free_buffer(buf2); // Cleanup buf2
+    pool_.free_buffer(buf3); // Cleanup buf3 (which is buf1)
 }
 
 TEST_F(BufferPoolTest, FreeNullBuffer) {
@@ -143,11 +125,7 @@ TEST_F(BufferPoolTest, PoolMaintainsMultipleBuffers) {
     EXPECT_EQ(allocated_buffers.size(), 5); // All 5 should be distinct
 
     for (netflow::PacketBuffer* buf : allocated_buffers) {
-        if (buf->decrement_ref()) {
-            pool_.free_buffer(buf);
-        } else {
-            FAIL() << "Buffer ref_count error during cleanup.";
-        }
+        pool_.free_buffer(buf);
     }
     allocated_buffers.clear();
 
@@ -163,10 +141,6 @@ TEST_F(BufferPoolTest, PoolMaintainsMultipleBuffers) {
     EXPECT_EQ(reallocated_buffers.size(), 5);
 
     for (netflow::PacketBuffer* buf : reallocated_buffers) {
-       if (buf->decrement_ref()) {
-            pool_.free_buffer(buf);
-        } else {
-            FAIL() << "Buffer ref_count error during cleanup (reallocated).";
-        }
+       pool_.free_buffer(buf);
     }
 }

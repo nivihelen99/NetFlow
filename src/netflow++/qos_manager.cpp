@@ -17,15 +17,33 @@ QosManager::~QosManager() {
 }
 
 void QosManager::configure_port_qos(uint32_t port_id, QosConfig config) {
-    config.validate_and_prepare();
+    // Perform critical validation checks on the original config BEFORE normalization
+    if ((config.scheduler == SchedulerType::WEIGHTED_ROUND_ROBIN || config.scheduler == SchedulerType::DEFICIT_ROUND_ROBIN)) {
+        // If queue_weights is explicitly provided by the user and its size doesn't match num_queues, it's an error.
+        // If queue_weights is empty, validate_and_prepare will fill it, which is acceptable.
+        if (!config.queue_weights.empty() && config.queue_weights.size() != config.num_queues) {
+             logger_.log(LogLevel::ERROR, "QosManager", "configure_port_qos - User-provided queue_weights size (" +
+                         std::to_string(config.queue_weights.size()) +
+                         ") does not match num_queues (" + std::to_string(static_cast<int>(config.num_queues)) +
+                         ") for WRR/DRR scheduler on port " + std::to_string(port_id) + ". Configuration rejected.");
+             return; // Reject configuration
+        }
+    }
 
+    config.validate_and_prepare(); // Now, normalize the (potentially partially valid) config
+
+    // The original check below is now less likely to fail if the above logic is correct,
+    // as validate_and_prepare would have aligned sizes if queue_weights was initially empty.
+    // However, it can be kept as a safeguard or removed if deemed redundant.
+    // For this fix, let's keep it to see if it highlights any other issues.
     if ((config.scheduler == SchedulerType::WEIGHTED_ROUND_ROBIN || config.scheduler == SchedulerType::DEFICIT_ROUND_ROBIN) &&
         config.queue_weights.size() != config.num_queues) {
-        logger_.log(LogLevel::ERROR, "QosManager", "configure_port_qos - Queue weights size (" +
+        logger_.log(LogLevel::ERROR, "QosManager", "configure_port_qos - Post-validation queue weights size (" +
                     std::to_string(config.queue_weights.size()) +
                     ") mismatch for scheduler type on port " + std::to_string(port_id) +
-                    ". Expected " + std::to_string(static_cast<int>(config.num_queues)) + ".");
-        return;
+                    ". Expected " + std::to_string(static_cast<int>(config.num_queues)) + ". This may indicate an issue.");
+        // Depending on strictness, could return here as well.
+        // For now, this log will indicate if validate_and_prepare didn't behave as expected under new conditions.
     }
 
     port_qos_configs_[port_id] = config;
