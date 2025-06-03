@@ -52,6 +52,7 @@ struct ExtendedIpReachabilityTlvValue {
 // LAN Hello PDU (Level 1 and Level 2)
 struct LanHelloPdu {
     CommonPduHeader commonHeader;
+    uint16_t pduLength;
     uint8_t circuitType; // Level 1 or Level 2
     SystemID sourceId;   // SystemID of the sending IS
     uint16_t holdingTime;
@@ -64,6 +65,7 @@ struct LanHelloPdu {
 // Point-to-Point Hello PDU
 struct PointToPointHelloPdu {
     CommonPduHeader commonHeader;
+    uint16_t pduLength;
     uint8_t circuitType; // Always 0x03 for PTP? Check standard. Usually indicates L1/L2 capability.
     SystemID sourceId;
     uint16_t holdingTime;
@@ -82,7 +84,7 @@ struct LspId {
 struct LinkStatePdu {
     CommonPduHeader commonHeader; // pduType will be L1_LSP_TYPE or L2_LSP_TYPE
     // PDU Length is in commonHeader.lengthIndicator, but LSP itself has a length field too.
-    uint16_t pduLengthLsp; // Length of the LSP itself, starting from Remaining Lifetime
+    uint16_t pduLength; // Length of the LSP itself, starting from Remaining Lifetime
     uint16_t remainingLifetime;
     LspId lspId;
     uint32_t sequenceNumber;
@@ -102,6 +104,7 @@ struct LspEntry {
 // Complete Sequence Numbers PDU (CSNP)
 struct CompleteSequenceNumbersPdu {
     CommonPduHeader commonHeader; // pduType will be L1_CSNP_TYPE or L2_CSNP_TYPE
+    uint16_t pduLength;
     // PDU Length is in commonHeader.lengthIndicator
     SystemID sourceId; // SystemID + CircuitID (0 for non-broadcast)
     LspId startLspId;
@@ -116,6 +119,7 @@ struct CompleteSequenceNumbersPdu {
 // Partial Sequence Numbers PDU (PSNP)
 struct PartialSequenceNumbersPdu {
     CommonPduHeader commonHeader; // pduType will be L1_PSNP_TYPE or L2_PSNP_TYPE
+    uint16_t pduLength;
     // PDU Length is in commonHeader.lengthIndicator
     SystemID sourceId; // SystemID + CircuitID (0 for non-broadcast)
     std::vector<TLV> tlvs; // Similar to CSNP, TLV type 9 (conceptually) or direct entries.
@@ -124,6 +128,16 @@ struct PartialSequenceNumbersPdu {
 
 
 // --- Multicast TLV Value Structures ---
+
+
+// --- Utility Functions ---
+// Fletcher Checksum Calculation (ISO 9592, Annex C)
+// data: The byte array over which checksum is calculated.
+// length: Length of the data.
+// checksum_field_offset_in_data: Byte offset of the 2-byte checksum field within 'data'.
+//                                These two bytes in 'data' are treated as zero during calculation.
+uint16_t calculate_fletcher_checksum(const uint8_t* data, size_t length, size_t checksum_field_offset_in_data);
+
 
 // Value for Multicast Capability TLV (Type 230 as per isis_common.hpp example)
 // For now, its presence indicates capability. Could have flags for specific features.

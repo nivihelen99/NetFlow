@@ -339,9 +339,15 @@ void IsisManager::receive_isis_pdu(uint32_t interface_id, const MacAddress& sour
         case L1_LSP_TYPE:
         case L2_LSP_TYPE: {
             LinkStatePdu lsp;
-            if (parse_link_state_pdu(pdu_data, common_header, lsp)) {
+            // common_header is already parsed at the beginning of receive_isis_pdu.
+            // parse_link_state_pdu will re-parse it internally if its first argument is the full pdu_data.
+            // We need to ensure the common_header passed to add_or_update_lsp is the one from the start of this PDU.
+            if (parse_link_state_pdu(pdu_data, common_header /* this is an in-out, will be re-populated */, lsp)) {
                 if (lsdb_map_.count(pdu_level)) {
-                    bool changed = lsdb_map_[pdu_level]->add_or_update_lsp(lsp, interface_id, lsp.lspId.systemId, false);
+                    // Pass the original pdu_data, the common_header from the initial parse of this PDU, and the parsed lsp.
+                    // The from_neighbor_id is simplified here as the LSP's own SystemID.
+                    // In reality, it should be the SystemID of the neighbor that sent this PDU, if known from Hello.
+                    bool changed = lsdb_map_[pdu_level]->add_or_update_lsp(pdu_data, common_header, lsp, interface_id, lsp.lspId.systemId, false);
                     if (changed) {
                         trigger_spf_calculation(pdu_level);
                     }
@@ -406,8 +412,9 @@ LinkStatePdu IsisManager::generate_lsp(IsisLevel level, uint8_t lsp_number) {
     if (config_.over_load_bit_set) {
         lsp.pAttOlIsTypeBits |= (1 << 2); // Overload bit (OL)
     }
-    // TODO: Set Attached bit (ATT) if connected to another area (for L1 LSPs routing to L2)
-    // This requires more complex routing logic knowledge.
+    // TODO: Set Attached bit (ATT) if connected to another area (for L1 LSPs routing to L2).
+    // This requires routing decision logic to determine if this router is an L1/L2 border router
+    // and has reachability to other areas to advertise into L1.
     if (level == IsisLevel::L1) {
         lsp.pAttOlIsTypeBits |= 0x01; // IS-Type L1
     } else { // L2
@@ -462,11 +469,15 @@ LinkStatePdu IsisManager::generate_lsp(IsisLevel level, uint8_t lsp_number) {
     // 4. IS Reachability TLV (Type 2 or 22 for Extended) - Adjacencies
     // Standard IS Reachability (Type 2) for L1 LSPs. Extended IS Reachability (Type 22) for L2 LSPs.
     TLV is_reach_tlv;
-    if (level == IsisLevel::L1) is_reach_tlv.type = IS_REACHABILITY_TLV_TYPE; // 2
-    else is_reach_tlv.type = EXTENDED_IS_REACHABILITY_TLV_TYPE; // 22 (or 2 if not using extended)
-                                                                // For now, assume type 2 for simplicity for both.
-                                                                // A proper implementation needs type 22 for L2.
-    is_reach_tlv.type = 2; // Simplified: use IS_REACHABILITY_TLV_TYPE for both L1/L2 for now.
+    if (level == IsisLevel::L1) {
+        is_reach_tlv.type = IS_REACHABILITY_TLV_TYPE; // Standard IS Reachability (Type 2)
+    } else { // L2
+        is_reach_tlv.type = EXTENDED_IS_REACHABILITY_TLV_TYPE; // Extended IS Reachability (Type 22)
+    }
+    // Assuming the value structure (metric, neighbor ID) is compatible or handled by TLV processing.
+    // Metric width can differ: Type 2 uses 6 bits (in a byte), Type 22 uses 3 bytes.
+    // This simplified version uses a 1-byte metric placeholder for both.
+    // A full implementation would require different serialization for Type 2 vs Type 22 values if metrics are handled strictly.
 
     if (interface_manager_) {
         auto all_adjs = interface_manager_->get_all_adjacencies_by_level(level);
@@ -521,10 +532,10 @@ LinkStatePdu IsisManager::generate_lsp(IsisLevel level, uint8_t lsp_number) {
     // Calculate PDU Length (for lsp.pduLengthLsp field)
     // This is the length of the LSP starting from "Remaining Lifetime" field.
     // Common Header (8) + PDU Length (2) + Rem Lifetime (2) + LSPID (7) + Seq (4) + Checksum (2) + PATTOlIs (1) = 26 bytes fixed for LSP part.
-    // This is wrong. pduLengthLsp is total length of PDU.
+    // This is wrong. pduLengthLsp is total length of PDU. -> This field is now pduLength.
     // The PDU serialization function should correctly set this.
-    // For now, leave lsp.pduLengthLsp as 0; serialize_link_state_pdu will calculate it.
-    lsp.pduLengthLsp = 0; // Placeholder, to be filled by serializer
+    // For now, leave lsp.pduLength as 0; serialize_link_state_pdu will calculate it.
+    lsp.pduLength = 0; // Placeholder, to be filled by serializer. Field name changed from pduLengthLsp.
 
     // --- Add Multicast TLVs ---
     // 6. Multicast Capability TLV (Type 230)

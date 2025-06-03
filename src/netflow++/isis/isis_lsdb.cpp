@@ -1,8 +1,11 @@
 #include "netflow++/isis/isis_lsdb.hpp"
-#include "netflow++/isis/isis_pdu_constants.hpp" // For TLV types etc. (should be in isis_common.hpp or similar)
+#include "netflow++/isis/isis_pdu.hpp"           // For calculate_fletcher_checksum and LinkStatePdu struct
+#include "netflow++/isis/isis_common.hpp"       // For CommonPduHeader
+#include "netflow++/isis/isis_pdu_constants.hpp" // For TLV types etc.
 #include "netflow++/byte_swap.hpp" // For ntohs, htons etc.
 
 #include <iostream> // For debugging
+#include <cstring>  // For std::memcpy
 #include <algorithm> // For std::remove_if, std::sort (if needed for CSNP/PSNP ordering)
 
 // Assume isis_pdu.cpp provides serialize_link_state_pdu, serialize_csnp, serialize_psnp
@@ -37,15 +40,62 @@ LspId IsisLsdb::get_local_lsp_id(uint8_t lsp_number) const {
     return id;
 }
 
-
-bool IsisLsdb::validate_lsp_checksum(const LinkStatePdu& lsp) const {
-    // Placeholder: In a real implementation, this would compute and verify the Fletcher checksum.
-    // For now, we can assume checksum is valid or skip check for non-owned LSPs.
-    // Owned LSPs should have checksum computed upon generation.
-    if (lsp.lspId.systemId == local_system_id_) { // Own LSP
-        // TODO: Recompute checksum if needed
+// Validate LSP checksum using the raw PDU bytes.
+// common_header is the parsed common header from the raw_lsp_pdu_bytes.
+// parsed_lsp is used to get the total PDU length (parsed_lsp.pduLength) which was determined during parsing.
+bool IsisLsdb::validate_lsp_checksum(const std::vector<uint8_t>& raw_lsp_pdu_bytes,
+                                     const CommonPduHeader& common_header,
+                                     const LinkStatePdu& parsed_lsp) const {
+    if (raw_lsp_pdu_bytes.size() < (sizeof(CommonPduHeader) + sizeof(uint16_t) /*pduLength field*/)) {
+        return false; // Buffer too small
     }
-    return lsp.checksum != 0; // Basic check: non-zero checksum
+
+    // The total length of the PDU, as parsed and stored in parsed_lsp.pduLength.
+    uint16_t total_pdu_length = parsed_lsp.pduLength;
+    if (total_pdu_length > raw_lsp_pdu_bytes.size()) {
+        return false; // Claimed PDU length exceeds actual buffer size
+    }
+
+    // Checksum is calculated over the LSP content starting from 'Remaining Lifetime'.
+    // CommonPduHeader is 8 bytes. The 'pduLength' field (total LSP length) is 2 bytes.
+    // So, 'Remaining Lifetime' starts at offset 10 from the beginning of the PDU.
+    const size_t lsp_content_for_checksum_start_offset = sizeof(CommonPduHeader) + sizeof(uint16_t); // 8 + 2 = 10
+
+    if (total_pdu_length < lsp_content_for_checksum_start_offset) {
+        return false; // PDU is too short to even have content start.
+    }
+
+    size_t lsp_content_length = total_pdu_length - lsp_content_for_checksum_start_offset;
+
+    // Determine the absolute offset of the checksum field within the raw_lsp_pdu_bytes.
+    // This is: start_of_checksummable_content + offset_of_checksum_within_that_content
+    // Offset of checksum within checksummable content:
+    //   RemainingLifetime (2) + LspId (7, assuming SystemID 6 + 1 byte) + SequenceNumber (4) = 13 bytes.
+    const size_t checksum_field_offset_within_content = 2 + 7 + 4;
+                                                      // sizeof(parsed_lsp.remainingLifetime) +
+                                                      // parsed_lsp.lspId.systemId.size() + sizeof(parsed_lsp.lspId.pseudonodeIdOrLspNumber) +
+                                                      // sizeof(parsed_lsp.sequenceNumber);
+
+    size_t checksum_field_absolute_offset_in_pdu = lsp_content_for_checksum_start_offset + checksum_field_offset_within_content;
+
+    if (checksum_field_absolute_offset_in_pdu + sizeof(uint16_t) > total_pdu_length) {
+        return false; // PDU is too short to contain the checksum field where expected.
+    }
+
+    // Extract the received checksum from the raw PDU byte stream.
+    uint16_t received_checksum_be;
+    std::memcpy(&received_checksum_be, raw_lsp_pdu_bytes.data() + checksum_field_absolute_offset_in_pdu, sizeof(received_checksum_be));
+    uint16_t received_checksum_host = ntohs(received_checksum_be);
+
+    // Calculate checksum on the relevant portion of raw_lsp_pdu_bytes.
+    // The calculate_fletcher_checksum function needs offset of checksum field relative to the start of *its* data block.
+    uint16_t calculated_checksum = netflow::isis::calculate_fletcher_checksum(
+        raw_lsp_pdu_bytes.data() + lsp_content_for_checksum_start_offset,
+        lsp_content_length,
+        checksum_field_offset_within_content
+    );
+
+    return calculated_checksum == received_checksum_host;
 }
 
 void IsisLsdb::update_lsp_metadata(LsdbEntry& entry, const LinkStatePdu& lsp, uint32_t on_interface_id, std::optional<SystemID> from_neighbor_id, bool is_own) {
@@ -67,21 +117,33 @@ void IsisLsdb::update_lsp_metadata(LsdbEntry& entry, const LinkStatePdu& lsp, ui
 }
 
 
-bool IsisLsdb::add_or_update_lsp(const LinkStatePdu& received_lsp,
+bool IsisLsdb::add_or_update_lsp(const std::vector<uint8_t>& raw_pdu_data,
+                               const CommonPduHeader& common_header,
+                               const LinkStatePdu& received_lsp,
                                uint32_t on_interface_id,
                                std::optional<SystemID> from_neighbor_id,
                                bool is_own_lsp) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    if (!validate_lsp_checksum(received_lsp)) {
+    // Use received_lsp.pduLength for validation, as it's derived from the PDU's own length field.
+    if (!validate_lsp_checksum(raw_pdu_data, common_header, received_lsp)) {
         // std::cerr << "LSDB (L" << static_cast<int>(level_) << "): Invalid checksum for LSP "
         //           << system_id_to_string(received_lsp.lspId.systemId) << "-" << (int)received_lsp.lspId.pseudonodeIdOrLspNumber
         //           << std::endl;
         return false;
     }
 
-    // TODO: More validation: e.g. PDU length from common header vs LSP internal length
-    // Max age check: if received LSP has lifetime 0 but not purging, or lifetime > MAX_LSP_LIFETIME_SECONDS
+    // Note on PDU length validation:
+    // The parsing functions (e.g., parse_link_state_pdu) use the 2-byte pduLength field
+    // from the PDU body as the authoritative length for parsing.
+    // The commonHeader.lengthIndicator (1-byte) is treated as a flag (0xFF for extended length)
+    // or a short-form length, and cross-checked during initial PDU parsing stages.
+    // Thus, direct comparison between commonHeader.lengthIndicator and the 2-byte pduLength
+    // is typically handled at the PDU parsing layer rather than here in the LSDB.
+
+    // Max age check: (e.g., if received_lsp.remainingLifetime is > MAX_LSP_LIFETIME_SECONDS (typically ~1200s))
+    // This could be added here if not handled by PDU parsing/validation layer.
+    // For now, assume lifetime is within valid operational range if checksum passed.
 
     auto it = lsdb_.find(received_lsp.lspId);
     if (it != lsdb_.end()) {
@@ -204,47 +266,32 @@ void IsisLsdb::flood_lsp(const LspId& lsp_id, std::optional<uint32_t> received_o
             bool is_dis_on_this_if = isis_interface_manager_->is_elected_dis(interface_id);
             // On LANs:
             // - DIS floods to AllL1ISs/AllL2ISs.
-            // - Non-DIS floods only to DIS (unicast MAC of DIS).
-            // The received_on_interface_id_to_skip helps prevent flooding back to sender.
-            // If we are DIS, we flood to everyone except sender's interface (if that's how it's interpreted).
-            // If we are not DIS, we should only flood to the DIS.
+            bool is_dis_on_this_if = isis_interface_manager_->is_elected_dis(interface_id);
             if (is_dis_on_this_if) {
+                // DIS floods to multicast on this LAN segment
                 dest_mac = (level_ == IsisLevel::L1) ? ALL_L1_ISS_MAC : ALL_L2_ISS_MAC;
-            } else {
-                // Non-DIS only sends LSPs to the DIS.
-                // Find DIS MAC address. This is complex.
-                // For now, non-DIS will not flood here. Flooding to DIS is part of SRM.
-                // This simplified flood_lsp is more like "flood to everyone except source interface".
-                // Proper SRM (Send Routing Message) / SBM (Send Broadcast Message) is more complex.
-                // Let's assume for now non-DIS does not use this generic flood_lsp for LSPs from others,
-                // but sends them to DIS via a more targeted mechanism if needed (e.g. after CSNP processing).
-                // Or, if it's our own LSP, non-DIS sends it to DIS.
+            } else { // Not DIS on this LAN segment
                 if (entry.own_lsp) {
-                    // Get DIS MAC address from IsisInterfaceManager
-                    // This is still tricky. For now, let's assume non-DIS also multicasts if it has to flood.
-                    // Standard: Non-DIS sends LSPs to DIS. DIS floods them.
-                    // This simple flood_lsp might be mostly for DIS or P2P.
-                    // A non-DIS router would typically send its own LSP to the DIS.
-                    // If this LSP is not its own, a non-DIS usually doesn't flood it further on that segment.
-                    if (!entry.own_lsp) continue; // Non-DIS doesn't flood others' LSPs on LAN.
-                    
-                    // If own LSP, send to DIS. Need DIS MAC.
-                    // For now, let non-DIS also multicast as a simplification.
-                    dest_mac = (level_ == IsisLevel::L1) ? ALL_L1_ISS_MAC : ALL_L2_ISS_MAC;
-
-                } else { // Not our LSP and we are not DIS
+                    // Non-DIS sending its own LSP: send unicast to DIS
+                    std::optional<MacAddress> dis_mac = isis_interface_manager_->get_dis_mac_address(interface_id);
+                    if (dis_mac.has_value()) {
+                        dest_mac = dis_mac.value();
+                    } else {
+                        // No DIS known on this segment, or error. Cannot send own LSP.
+                        // std::cout << "LSDB (L" << static_cast<int>(level_) << "): Non-DIS on LAN " << interface_id << " cannot find DIS MAC to flood own LSP." << std::endl;
+                        continue; // Skip flooding on this interface
+                    }
+                } else {
+                    // Non-DIS does not flood LSPs received from others on a LAN segment.
                     continue; 
                 }
             }
-        } else { // P2P
-            // On P2P, flood to the neighbor.
-            // The P2P link usually has only one active adjacency.
-            // Destination MAC should be multicast or specific neighbor MAC if known.
-            dest_mac = if_config_opt->p2p_destination_mac; // Use configured or default (L1/L2 ISs)
-            if (level_ == IsisLevel::L1) dest_mac = ALL_L1_ISS_MAC;
-            else if (level_ == IsisLevel::L2) dest_mac = ALL_L2_ISS_MAC;
-            // If L1_L2, send based on some logic, or send two if PDU is level-specific.
-            // Our LSDB is per-level, so the PDU is for that level.
+        } else { // Point-to-Point interface
+            // Use level-appropriate multicast or configured unicast MAC from interface config for P2P.
+            // The p2p_destination_mac in IsisInterfaceConfig could be used if set to unicast.
+            // For now, always use multicast for P2P flooding. (This could be refined to use adj.neighbor_mac_address if P2P and unicast preferred)
+            dest_mac = (level_ == IsisLevel::L1) ? ALL_L1_ISS_MAC : ALL_L2_ISS_MAC;
+            // If interface is L1_L2, PDU level determines correct multicast.
         }
         
         // std::cout << "LSDB (L" << static_cast<int>(level_) << "): Flooding LSP " << system_id_to_string(lsp_id.systemId) << "-" << (int)lsp_id.pseudonodeIdOrLspNumber
@@ -383,15 +430,37 @@ void IsisLsdb::handle_received_csnp(const CompleteSequenceNumbersPdu& csnp, uint
     }
 
     // Send full LSPs for entries neighbor needs (those we have newer or they are missing)
-    // This part of CSNP/PSNP interaction is complex. Typically, if CSNP shows I have a newer LSP,
-    // the other side might request it via PSNP. Or I might proactively send it.
-    // For now, if CSNP processing indicates neighbor needs our LSP, send the full LSP.
-    for (const auto& entry_summary : lsp_entries_to_send) {
-        auto lsp_to_send_it = lsdb_.find(entry_summary.lspId);
-        if (lsp_to_send_it != lsdb_.end()) {
-            // std::cout << "LSDB (L" << static_cast<int>(level_) << "): Sending full LSP " << system_id_to_string(entry_summary.lspId.systemId) << " to " << system_id_to_string(from_neighbor_id) << std::endl;
-            std::vector<uint8_t> pdu_bytes = serialize_link_state_pdu(lsp_to_send_it->second.lsp);
-            send_pdu_callback_(on_interface_id, neighbor_mac, pdu_bytes);
+    if (!lsp_entries_to_send.empty()) {
+        auto if_config_opt = isis_interface_manager_->get_interface_config(on_interface_id);
+        bool on_lan = if_config_opt && if_config_opt->circuit_type == CircuitType::BROADCAST;
+        bool am_dis_on_lan = on_lan && isis_interface_manager_->is_elected_dis(on_interface_id);
+
+        for (const auto& entry_summary : lsp_entries_to_send) {
+            auto lsp_to_send_it = lsdb_.find(entry_summary.lspId);
+            if (lsp_to_send_it == lsdb_.end()) continue;
+
+            const LinkStatePdu& lsp_to_send = lsp_to_send_it->second.lsp;
+            std::vector<uint8_t> pdu_bytes = serialize_link_state_pdu(lsp_to_send);
+
+            if (on_lan) {
+                if (am_dis_on_lan) {
+                    // DIS floods to the LAN. flood_lsp will handle multicast address and skipping source interface.
+                    // std::cout << "LSDB (L" << static_cast<int>(level_) << "): DIS flooding needed LSP " << system_id_to_string(lsp_to_send.lspId.systemId) << " on if " << on_interface_id << std::endl;
+                    flood_lsp(lsp_to_send.lspId, on_interface_id);
+                } else {
+                    // Not DIS on this LAN. Send unicast to DIS.
+                    std::optional<MacAddress> dis_mac = isis_interface_manager_->get_dis_mac_address(on_interface_id);
+                    if (dis_mac.has_value()) {
+                        // std::cout << "LSDB (L" << static_cast<int>(level_) << "): Non-DIS sending needed LSP " << system_id_to_string(lsp_to_send.lspId.systemId) << " to DIS (" << dis_mac.value().to_string() << ") on if " << on_interface_id << std::endl;
+                        send_pdu_callback_(on_interface_id, dis_mac.value(), pdu_bytes);
+                    } else {
+                        // std::cout << "LSDB (L" << static_cast<int>(level_) << "): Non-DIS on LAN " << on_interface_id << " but no DIS MAC to send needed LSP " << system_id_to_string(lsp_to_send.lspId.systemId) << std::endl;
+                    }
+                }
+            } else { // Point-to-Point: send directly to neighbor who sent CSNP
+                // std::cout << "LSDB (L" << static_cast<int>(level_) << "): P2P sending needed LSP " << system_id_to_string(lsp_to_send.lspId.systemId) << " to " << system_id_to_string(from_neighbor_id) << " on if " << on_interface_id << std::endl;
+                send_pdu_callback_(on_interface_id, neighbor_mac, pdu_bytes);
+            }
         }
     }
 }
@@ -653,8 +722,7 @@ bool IsisLsdb::originate_lsp_purge(const LspId& lsp_id) {
     LinkStatePdu purge_lsp = current_entry.lsp; // Copy existing LSP
     purge_lsp.remainingLifetime = htons(0);     // Set lifetime to 0
     purge_lsp.sequenceNumber = htonl(ntohl(purge_lsp.sequenceNumber) + 1); // Increment sequence number
-    // TODO: Recompute checksum for purge_lsp
-    // For now, assume checksum will be handled by serialization or is not strictly checked by others for purges.
+    // Checksum for purge_lsp is handled by serialize_link_state_pdu when raw_pdu_data is created.
     
     // Add this purge LSP to LSDB. is_own_lsp should be true if we are originating the purge for an LSP we "own"
     // or if we are taking responsibility for purging an expired one.
@@ -664,7 +732,60 @@ bool IsisLsdb::originate_lsp_purge(const LspId& lsp_id) {
     // This is complex. A simpler model: if it's not our systemID, is_own_lsp is false even for purge.
     // But we still need to flood it.
     bool am_i_originator_of_this_lsp_id = (lsp_id.systemId == local_system_id_);
-    return add_or_update_lsp(purge_lsp, 0, std::nullopt, am_i_originator_of_this_lsp_id);
+
+    // Serialize the purge_lsp to get raw_pdu_data and common_header
+    // Common PDU Header fields for the purge_lsp
+    CommonPduHeader lsp_common_header;
+    lsp_common_header.intradomainRoutingProtocolDiscriminator = 0x83;
+    lsp_common_header.versionProtocolIdExtension = 1;
+    lsp_common_header.version = 1;
+    lsp_common_header.idLength = 0; // 6-byte SystemID
+    lsp_common_header.pduType = purge_lsp.commonHeader.pduType; // Preserve original PDU type (L1 or L2)
+    lsp_common_header.maxAreaAddresses = purge_lsp.commonHeader.maxAreaAddresses; // Preserve
+    // lengthIndicator will be set by serialize_link_state_pdu
+
+    // The checksum for purge_lsp will be calculated by serialize_link_state_pdu.
+    // The pduLength for purge_lsp will also be calculated by serialize_link_state_pdu.
+    // Ensure the LinkStatePdu passed to serialize_link_state_pdu has its own pduLength field correctly set
+    // if serialize_link_state_pdu uses it as an input for its own length calculation.
+    // Our current serialize_link_state_pdu calculates total length and writes it to pdu.pduLength field in buffer.
+
+    std::vector<uint8_t> raw_pdu_data = serialize_link_state_pdu(purge_lsp);
+    // After serialization, the common_header.lengthIndicator in raw_pdu_data[1] is set.
+    // We need to pass a CommonPduHeader object to add_or_update_lsp.
+    // For consistency, let's re-parse it from the raw_pdu_data or ensure lsp_common_header is updated.
+    // The serialize_link_state_pdu function updates commonHeader.lengthIndicator (buffer[1])
+    // and pdu.pduLength (the 2-byte field).
+    // We can construct the CommonPduHeader to pass based on this.
+    // The CommonPduHeader struct within purge_lsp itself is what serialize_common_pdu_header uses.
+    // Let's ensure that CommonPduHeader inside purge_lsp is updated, or reconstruct one.
+    // For simplicity, the `purge_lsp.commonHeader` is used by `serialize_link_state_pdu`.
+    // The `add_or_update_lsp` needs a `CommonPduHeader` that matches the *start* of `raw_pdu_data`.
+    // `serialize_link_state_pdu` prepends a common header. So, `purge_lsp.commonHeader` is the one to use.
+    // We need to ensure its lengthIndicator is correct if add_or_update_lsp uses it before validation.
+    // The `validate_lsp_checksum` uses `parsed_lsp.pduLength`, which is fine.
+    // The `add_or_update_lsp` itself doesn't directly use `common_header.lengthIndicator` for validation before `validate_lsp_checksum`.
+
+    // Re-populate CommonPduHeader from the serialized PDU to be safe, or ensure it's consistent.
+    // The `purge_lsp.commonHeader` should be accurate enough as it was used for serialization.
+    // The lengthIndicator in it might be 0 initially, but serialize_link_state_pdu updates the actual buffer.
+    // The `add_or_update_lsp` needs a CommonPduHeader reflecting the true start of the PDU.
+    // The `purge_lsp.commonHeader` is the source for the header written by `serialize_link_state_pdu`.
+    // Its lengthIndicator field will be what was in `purge_lsp.commonHeader.lengthIndicator` when `serialize_common_pdu_header` was called by `serialize_link_state_pdu`.
+    // This should be okay because `validate_lsp_checksum` uses the 2-byte PDU length from the body.
+
+    // Create a new CommonPduHeader for the call, matching what was serialized.
+    CommonPduHeader header_for_add = purge_lsp.commonHeader; // Copy basic fields
+    if (!raw_pdu_data.empty() && raw_pdu_data.size() >= 2) { // Basic check for lengthIndicator presence
+         header_for_add.lengthIndicator = raw_pdu_data[1]; // Get actual lengthIndicator from serialized buffer
+    } else {
+        // This case should not happen if serialization is correct.
+        // Handle error or default. For now, assume serialization produced valid data.
+        header_for_add.lengthIndicator = 0; // Fallback, though likely problematic
+    }
+
+
+    return add_or_update_lsp(raw_pdu_data, header_for_add, purge_lsp, 0, std::nullopt, am_i_originator_of_this_lsp_id);
 }
 
 bool IsisLsdb::regenerate_own_lsp(uint8_t lsp_number) {
@@ -700,13 +821,25 @@ bool IsisLsdb::regenerate_own_lsp(uint8_t lsp_number) {
         new_own_lsp.sequenceNumber = htonl(1); // Initial sequence number
     }
     new_own_lsp.remainingLifetime = htons(LSP_MAX_AGE_SECONDS); // Give it full lifetime initially. Or configured default.
-    // TODO: Recompute checksum for new_own_lsp
+    // Checksum and PDU length are handled by serialize_link_state_pdu.
 
     // std::cout << "LSDB (L" << static_cast<int>(level_) << "): Regenerated own LSP "
     //           << system_id_to_string(new_own_lsp.lspId.systemId) << "-" << (int)new_own_lsp.lspId.pseudonodeIdOrLspNumber
     //           << " New Seq: " << ntohl(new_own_lsp.sequenceNumber) << std::endl;
 
-    return add_or_update_lsp(new_own_lsp, 0, std::nullopt, true);
+    // Serialize the new_own_lsp to get raw_pdu_data
+    // The commonHeader within new_own_lsp will be used by serialize_link_state_pdu
+    std::vector<uint8_t> raw_pdu_data = serialize_link_state_pdu(new_own_lsp);
+
+    // Similar to originate_lsp_purge, create a CommonPduHeader for the call
+    CommonPduHeader header_for_add = new_own_lsp.commonHeader;
+    if (!raw_pdu_data.empty() && raw_pdu_data.size() >= 2) {
+         header_for_add.lengthIndicator = raw_pdu_data[1];
+    } else {
+        header_for_add.lengthIndicator = 0; // Fallback
+    }
+
+    return add_or_update_lsp(raw_pdu_data, header_for_add, new_own_lsp, 0, std::nullopt, true);
 }
 
 
@@ -746,6 +879,7 @@ static void serialize_lsp_id(std::vector<uint8_t>& buffer, const LspId& id) {
 } // namespace netflow
 
 // Constants that might be needed by isis_pdu.cpp if it handles LSP_ENTRIES_TLV_TYPE
-#ifndef LSP_ENTRIES_TLV_TYPE
-#define LSP_ENTRIES_TLV_TYPE 9 // Standard type for "LSP Entries" in SNPs (though sometimes implemented directly)
-#endif
+// This is now defined in isis_common.hpp
+// #ifndef LSP_ENTRIES_TLV_TYPE
+// #define LSP_ENTRIES_TLV_TYPE 9
+// #endif
