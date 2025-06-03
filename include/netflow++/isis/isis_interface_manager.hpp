@@ -81,6 +81,7 @@ struct IsisAdjacency {
     uint32_t neighbor_extended_local_circuit_id = 0; // Neighbor's ELCID, learned from their Hello
     bool neighbor_elcid_known = false;               // Flag indicating if neighbor's ELCID has been learned
     AdjacencyStateReportedByNeighbor reported_state_by_neighbor = AdjacencyStateReportedByNeighbor::UNKNOWN; // State of our adj as reported by neighbor in their P2P Hello TLV
+    std::optional<std::array<uint8_t, 7>> neighbor_learned_lan_id{}; // LAN ID learned from neighbor's Hello (for LAN circuits)
 };
 
 struct IsisInterfaceState {
@@ -91,9 +92,8 @@ struct IsisInterfaceState {
     // For now, assume one adjacency object per neighbor system ID, level_established indicates L1/L2/Both.
     std::map<SystemID, IsisAdjacency> adjacencies{};
     bool is_dis = false; // If this system is DIS for this LAN segment
-    SystemID current_dis_lan_id{}; // SystemID (6 bytes) + Pseudonode ID (1 byte)
+    std::array<uint8_t, 7> current_dis_lan_id{}; // SystemID (6 bytes) + Pseudonode ID (1 byte)
                                    // Valid if circuit_type is BROADCAST and DIS has been elected.
-                                   // Stored as 7 bytes, though SystemID type is 6. Use std::array<uint8_t, 7> for this.
     std::array<uint8_t, 7> actual_lan_id{}; // Our own LAN ID if we are DIS.
 };
 
@@ -131,6 +131,7 @@ public:
     // Query Methods
     std::vector<IsisAdjacency> get_adjacencies(uint32_t interface_id) const;
     std::vector<IsisAdjacency> get_all_adjacencies_by_level(IsisLevel level) const;
+    std::vector<uint32_t> get_interface_ids_by_level(IsisLevel level) const; // New declaration
     bool is_interface_up_and_isis_enabled(uint32_t interface_id) const;
     bool is_elected_dis(uint32_t interface_id) const;
     std::optional<std::array<uint8_t, 7>> get_lan_id(uint32_t interface_id) const;

@@ -9,6 +9,17 @@
 
 namespace netflow {
 
+// Enum to identify the source of a route
+enum class RouteSource {
+    STATIC,
+    CONNECTED, // Not used in current RoutingManager, but common
+    RIP,       // Example for future
+    OSPF,      // Example for future
+    ISIS_L1,
+    ISIS_L2,
+    BGP        // Example for future
+};
+
 // Represents an entry in the routing table
 struct RouteEntry {
     IpAddress destination_network;  // Network address (e.g., 192.168.1.0)
@@ -16,14 +27,16 @@ struct RouteEntry {
     IpAddress next_hop_ip;          // IP address of the next hop router. 0 if directly connected.
     uint32_t egress_interface_id;   // The interface ID to send the packet out on.
     int metric;                     // Cost of this route, e.g., hop count or administrative cost.
+    RouteSource source;             // Source protocol of the route
+    uint8_t admin_distance;         // Administrative distance of the route source
 
     // Constructor for convenience
-    RouteEntry(IpAddress net, IpAddress mask, IpAddress next_hop, uint32_t if_id, int m = 1)
+    RouteEntry(IpAddress net, IpAddress mask, IpAddress next_hop, uint32_t if_id, int m = 1, RouteSource src = RouteSource::STATIC, uint8_t ad = 1)
         : destination_network(net), subnet_mask(mask), next_hop_ip(next_hop),
-          egress_interface_id(if_id), metric(m) {}
+          egress_interface_id(if_id), metric(m), source(src), admin_distance(ad) {}
 
     // Default constructor (useful for vector initialization or default states)
-    RouteEntry() : destination_network(0), subnet_mask(0), next_hop_ip(0), egress_interface_id(0), metric(0) {}
+    RouteEntry() : destination_network(0), subnet_mask(0), next_hop_ip(0), egress_interface_id(0), metric(0), source(RouteSource::STATIC), admin_distance(1) {}
 };
 
 class RoutingManager {

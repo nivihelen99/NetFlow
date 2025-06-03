@@ -44,9 +44,12 @@ public:
     IsisLsdb(IsisLevel level, const SystemID& local_sys_id, IsisInterfaceManager* if_mgr);
 
     // LSP Handling Methods
-    bool add_or_update_lsp(const LinkStatePdu& received_lsp, 
-                           uint32_t on_interface_id, 
-                           std::optional<SystemID> from_neighbor_id, 
+    // Changed to match the .cpp definition which includes raw PDU data for checksum validation
+    bool add_or_update_lsp(const std::vector<uint8_t>& raw_pdu_data,
+                           const CommonPduHeader& common_header,
+                           const LinkStatePdu& received_lsp,
+                           uint32_t on_interface_id,
+                           std::optional<SystemID> from_neighbor_id,
                            bool is_own_lsp = false);
     
     void flood_lsp(const LspId& lsp_id, std::optional<uint32_t> received_on_interface_id_to_skip);
@@ -84,7 +87,10 @@ public:
 
 private:
     // Helper methods
-    bool validate_lsp_checksum(const LinkStatePdu& lsp) const; // Placeholder for checksum logic
+    // Changed to match the .cpp definition
+    bool validate_lsp_checksum(const std::vector<uint8_t>& raw_lsp_pdu_bytes,
+                               const CommonPduHeader& common_header,
+                               const LinkStatePdu& parsed_lsp) const;
     void update_lsp_metadata(LsdbEntry& entry, const LinkStatePdu& lsp, uint32_t on_interface_id, std::optional<SystemID> from_neighbor_id, bool is_own);
     MacAddress get_destination_mac_for_level() const;
 
